@@ -460,3 +460,43 @@ def test_lifecycle_rejects_numeric_strings_before_dispatch(timeout, poll_interva
 def test_constructor_normalizes_invalid_delta_settings_to_value_error(setting):
     with pytest.raises(ValueError, match="max_joint_delta"):
         NeroArm(driver=FakeNeroDriver(), max_joint_delta=setting)
+
+
+def test_huge_integer_feedback_is_runtime_error_for_all_numeric_readers():
+    huge = 10 ** 1000
+    arm, driver = make_connected_arm()
+    driver.get_joint_angles = lambda: Message([huge] * 7)
+    with pytest.raises(RuntimeError, match="feedback"):
+        arm.get_joint_positions()
+    driver.get_motor_states = lambda index: Message(SimpleNamespace(torque=huge))
+    with pytest.raises(RuntimeError, match="feedback"):
+        arm.get_joint_torques()
+    driver.flange = [huge] * 6
+    with pytest.raises(RuntimeError, match="feedback"):
+        arm.get_flange_pose()
+    with pytest.raises(RuntimeError, match="feedback"):
+        arm.get_tcp_pose()
+
+
+def test_huge_integer_joint_and_pose_commands_are_value_error():
+    huge = 10 ** 1000
+    arm, _ = make_connected_arm()
+    with pytest.raises(ValueError):
+        arm.command_joint_positions([huge] * 7)
+    with pytest.raises(ValueError):
+        arm.move_joints([huge] * 7)
+    with pytest.raises(ValueError):
+        arm.move_pose([huge] * 6)
+    with pytest.raises(ValueError):
+        arm.move_linear([huge] * 6)
+
+
+@pytest.mark.parametrize("timeout, poll_interval", [
+    (10 ** 1000, 0.001),
+    (0.01, 10 ** 1000),
+])
+def test_lifecycle_rejects_huge_integer_retry_settings_before_dispatch(timeout, poll_interval):
+    arm, driver = make_connected_arm(enabled=False)
+    with pytest.raises(ValueError):
+        arm.enable(timeout=timeout, poll_interval=poll_interval)
+    assert driver.enable_calls == 0

@@ -191,8 +191,14 @@ class NeroArm:
             raise ValueError("timeout must be nonnegative.")
         if isinstance(poll_interval, bool) or not isinstance(poll_interval, valid_number_types):
             raise ValueError("poll_interval must be positive.")
-        timeout_value = float(timeout)
-        poll_interval_value = float(poll_interval)
+        try:
+            timeout_value = float(timeout)
+        except OverflowError as exc:
+            raise ValueError("timeout must be nonnegative.") from exc
+        try:
+            poll_interval_value = float(poll_interval)
+        except OverflowError as exc:
+            raise ValueError("poll_interval must be positive.") from exc
         if not np.isfinite(timeout_value) or timeout_value < 0:
             raise ValueError("timeout must be nonnegative.")
         if not np.isfinite(poll_interval_value) or poll_interval_value <= 0:
@@ -316,7 +322,7 @@ class NeroArm:
             raise ValueError("Values must not be None.")
         try:
             array = np.asarray(values, dtype=np.float64)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("Values must be numeric.") from exc
         if array.shape != expected_shape:
             raise ValueError(f"Expected shape {expected_shape}, got {array.shape}.")
