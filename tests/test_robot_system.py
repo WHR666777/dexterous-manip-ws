@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import numpy as np
 import pytest
 
@@ -66,6 +68,7 @@ class FakeHand:
         self.fault = np.zeros(5, dtype=np.int64)
         self.disconnected = 0
         self.fail_disconnect = False
+        self.position_read_fresh_values = []
 
     def connect(self):
         if self.fail_connect:
@@ -82,6 +85,7 @@ class FakeHand:
         return self.connected
 
     def get_joint_positions_raw(self, fresh=True):
+        self.position_read_fresh_values.append(fresh)
         return np.arange(20)
 
     def get_fault(self):
@@ -97,6 +101,21 @@ def test_connect_rolls_back_arm_when_hand_fails():
     robot = RobotSystem(arm=arm, hand=FakeHand(fail_connect=True))
     with pytest.raises(RuntimeError, match="L20"):
         robot.connect()
+    assert arm.disconnected == 1
+
+
+def test_connect_reports_hand_failure_when_arm_rollback_also_fails():
+    """L20 连接与 Nero 回滚均失败时，两个设备错误都必须保留。"""
+    arm = FakeArm()
+    arm.fail_disconnect = True
+    robot = RobotSystem(arm=arm, hand=FakeHand(fail_connect=True))
+    with pytest.raises(RuntimeError) as caught:
+        robot.connect()
+    assert "L20" in str(caught.value)
+    assert "hand failed" in str(caught.value)
+    assert "Nero" in str(caught.value)
+    assert "arm disconnect failed" in str(caught.value)
+    assert "hand failed" in str(caught.value.__cause__)
     assert arm.disconnected == 1
 
 
@@ -212,6 +231,28 @@ def test_step_rejects_unorderable_unknown_keys_as_value_error():
         })
 
 
+class EnumeratesButCannotReadAction(Mapping):
+    """模拟键集合正确、但读取项目失败的畸形映射。"""
+
+    def __iter__(self):
+        return iter(("arm_joint_position", "hand_joint_position"))
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+
+def test_step_normalizes_action_lookup_failure_to_value_error_without_send():
+    """通过键检查却无法读取项目的映射不得泄漏 KeyError 或发送命令。"""
+    robot, arm, hand = connected_enabled_robot()
+    with pytest.raises(ValueError, match="Action"):
+        robot.step(EnumeratesButCannotReadAction())
+    assert arm.commands == []
+    assert hand.commands == []
+
+
 def test_step_normalizes_numeric_conversion_overflow_to_value_error():
     """超大数转换失败必须在发送前归一为 ValueError。"""
     robot, arm, hand = connected_enabled_robot()
@@ -259,6 +300,29 @@ def test_self_check_is_read_only_structured_and_prints_summary(capsys):
     assert result["nero"]["firmware_reported"] == "1.11"
     assert result["l20"]["fault"] == [0, 0, 0, 0, 0]
     assert "[OK]" in capsys.readouterr().out
+    assert arm.commands == []
+    assert hand.commands == []
+
+
+def test_self_check_reads_fresh_l20_position_and_returns_plain_values(capsys):
+    """自检必须读取新鲜 L20 位置，并把它作为普通 Python 列表返回。"""
+    robot, _, hand = connected_enabled_robot()
+    result = robot.self_check()
+    output = capsys.readouterr().out
+    assert hand.position_read_fresh_values == [True]
+    assert result["l20"]["joint_position_raw"] == list(range(20))
+    assert "[OK] L20 position" in output
+    assert hand.commands == []
+
+
+def test_self_check_reports_failed_l20_position_without_motion(capsys):
+    """畸形 L20 位置反馈必须报告 FAIL，且不能导致任何运动命令。"""
+    robot, arm, hand = connected_enabled_robot()
+    hand.get_joint_positions_raw = lambda fresh=True: [0] * 19
+    result = robot.self_check()
+    output = capsys.readouterr().out
+    assert result["l20"]["joint_position_raw"] is None
+    assert "[FAIL] L20 position" in output
     assert arm.commands == []
     assert hand.commands == []
 

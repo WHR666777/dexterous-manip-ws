@@ -24,8 +24,9 @@ class RobotSystem:
 
     Notes
     -----
-    设备对象可在无硬件单元测试中注入。构造本身不连接任一设备；调用方须先
-    调用 :meth:`connect`，再按需调用 :meth:`enable`。
+    本类固定适用于 Nero ``V111`` 七自由度机械臂和 LinkerHand ``L20``，不
+    推断其他固件、手型或自由度。设备对象可在无硬件单元测试中注入。构造本身
+    不连接任一设备；调用方须先调用 :meth:`connect`，再按需调用 :meth:`enable`。
     """
 
     def __init__(
@@ -61,20 +62,29 @@ class RobotSystem:
         Raises
         ------
         RuntimeError
-            L20 连接失败时抛出，且此前已连接的 Nero 会先断开。
+            Nero 或 L20 连接失败时抛出。L20 失败时此前已连接的 Nero 会先断开；若该回滚也
+            失败，异常文本同时包含 L20 和 Nero 的失败信息，并以 L20 失败为
+            异常链原因。
 
         Notes
         -----
-        调用顺序固定为 Nero 后 L20；不会自动使能机械臂。
+        映射 :meth:`NeroArm.connect` 后 :meth:`LinkerHandL20.connect`，调用顺序
+        固定为 Nero 后 L20；不会自动使能机械臂。
         """
         self.arm.connect()
         try:
             self.hand.connect()
-        except Exception as exc:
-            self.arm.disconnect()
+        except Exception as hand_error:
+            try:
+                self.arm.disconnect()
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "Failed to connect L20 after Nero connected: {0}; Nero "
+                    "rollback failed: {1}".format(hand_error, rollback_error),
+                ) from hand_error
             raise RuntimeError(
-                "Failed to connect L20 after Nero connected: {0}".format(exc),
-            ) from exc
+                "Failed to connect L20 after Nero connected: {0}".format(hand_error),
+            ) from hand_error
 
     def enable(self, timeout: float = 5.0) -> None:
         """使能 Nero 机械臂，不向 L20 发送命令。
@@ -88,6 +98,20 @@ class RobotSystem:
         -------
         None
             Nero 已使能后返回。
+
+        Raises
+        ------
+        ValueError
+            ``timeout`` 不是 Nero 接受的有限非负秒数时抛出。
+        RuntimeError
+            Nero 未连接时抛出。
+        TimeoutError
+            Nero 未在 ``timeout`` 内完成使能时抛出。
+
+        Notes
+        -----
+        直接映射 :meth:`NeroArm.enable`；L20 没有独立使能接口，因此不向其
+        发送任何命令。
         """
         self.arm.enable(timeout=timeout)
 
@@ -103,6 +127,20 @@ class RobotSystem:
         -------
         None
             Nero 已失能后返回。
+
+        Raises
+        ------
+        ValueError
+            ``timeout`` 不是 Nero 接受的有限非负秒数时抛出。
+        RuntimeError
+            Nero 未连接时抛出。
+        TimeoutError
+            Nero 未在 ``timeout`` 内完成失能时抛出。
+
+        Notes
+        -----
+        直接映射 :meth:`NeroArm.disable`；L20 不接收命令。失能可能导致机械臂
+        下落，调用者应先确保机械安全。
         """
         self.arm.disable(timeout=timeout)
 
@@ -121,6 +159,7 @@ class RobotSystem:
 
         Notes
         -----
+        映射 :meth:`LinkerHandL20.disconnect` 后 :meth:`NeroArm.disconnect`。
         即便前一个设备断开失败，也始终尝试另一个设备。子封装负责各自的
         幂等性，因此重复调用本方法安全。
         """
@@ -212,8 +251,10 @@ class RobotSystem:
 
         Notes
         -----
-        丢弃 Nero 子观测自身的时间戳，避免多个不一致的完成时间；L20 始终以
-        ``fresh=True`` 请求位置，不读取缓存。
+        映射 :meth:`NeroArm.get_observation` 和
+        :meth:`LinkerHandL20.get_joint_positions_raw`。丢弃 Nero 子观测自身的
+        时间戳，避免多个不一致的完成时间；L20 始终以 ``fresh=True`` 请求位置，
+        不读取缓存。
         """
         try:
             arm_observation = self._feedback_mapping(
@@ -269,8 +310,11 @@ class RobotSystem:
 
         Notes
         -----
-        两个动作在任何设备发送前均完成验证。发送顺序固定为 Nero 后 L20；若
-        Nero 发送失败，不会尝试手部发送。
+        映射 :meth:`NeroArm.validate_joint_command`、
+        :meth:`NeroArm.command_joint_positions` 和
+        :meth:`LinkerHandL20.set_joint_positions_normalized`。两个动作在任何设备
+        发送前均完成验证。发送顺序固定为 Nero 后 L20；若 Nero 发送失败，不会
+        尝试手部发送。
         """
         if not isinstance(action, Mapping):
             raise ValueError("Action must be a mapping.")
@@ -282,11 +326,16 @@ class RobotSystem:
         if action_keys != expected_keys:
             raise self._action_keys_error()
         try:
-            arm_value = self.arm.validate_joint_command(action["arm_joint_position"])
+            arm_action = action["arm_joint_position"]
+            hand_action = action["hand_joint_position"]
+        except Exception as exc:
+            raise ValueError("Action values are unavailable.") from exc
+        try:
+            arm_value = self.arm.validate_joint_command(arm_action)
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("arm_joint_position is invalid.") from exc
         try:
-            hand_value = np.asarray(action["hand_joint_position"], dtype=np.float64)
+            hand_value = np.asarray(hand_action, dtype=np.float64)
             if hand_value.shape != (20,) or not np.all(np.isfinite(hand_value)):
                 raise ValueError
             if np.any(hand_value < -1.0) or np.any(hand_value > 1.0):
@@ -313,7 +362,8 @@ class RobotSystem:
         dict[str, object]
             仅含普通 Python 值的 ``nero`` 与 ``l20`` 诊断。Nero 项含固定
             ``firmware_config``、SDK 报告的 ``firmware_reported`` 与机械臂状态；
-            L20 项含五个电机的 ``fault`` 列表。
+            L20 项含新鲜 ``joint_position_raw`` 的普通 Python 列表（位置读取
+            失败时为 ``None``）、``position_ok`` 以及五个电机的 ``fault`` 列表。
 
         Raises
         ------
@@ -322,9 +372,25 @@ class RobotSystem:
 
         Notes
         -----
-        本方法只调用状态与反馈读取接口，绝不发送运动、预设或清故障命令。每个
-        已检查类别都会打印一行 ``[OK]`` 或 ``[FAIL]`` 摘要。
+        映射 :meth:`NeroArm.is_connected`、:meth:`NeroArm.is_enabled`、
+        :meth:`NeroArm.is_ok`、:meth:`NeroArm.get_firmware`、
+        :meth:`NeroArm.get_arm_status`、:meth:`LinkerHandL20.is_connected`、
+        :meth:`LinkerHandL20.get_joint_positions_raw` 与
+        :meth:`LinkerHandL20.get_fault`。本方法只调用状态与反馈读取接口，绝不
+        发送运动、预设或清故障命令。每个已检查类别都会打印一行 ``[OK]`` 或
+        ``[FAIL]`` 摘要。L20 位置读取失败会记录 ``position_ok=False`` 并打印
+        ``[FAIL]``，不会发送运动命令。
         """
+        position = None
+        position_ok = True
+        try:
+            position = self._feedback_array(
+                self.hand.get_joint_positions_raw(fresh=True),
+                (20,), "L20 position", integer=True,
+            ).tolist()
+        except Exception:
+            position_ok = False
+
         try:
             firmware = self._feedback_mapping(
                 self.arm.get_firmware(), "Nero firmware",
@@ -347,6 +413,8 @@ class RobotSystem:
             }
             l20 = {
                 "connected": bool(self.hand.is_connected()),
+                "joint_position_raw": position,
+                "position_ok": position_ok,
                 "fault": fault,
             }
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
@@ -359,6 +427,7 @@ class RobotSystem:
             ("Nero firmware", nero["firmware_reported"] == "1.11"),
             ("Nero arm status", nero["arm_status"].get("arm_status") == 0),
             ("L20 connection", l20["connected"]),
+            ("L20 position", l20["position_ok"]),
             ("L20 fault", not any(l20["fault"])),
         )
         for label, passed in checks:
