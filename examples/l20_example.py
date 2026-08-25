@@ -14,6 +14,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import L20_CAN_CHANNEL, L20_HAND_MODEL, L20_HAND_TYPE  # noqa: E402
+from examples._safety import _disconnect_or_report  # noqa: E402
 from robot_control import L20_ACTIVE_POSITION_INDICES, LinkerHandL20  # noqa: E402
 
 
@@ -70,15 +71,18 @@ def run(
     Returns
     -------
     int
-        正常或未确认时为 ``0``；候选 raw 位置不在 ``[0, 255]`` 时为 ``2``。
+        正常或未确认时为 ``0``；仅断开失败时为 ``1``；候选 raw 位置不在
+        ``[0, 255]`` 时为 ``2``；收到 ``KeyboardInterrupt`` 时为 ``130``。
 
     Notes
     -----
     默认路径仅连接和读取 SDK 版本、20 槽位置以及五电机状态，不发送位置命令。
     执行路径只在 ``--execute`` 与精确确认均成立后，从当前反馈复制 20 槽 raw
-    位置并改变一个主动槽位；不使用张开、握拳等预设。
+    位置并改变一个主动槽位；不使用张开、握拳等预设。finally 始终尝试断开；断开
+    失败报告到标准错误流且不会掩盖已有主异常。
     """
     hand = None
+    exit_code = 0
     try:
         hand = hand_factory(hand_type=L20_HAND_TYPE, can_channel=L20_CAN_CHANNEL)
         hand.connect()
@@ -90,27 +94,25 @@ def run(
         print("L20 fault:", hand.get_fault())
         if not args.execute:
             print("Read-only mode: no L20 position command was sent.")
-            return 0
-        if not confirm():
+        elif not confirm():
             print("Execution was not confirmed: no L20 position command was sent.")
-            return 0
-
-        target = hand.get_joint_positions_raw().copy()
-        target[args.joint_index] += args.delta_raw
-        if target[args.joint_index] > 255:
-            print("Candidate L20 raw target exceeds 255: no position command was sent.")
-            return 2
-        hand.set_joint_positions_raw(target)
-        return 0
+        else:
+            target = hand.get_joint_positions_raw().copy()
+            target[args.joint_index] += args.delta_raw
+            if target[args.joint_index] > 255:
+                print("Candidate L20 raw target exceeds 255: no position command was sent.")
+                exit_code = 2
+            else:
+                hand.set_joint_positions_raw(target)
     except KeyboardInterrupt:
         print("Interrupted: no further L20 commands will be sent.")
-        return 130
+        exit_code = 130
     finally:
         if hand is not None:
-            try:
-                hand.disconnect()
-            except Exception as error:
-                print("L20 disconnect failed:", error)
+            cleanup_succeeded = _disconnect_or_report(hand, "L20")
+            if not cleanup_succeeded and sys.exc_info()[0] is None and exit_code == 0:
+                exit_code = 1
+    return exit_code
 
 
 def main() -> int:

@@ -21,6 +21,7 @@ from config import (  # noqa: E402
     NERO_CAN_INTERFACE,
     NERO_MAX_JOINT_DELTA,
 )
+from examples._safety import _disconnect_or_report  # noqa: E402
 from robot_control import (  # noqa: E402
     L20_ACTIVE_POSITION_INDICES,
     LinkerHandL20,
@@ -101,7 +102,8 @@ def run(
     Returns
     -------
     int
-        正常或未确认时为 ``0``；候选 L20 raw 位置不在 ``[0, 255]`` 时为 ``2``。
+        正常或未确认时为 ``0``；仅断开失败时为 ``1``；候选 L20 raw 位置不在
+        ``[0, 255]`` 时为 ``2``；收到 ``KeyboardInterrupt`` 时为 ``130``。
 
     Notes
     -----
@@ -109,8 +111,10 @@ def run(
     ``step``。执行路径在两个门均通过后，以当前反馈构造 action：Nero 保持当前
     七维 rad 目标，L20 只改变一个主动槽位并转换为 ``[-1, 1]`` normalized action。
     ``step`` 至多调用一次；finally 始终尝试断开，不自动 disable Nero，避免下落。
+    断开失败报告到标准错误流且不会掩盖已有主异常。
     """
     system = None
+    exit_code = 0
     try:
         system = system_factory()
         system.connect()
@@ -119,40 +123,38 @@ def run(
         print("Combined observation:", observation)
         if not args.execute:
             print("Read-only mode: no Nero enable or combined motion command was sent.")
-            return 0
-        if not confirm():
+        elif not confirm():
             print("Execution was not confirmed: no Nero enable or combined motion command was sent.")
-            return 0
-
-        system.enable()
-        observation = system.get_observation()
-        arm_target = np.asarray(observation["arm"]["joint_position"], dtype=np.float64).copy()
-        hand_raw = np.asarray(
-            observation["hand"]["joint_position_raw"], dtype=np.float64,
-        ).copy()
-        hand_raw[args.hand_joint_index] += args.hand_delta_raw
-        if hand_raw[args.hand_joint_index] > 255:
-            print("Candidate L20 raw target exceeds 255: no combined command was sent.")
-            return 2
-        hand_target = hand_raw / 255.0 * 2.0 - 1.0
-        system.step({
-            "arm_joint_position": arm_target,
-            "hand_joint_position": hand_target,
-        })
-        for _ in range(args.observation_cycles):
+        else:
+            system.enable()
             observation = system.get_observation()
-            # Future integration point: action = policy(observation)
-            print("Policy integration observation:", observation)
-        return 0
+            arm_target = np.asarray(observation["arm"]["joint_position"], dtype=np.float64).copy()
+            hand_raw = np.asarray(
+                observation["hand"]["joint_position_raw"], dtype=np.float64,
+            ).copy()
+            hand_raw[args.hand_joint_index] += args.hand_delta_raw
+            if hand_raw[args.hand_joint_index] > 255:
+                print("Candidate L20 raw target exceeds 255: no combined command was sent.")
+                exit_code = 2
+            else:
+                hand_target = hand_raw / 255.0 * 2.0 - 1.0
+                system.step({
+                    "arm_joint_position": arm_target,
+                    "hand_joint_position": hand_target,
+                })
+                for _ in range(args.observation_cycles):
+                    observation = system.get_observation()
+                    # Future integration point: action = policy(observation)
+                    print("Policy integration observation:", observation)
     except KeyboardInterrupt:
         print("Interrupted: no further combined commands will be sent.")
-        return 130
+        exit_code = 130
     finally:
         if system is not None:
-            try:
-                system.disconnect()
-            except Exception as error:
-                print("Combined system disconnect failed:", error)
+            cleanup_succeeded = _disconnect_or_report(system, "Combined system")
+            if not cleanup_succeeded and sys.exc_info()[0] is None and exit_code == 0:
+                exit_code = 1
+    return exit_code
 
 
 def main() -> int:

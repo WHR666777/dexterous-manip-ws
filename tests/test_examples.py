@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-
 import numpy as np
 import pytest
 
@@ -54,13 +52,15 @@ def test_l20_delta_has_conservative_cli_bound():
 class FakeNeroArm:
     """记录 Nero 示例所触发的公开 Wrapper 边界调用。"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, disconnect_error=None, status_error=None, **kwargs):
         self.kwargs = kwargs
         self.connected = False
         self.enable_calls = 0
         self.move_calls = []
         self.disconnect_calls = 0
         self.position = np.arange(7, dtype=np.float64) / 10.0
+        self.disconnect_error = disconnect_error
+        self.status_error = status_error
 
     def connect(self):
         self.connected = True
@@ -68,11 +68,15 @@ class FakeNeroArm:
     def disconnect(self):
         self.disconnect_calls += 1
         self.connected = False
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
 
     def is_ok(self):
         return True
 
     def get_arm_status(self):
+        if self.status_error is not None:
+            raise self.status_error
         return {"arm_status": "ready"}
 
     def get_joint_positions(self):
@@ -118,15 +122,76 @@ def test_nero_execute_moves_one_current_relative_joint_after_confirmation():
     assert arm.disconnect_calls == 1
 
 
+def test_nero_execute_rejected_confirmation_never_enables_or_moves():
+    """绕过 Nero 确认分支会在被拒绝的执行请求中使能或发送运动。"""
+    arm = FakeNeroArm()
+    args = nero_example.build_parser().parse_args(["--execute"])
+
+    assert nero_example.run(
+        args,
+        arm_factory=lambda **kwargs: arm,
+        confirm=lambda: False,
+    ) == 0
+    assert arm.enable_calls == 0
+    assert arm.move_calls == []
+    assert arm.disconnect_calls == 1
+
+
+def test_nero_rejected_wrapper_target_returns_2_and_disconnects(capsys):
+    """未处理 Nero 目标验证错误会使承诺的退出码 2 逃逸为异常。"""
+    class RejectingNeroArm(FakeNeroArm):
+        def move_joints(self, target, *, speed_percent):
+            self.move_calls.append((np.asarray(target).copy(), speed_percent))
+            raise ValueError("official joint limit rejected target")
+
+    arm = RejectingNeroArm()
+    args = nero_example.build_parser().parse_args(["--execute"])
+
+    assert nero_example.run(
+        args,
+        arm_factory=lambda **kwargs: arm,
+        confirm=lambda: True,
+    ) == 2
+    assert len(arm.move_calls) == 1
+    assert arm.disconnect_calls == 1
+    assert "Nero command rejected" in capsys.readouterr().err
+
+
+def test_nero_cleanup_failure_returns_nonzero_and_reports_to_stderr(capsys):
+    """吞掉唯一的 Nero 断开失败会误报只读运行成功。"""
+    arm = FakeNeroArm(disconnect_error=RuntimeError("Nero bus teardown failed"))
+    args = nero_example.build_parser().parse_args([])
+
+    assert nero_example.run(args, arm_factory=lambda **kwargs: arm) == 1
+    assert arm.disconnect_calls == 1
+    assert "Nero disconnect failed" in capsys.readouterr().err
+
+
+def test_nero_primary_error_is_not_masked_by_cleanup_failure(capsys):
+    """Nero 读取主错误必须保留，即使随后断开也失败。"""
+    arm = FakeNeroArm(
+        status_error=RuntimeError("primary Nero status failure"),
+        disconnect_error=RuntimeError("Nero bus teardown failed"),
+    )
+    args = nero_example.build_parser().parse_args([])
+
+    with pytest.raises(RuntimeError, match="primary Nero status failure"):
+        nero_example.run(args, arm_factory=lambda **kwargs: arm)
+    assert arm.disconnect_calls == 1
+    assert "Nero disconnect failed" in capsys.readouterr().err
+
+
 class FakeL20Hand:
     """记录 L20 示例所触发的公开 Wrapper 边界调用。"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, disconnect_error=None, version_error=None, **kwargs):
         self.kwargs = kwargs
         self.connected = False
         self.position = np.arange(20, dtype=np.int64) + 20
         self.raw_commands = []
         self.disconnect_calls = 0
+        self.disconnect_error = disconnect_error
+        self.version_error = version_error
 
     def connect(self):
         self.connected = True
@@ -134,8 +199,12 @@ class FakeL20Hand:
     def disconnect(self):
         self.disconnect_calls += 1
         self.connected = False
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
 
     def get_sdk_version(self):
+        if self.version_error is not None:
+            raise self.version_error
         return "fake-sdk"
 
     def get_joint_positions_raw(self):
@@ -191,15 +260,55 @@ def test_l20_execute_changes_one_active_position_from_feedback():
     assert hand.disconnect_calls == 1
 
 
+def test_l20_execute_rejected_confirmation_never_sends_position():
+    """绕过 L20 确认分支会在被拒绝的执行请求中发送位置。"""
+    hand = FakeL20Hand()
+    args = l20_example.build_parser().parse_args(["--execute"])
+
+    assert l20_example.run(
+        args,
+        hand_factory=lambda **kwargs: hand,
+        confirm=lambda: False,
+    ) == 0
+    assert hand.raw_commands == []
+    assert hand.disconnect_calls == 1
+
+
+def test_l20_cleanup_failure_returns_nonzero_and_reports_to_stderr(capsys):
+    """吞掉唯一的 L20 断开失败会误报只读运行成功。"""
+    hand = FakeL20Hand(disconnect_error=RuntimeError("L20 bus teardown failed"))
+    args = l20_example.build_parser().parse_args([])
+
+    assert l20_example.run(args, hand_factory=lambda **kwargs: hand) == 1
+    assert hand.disconnect_calls == 1
+    assert "L20 disconnect failed" in capsys.readouterr().err
+
+
+def test_l20_primary_error_is_not_masked_by_cleanup_failure(capsys):
+    """L20 读取主错误必须保留，即使随后断开也失败。"""
+    hand = FakeL20Hand(
+        version_error=RuntimeError("primary L20 version failure"),
+        disconnect_error=RuntimeError("L20 bus teardown failed"),
+    )
+    args = l20_example.build_parser().parse_args([])
+
+    with pytest.raises(RuntimeError, match="primary L20 version failure"):
+        l20_example.run(args, hand_factory=lambda **kwargs: hand)
+    assert hand.disconnect_calls == 1
+    assert "L20 disconnect failed" in capsys.readouterr().err
+
+
 class FakeRobotSystem:
     """记录联合示例调用的组合控制公开边界。"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, disconnect_error=None, self_check_error=None, **kwargs):
         self.kwargs = kwargs
         self.connected = False
         self.enable_calls = 0
         self.step_calls = []
         self.disconnect_calls = 0
+        self.disconnect_error = disconnect_error
+        self.self_check_error = self_check_error
 
     def connect(self):
         self.connected = True
@@ -207,8 +316,12 @@ class FakeRobotSystem:
     def disconnect(self):
         self.disconnect_calls += 1
         self.connected = False
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
 
     def self_check(self):
+        if self.self_check_error is not None:
+            raise self.self_check_error
         return {"nero": {"ok": True}, "l20": {"ok": True}}
 
     def get_observation(self):
@@ -256,6 +369,9 @@ def test_combined_execute_steps_once_with_one_feedback_relative_hand_change():
     assert system.enable_calls == 1
     assert len(system.step_calls) == 1
     action = system.step_calls[0]
+    assert set(action) == {"arm_joint_position", "hand_joint_position"}
+    assert action["arm_joint_position"].shape == (7,)
+    assert action["hand_joint_position"].shape == (20,)
     assert np.array_equal(
         action["arm_joint_position"],
         np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
@@ -264,3 +380,42 @@ def test_combined_execute_steps_once_with_one_feedback_relative_hand_change():
     expected_hand[15] += 2.0 / 255.0 * 2.0
     assert np.allclose(action["hand_joint_position"], expected_hand)
     assert system.disconnect_calls == 1
+
+
+def test_combined_execute_rejected_confirmation_never_enables_or_steps():
+    """绕过联合示例确认分支会在被拒绝的执行请求中使能或 step。"""
+    system = FakeRobotSystem()
+    args = nero_l20_example.build_parser().parse_args(["--execute"])
+
+    assert nero_l20_example.run(
+        args,
+        system_factory=lambda **kwargs: system,
+        confirm=lambda: False,
+    ) == 0
+    assert system.enable_calls == 0
+    assert system.step_calls == []
+    assert system.disconnect_calls == 1
+
+
+def test_combined_cleanup_failure_returns_nonzero_and_reports_to_stderr(capsys):
+    """吞掉唯一的联合系统断开失败会误报只读运行成功。"""
+    system = FakeRobotSystem(disconnect_error=RuntimeError("combined teardown failed"))
+    args = nero_l20_example.build_parser().parse_args([])
+
+    assert nero_l20_example.run(args, system_factory=lambda **kwargs: system) == 1
+    assert system.disconnect_calls == 1
+    assert "Combined system disconnect failed" in capsys.readouterr().err
+
+
+def test_combined_primary_error_is_not_masked_by_cleanup_failure(capsys):
+    """联合 self-check 主错误必须保留，即使随后断开也失败。"""
+    system = FakeRobotSystem(
+        self_check_error=RuntimeError("primary self-check failure"),
+        disconnect_error=RuntimeError("combined teardown failed"),
+    )
+    args = nero_l20_example.build_parser().parse_args([])
+
+    with pytest.raises(RuntimeError, match="primary self-check failure"):
+        nero_l20_example.run(args, system_factory=lambda **kwargs: system)
+    assert system.disconnect_calls == 1
+    assert "Combined system disconnect failed" in capsys.readouterr().err

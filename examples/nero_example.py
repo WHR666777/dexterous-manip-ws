@@ -19,6 +19,7 @@ from config import (  # noqa: E402
     NERO_MAX_JOINT_DELTA,
     NERO_SPEED_PERCENT,
 )
+from examples._safety import _disconnect_or_report  # noqa: E402
 from robot_control import NeroArm  # noqa: E402
 
 
@@ -73,15 +74,18 @@ def run(
     Returns
     -------
     int
-        正常或未确认时为 ``0``；当前反馈加增量越过 Wrapper 允许范围时为 ``2``。
+        正常或未确认时为 ``0``；仅断开失败时为 ``1``；当前反馈加增量被 Wrapper
+        拒绝时为 ``2``；收到 ``KeyboardInterrupt`` 时为 ``130``。
 
     Notes
     -----
     默认路径只连接和读取，不使能、不发送运动。执行路径只在 ``--execute`` 与
     精确确认均成立后使能，并以当前七维 rad 反馈为基准改变一个关节。finally
-    始终尝试断开，但不自动 disable，避免可能的机械臂下落。
+    始终尝试断开；断开失败报告到标准错误流且不会掩盖已有主异常。不自动 disable，
+    避免可能的机械臂下落。
     """
     arm = None
+    exit_code = 0
     try:
         arm = arm_factory(
             can_interface=NERO_CAN_INTERFACE,
@@ -94,26 +98,28 @@ def run(
         print("Nero joint position (rad):", arm.get_joint_positions())
         if not args.execute:
             print("Read-only mode: no Nero enable or motion command was sent.")
-            return 0
-        if not confirm():
+        elif not confirm():
             print("Execution was not confirmed: no Nero enable or motion command was sent.")
-            return 0
-
-        arm.enable()
-        target = arm.get_joint_positions().copy()
-        target[args.joint_index] += args.delta_rad
-        arm.move_joints(target, speed_percent=NERO_SPEED_PERCENT)
-        print("Nero resulting joint position (rad):", arm.get_joint_positions())
-        return 0
+        else:
+            arm.enable()
+            target = arm.get_joint_positions().copy()
+            target[args.joint_index] += args.delta_rad
+            try:
+                arm.move_joints(target, speed_percent=NERO_SPEED_PERCENT)
+            except ValueError as error:
+                print("Nero command rejected:", error, file=sys.stderr)
+                exit_code = 2
+            else:
+                print("Nero resulting joint position (rad):", arm.get_joint_positions())
     except KeyboardInterrupt:
         print("Interrupted: no further Nero commands will be sent.")
-        return 130
+        exit_code = 130
     finally:
         if arm is not None:
-            try:
-                arm.disconnect()
-            except Exception as error:
-                print("Nero disconnect failed:", error)
+            cleanup_succeeded = _disconnect_or_report(arm, "Nero")
+            if not cleanup_succeeded and sys.exc_info()[0] is None and exit_code == 0:
+                exit_code = 1
+    return exit_code
 
 
 def main() -> int:
