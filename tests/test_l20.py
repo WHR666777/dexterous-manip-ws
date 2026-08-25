@@ -218,6 +218,11 @@ def test_fake_torque_and_embedded_version_are_not_public_wrapper_methods():
     assert not hasattr(LinkerHandL20, "get_version")
 
 
+def test_unapproved_normalized_feedback_helpers_are_not_public_wrapper_methods():
+    assert not hasattr(LinkerHandL20, "get_joint_positions_normalized")
+    assert not hasattr(LinkerHandL20, "get_cached_joint_positions_normalized")
+
+
 def test_pending_cleanup_is_disconnected_rejects_connect_and_retries_only_join():
     api = FakeLinkerApi()
     api.hand.receive_thread.alive = True

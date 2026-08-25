@@ -465,52 +465,6 @@ class LinkerHandL20:
         """
         return self._get_joint_positions_raw(False)
 
-    def get_joint_positions_normalized(self, *, fresh: bool = True) -> np.ndarray:
-        """读取新鲜或缓存位置并转换为 ``[-1, 1]``。
-
-        Parameters
-        ----------
-        fresh : bool, default=True
-            ``True`` 请求官方新鲜状态，``False`` 读取 SDK 发布缓存。
-
-        Returns
-        -------
-        numpy.ndarray, shape (20,), dtype float64
-            由原始位置 ``raw / 127.5 - 1`` 得到的独立归一化副本。
-
-        Raises
-        ------
-        ValueError
-            ``fresh`` 不是布尔值时抛出。
-        RuntimeError
-            未连接或 SDK 原始位置反馈不合法时抛出。
-
-        Notes
-        -----
-        ``fresh=True`` 时的源端读取典型等待约 40 ms，封装不承诺可超过 20 Hz；
-        不推断保留槽位，它们仍按官方 20 槽位原样转换。
-        """
-        return self.get_joint_positions_raw(fresh=fresh).astype(np.float64) / 127.5 - 1.0
-
-    def get_cached_joint_positions_normalized(self) -> np.ndarray:
-        """读取 SDK 缓存位置并转换为 ``[-1, 1]``。
-
-        Returns
-        -------
-        numpy.ndarray, shape (20,), dtype float64
-            独立归一化缓存位置副本。
-
-        Raises
-        ------
-        RuntimeError
-            未连接或 SDK 缓存位置反馈不合法时抛出。
-
-        Notes
-        -----
-        映射缓存原始位置读取后使用 ``raw / 127.5 - 1``；不请求 CAN 更新。
-        """
-        return self.get_cached_joint_positions_raw().astype(np.float64) / 127.5 - 1.0
-
     def _validate_five_raw(self, values: Any, name: str) -> np.ndarray:
         return self._validate_raw_values(values, _L20_MOTOR_SHAPE, name)
 
@@ -654,12 +608,13 @@ class LinkerHandL20:
         self._require_connected().clear_faults()
 
     def get_temperature(self) -> np.ndarray:
-        """读取官方 20 槽位温度反馈。
+        """读取并验证 SDK 温度反馈序列。
 
         Returns
         -------
         numpy.ndarray, shape (20,), dtype float64
-            官方顺序的独立有限温度数据；SDK 未声明物理单位，封装不臆测单位。
+            封装依据当前固定源码行为要求并验证为有限 ``(20,)`` 序列，返回独立
+            副本。实际硬件长度、元素顺序和物理单位均待真机或厂商确认。
 
         Raises
         ------
