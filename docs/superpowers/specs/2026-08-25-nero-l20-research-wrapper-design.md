@@ -134,7 +134,7 @@ v1.11 官方 `enable()`/`disable()` 不接受 timeout。Wrapper 使用 `time.mon
 
 `emergency_stop()` 映射 `electronic_emergency_stop()`。`reset()` 不自动调用急停。README 明确说明 `disable()` 和急停后的 `reset()` 都可能导致机械臂下落。
 
-`disconnect()` 保持幂等，不隐式 disable，因为自动失能本身可能引发机械臂下落。示例在明确安全的 `finally` 流程中由用户选择 disable 后再 disconnect。
+`disconnect()` 始终调用官方幂等 `Driver.disconnect()`，即使 `is_connected()` 已为假也允许 Driver 完成内部清理；它不隐式 disable，因为自动失能本身可能引发机械臂下落。示例的 `finally` 始终尝试 disconnect，但不会自动 disable。
 
 ### 6.3 状态
 
@@ -153,9 +153,11 @@ get_state_vector() -> np.ndarray          # (7,), q only
 
 Nero v1.11 的 `get_motor_states().msg.velocity` 被官方 V111 Driver 强制置零，因此不提供 `get_joint_velocities()`，也不通过差分估计生成替代值。
 
-底层反馈未就绪时抛出 `RuntimeError`，不返回全零数组。数组统一复制为 `np.float64`，避免上层意外修改 SDK 缓存。
+底层反馈未就绪时抛出 `RuntimeError`，不返回全零数组。固定提交的 `Driver.get_joint_angles()` 会以七个零初始化聚合缓存，并在任一组成关节帧存在时返回，故规范 `get_joint_positions()` 不使用该聚合；它分别读取 `get_motor_states(1..7).msg.position`，要求七个消息及七个有限标量全部存在。`get_raw_joint_positions()` 仍供调试，但可暴露混合缺失零值或旧值的部分聚合。
 
-`get_firmware()` 映射官方同名方法并返回普通 dict，供 `self_check()` 对照固定的 `NeroFW.V111` 配置；它不根据返回值自动切换 Wrapper 固件实现。`get_arm_status()` 返回普通 dict，至少包含 SDK 实际状态字段：`ctrl_mode`、`arm_status`、`mode_feedback`、`teach_status`、`motion_status`、`trajectory_num`。错误状态按 SDK 对象可用的公开属性转换为嵌套 dict；不把 `MessageAbstract` 暴露给上层。
+同一固定提交的 flange 聚合也会在三组 pose 帧任一存在时返回。真实 v1.11 Driver 路径在读取 flange/TCP 前通过绑定提交 `8cd90f9106219a156c3c0d7e58ee36d838a89baf` 的窄私有适配器检查 `_parser.end_pose_xy`、`end_pose_zrx`、`end_pose_ryrz` 全部就绪；缺一帧即抛 `RuntimeError`。不暴露该私有 parser 形状的注入 fake 保持支持。数组统一复制为 `np.float64`，避免上层意外修改 SDK 缓存。
+
+`get_firmware()` 映射官方同名方法并返回普通 dict，供 `self_check()` 对照固定的 `NeroFW.V111` 配置；它不根据返回值自动切换 Wrapper 固件实现。`get_arm_status()` 返回普通 dict，至少包含 SDK 实际状态字段：`ctrl_mode`、`arm_status`、`mode_feedback`、`teach_status`、`motion_status`、`trajectory_num`。错误状态按 SDK 对象可用的公开属性转换为嵌套 dict；递归序列化先把 `Enum`/`IntEnum` 转为 `.value`，不把枚举或 `MessageAbstract` 暴露给上层。
 
 为调试保留：
 
@@ -261,9 +263,9 @@ LinkerHandApi(
 )
 ```
 
-官方构造函数会打开 CAN 并启动接收线程。Wrapper 不伪造 L20 enable/disable，因为 L20 官方 API 没有相应能力。
+官方构造函数会打开 CAN 并启动接收线程，且接口未激活时可能调用 `sys.exit(1)`。默认官方类路径先以 `__new__` 分配对象再调用 `__init__`；若捕获 `SystemExit`，对已出现的 `hand` 资源 best-effort 执行同一窄收尾，再抛设备命名的 `RuntimeError`。注入工厂的 `SystemExit` 也归一化，但在工厂返回前无法取得其私有部分对象。Wrapper 不伪造 L20 enable/disable，因为 L20 官方 API 没有相应能力。
 
-官方 `LinkerHandApi.close_can()` 在当前提交中引用未定义的 `modbus`。`disconnect()` 使用当前 L20 Driver 的窄兼容流程：将 `hand.running` 设为 `False`，调用 `hand.close_can_interface()`，并以有限 timeout 等待 `receive_thread`。该兼容代码集中在一个私有方法中，并在 README 标记对应官方提交和原因。
+官方 `LinkerHandApi.close_can()` 在当前提交中引用未定义的 `modbus`。`disconnect()` 使用当前 L20 Driver 的窄兼容流程：将 `hand.running` 设为 `False`，调用 `hand.close_can_interface()`，并以有限 timeout 等待 `receive_thread`。Wrapper 分别记录 bus shutdown 和 receive-thread shutdown；任一阶段失败都保留 SDK 所有权、阻止 reconnect，并在下一次有界断开中仅重试未完成阶段，直至二者完成。该兼容代码集中在私有方法中，并在 README 标记对应官方提交和原因。
 
 断开时只 shutdown 当前 `python-can` Bus，不执行 `ip link set canX down`。
 
@@ -294,9 +296,11 @@ normalized position：
 - 映射公式：`floor((action + 1) * 127.5 + 0.5)`
 - `-1 -> 0`、`0 -> 128`、`1 -> 255`
 
-`set_joint_positions_raw()` 映射官方 `finger_move(pose=...)`。`get_joint_positions_raw(fresh=True)` 映射 `get_state()`；`fresh=False` 使用 `get_state_for_pub()`。无论哪种方式，返回值必须严格验证为 shape `(20,)` 和 finite，否则抛出 `RuntimeError`。
+`set_joint_positions_raw()` 映射官方 `finger_move(pose=...)`。固定提交的低层 `send_command()` 捕获 `can.CanError` 后尝试重连，但不重新抛出也不重发失败帧；因此所有 L20 setter/preset 只能承诺 best-effort 调度，正常返回仅表示 SDK 调用返回，不证明每个 CAN 帧发送成功。
 
-官方 fresh 读取依次查询四组反馈，当前源码包含约 40 ms 的发送等待，因此不能承诺超过 20 Hz 的 fresh observation。cached 状态必须在名称和文档中明确，不冒充最新测量。
+`get_joint_positions_raw(fresh=True)` 映射 `get_state()` 请求路径；`fresh=False` 使用 `get_state_for_pub()` 直接缓存路径。无论哪种方式，返回值必须严格验证为 shape `(20,)` 和 finite，否则抛出 `RuntimeError`。这里的 `fresh=True` 只表示“调用请求刷新路径”：SDK 没有 feedback generation，且请求发送错误可能被吞掉，所以仍可能返回较旧但合法的缓存，不能把它声明成已证明的新测量。
+
+官方请求路径依次查询四组反馈，当前源码包含约 40 ms 的发送等待，因此不能承诺超过 20 Hz。cached 状态必须在名称和文档中明确；请求路径结果也不得在没有 generation 的情况下冒充已证明的最新测量。
 
 ### 7.4 其他实际支持状态
 
@@ -317,7 +321,7 @@ fault code 按官方 API 文档解释：`0` 正常、`1` 电流过载、`2` 温�
 
 L20 当前 Driver 明确标记 torque 和 embedded version 不支持，并分别返回伪造全零数组，因此 Wrapper 不提供 `set_torque()`、`get_torque()` 或 `get_version()`。`get_sdk_version()` 只返回官方 `setting.yaml` 中的 Python SDK 版本。
 
-官方没有明确 temperature 的物理单位。Wrapper 保留方法名 `get_temperature()`，docstring 和 README 将单位标记为“SDK 未说明，需真机/厂商确认”，不写成摄氏度。
+固定源码初始化四组温度缓存为 `-1`，`get_temperature()` 拼接为运行时期望 `(20,)`；Wrapper 拒绝任一 `-1` 缺失数据哨兵。实际硬件长度、元素顺序和物理单位均未由官方明确，docstring 和 README 标记为“需真机/厂商确认”，不写成摄氏度或官方 20 槽顺序。
 
 ### 7.5 Presets
 
@@ -348,7 +352,7 @@ self_check() -> dict[str, object]
 
 `disconnect()` 尝试分别释放 hand 和 arm；即使第一个释放失败也继续释放另一个，最后汇总异常。它不隐式 disable Nero。
 
-`self_check()` 只读取接口、连接状态、Nero 固件配置、Nero 状态、L20 position 和 fault，不发送运动命令。返回结构化结果并打印 `[OK]` / `[FAIL]` 摘要。
+`self_check()` 只读取接口、连接状态、Nero 固件配置、Nero 状态、L20 position 和 fault，不发送运动命令。返回结构化结果并打印健康类别的 `[OK]` / `[FAIL]` 摘要；连接健康但尚未使能的 Nero 是预动作预期状态，enabled 只以 `[INFO]` 报告，不计为失败。
 
 ### 8.2 Observation
 
@@ -386,11 +390,11 @@ self_check() -> dict[str, object]
 1. 在发送任何命令前完整验证 arm 和 hand action；
 2. 调用 `arm.command_joint_positions()`；
 3. 调用 `hand.set_joint_positions_normalized()`；
-4. 不等待动作完成。
+4. 两个 SDK 调用返回后结束，不等待动作完成。
 
-CAN 命令无法跨两个设备原子提交。如果 arm 发送成功而 hand 发送失败，Wrapper 抛出包含“arm command may already have been sent”的 `RuntimeError`，不谎称回滚成功。
+CAN 命令无法跨两个设备原子提交。若 arm 调用已返回而 hand 调用向上传播失败，Wrapper 抛出包含“arm command may already have been sent”的 `RuntimeError`，不谎称回滚成功。固定 L20 SDK 会吞掉其低层 `can.CanError`，因此 `step()` 正常返回只表示两个 SDK 调用结束，并不证明 L20 每帧已发送；被吞掉的错误无法触发部分发送 `RuntimeError`。
 
-`RobotSystem.get_observation()` 默认请求 L20 fresh position。未来需要更高控制频率时，policy rollout 可以降低 observation 频率、在一个 action chunk 内连续调用 `step()`；不把 cached position 标成 fresh feedback。
+`RobotSystem.get_observation()` 默认以 `fresh=True` 调用 L20 请求路径，但不声称反馈 generation 已更新。未来需要更高控制频率时，policy rollout 可以降低 observation 频率、在一个 action chunk 内连续调用 `step()`；直接缓存或请求失败后可能保留的旧缓存都不得标成已证明的新反馈。
 
 ## 9. 类型、注释和公开 API 文档
 
@@ -414,7 +418,7 @@ CAN 命令无法跨两个设备原子提交。如果 arm 发送成功而 hand �
 
 - `ImportError`：SDK 路径或依赖缺失
 - `ValueError`：shape、范围、finite、配置或 key 错误
-- `RuntimeError`：未连接、未使能、反馈未就绪或底层命令失败
+- `RuntimeError`：未连接、未使能、反馈未就绪或向上传播的底层调用失败；固定 L20 SDK 吞掉的 `can.CanError` 不在此列
 - `TimeoutError`：enable、disable 或线程退出超时
 
 错误信息包含设备、预期 shape/range 和实际值，例如：
@@ -431,7 +435,7 @@ Expected 7 Nero joint values in radians, got shape (6,).
 - L20 示例：读取当前 20 维位置，以当前值为基准只改变一个主动 index 的少量 raw value；不默认握拳。
 - 联合示例：默认只打印 observation；执行模式从当前 arm/hand 状态构造一次小动作，然后展示有限次数的 policy 接入循环位置。
 
-所有示例使用 `try/finally` 和 `KeyboardInterrupt` 处理。由于 Nero disable 可能导致下落，finally 中在执行 disable 前打印警告；是否自动 disable 由显式执行模式和安全配置决定，disconnect 始终尝试执行。
+所有示例使用 `try/finally` 和 `KeyboardInterrupt` 处理。由于 Nero disable 可能导致下落，示例不会在 finally 自动 disable；disconnect 始终尝试执行。公开 `build_parser()`、`confirm_execution()` 和 `main()` 使用完整 NumPy 风格 docstring，明确返回/异常、标准输入阻塞、真实 CAN 访问和双门运动安全边界。
 
 ## 12. 测试策略
 
@@ -442,12 +446,16 @@ Expected 7 Nero joint values in radians, got shape (6,).
 - Nero 7 维、finite、官方 joint limit、max delta 验证
 - `command_joint_positions()` 只发送一次且不等待
 - v1.11 observation 不含 joint velocity
+- Nero 位置要求七个 motor-state 组成消息，真实 pose parser 要求三组帧全部就绪
+- Nero disconnect 即使连接标志为假也委托官方幂等清理，状态枚举递归转普通值
 - L20 raw shape、整数性和 `[0, 255]` 验证
 - normalized `[-1, 1] -> [0, 255]` 映射
 - reserved index 保留
-- L20 speed/current/fault/temperature 返回维度验证
-- L20 teardown 兼容路径
-- RobotSystem 连接失败回滚
+- L20 speed/current/fault/temperature 返回维度与 temperature `-1` 哨兵验证
+- 固定 L20 `send_command()` 吞掉 `can.CanError` 且不重发的源码特征
+- L20 `SystemExit` 归一化、部分构造清理和 bus/thread 分阶段 teardown 重试
+- RobotSystem 连接失败（含 L20 `SystemExit`）回滚
+- 预使能 Nero 的 healthy disabled 自检为 `[INFO]` 而非 `[FAIL]`
 - `step()` 先完整验证再发送
 - observation/action key、shape、dtype 与单位约定
 
@@ -492,8 +500,9 @@ README 明确区分：
 - Nero 实机固件读取确为 1.11；
 - Nero enable/disable 时的负载和下落行为；
 - Nero `move_j()` 在 10/20/30/50 Hz 下的控制稳定性；
-- L20 fresh state 实际刷新率与延迟；
-- L20 temperature 返回长度及物理单位；
+- L20 请求刷新路径的实际刷新率、延迟、旧缓存行为和反馈 generation 能力；
+- L20 低层发送失败后的动作、反馈和可观测性；
+- L20 temperature 返回长度、元素顺序及物理单位；
 - L20 current/speed 五维的具体电机对应顺序；
 - 官方 L20 open/close preset 是否适合当前手型、安装方向和机械环境；
 - 同进程同时打开两个 SocketCAN Bus 的硬件稳定性。

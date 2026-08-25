@@ -24,7 +24,17 @@ from robot_control import NeroArm  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """构建只读默认值的命令行解析器。"""
+    """构建默认只读的 Nero 命令行解析器。
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        配置好执行门、零基关节索引和有限 rad 增量选项的解析器。
+
+    Notes
+    -----
+    仅创建内存中的解析器，不构造 Wrapper、不访问 CAN，也不发送硬件命令。
+    """
     parser = argparse.ArgumentParser(description="默认只读的 Nero 状态与小动作示例。")
     parser.add_argument(
         "--execute",
@@ -49,7 +59,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def confirm_execution() -> bool:
-    """要求操作者精确输入 EXECUTE 后才允许发送动作。"""
+    """阻塞等待操作者输入精确的执行确认词。
+
+    Returns
+    -------
+    bool
+        去除首尾空白后的输入恰为 ``"EXECUTE"`` 时为 ``True``。
+
+    Raises
+    ------
+    EOFError
+        标准输入在读取前关闭时抛出。
+
+    Notes
+    -----
+    本函数只读取标准输入且可能无限等待；它本身不访问 CAN、不使能 Nero，也不
+    发送运动命令。返回 ``True`` 只是 :func:`run` 动作分支的第二道门。
+    """
     return input("Type EXECUTE to send a small robot command: ").strip() == "EXECUTE"
 
 
@@ -123,7 +149,28 @@ def run(
 
 
 def main() -> int:
-    """运行示例并返回进程退出码。"""
+    """解析进程参数并运行 Nero 示例。
+
+    Returns
+    -------
+    int
+        :func:`run` 定义的进程退出码。
+
+    Raises
+    ------
+    SystemExit
+        ``argparse`` 处理 ``--help`` 或无效参数时抛出。
+    ImportError
+        默认真实 Wrapper 的 SDK 或依赖不可导入时抛出。
+    RuntimeError
+        Nero 连接或反馈等 Wrapper 操作失败且未转换为退出码时抛出。
+
+    Notes
+    -----
+    本函数进入 :func:`run` 后会连接真实 CAN，相关 SDK 操作可能阻塞。默认不
+    使能或运动；只有 ``--execute`` 和交互式 ``EXECUTE`` 双门均通过后才会发送
+    一次小动作，操作者仍须负责机械臂工作区和承载安全。
+    """
     args = build_parser().parse_args()
     return run(args)
 

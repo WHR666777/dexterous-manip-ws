@@ -48,3 +48,19 @@ def test_l20_public_contract_and_source_limitations_exist():
     version_source = inspect.getsource(LinkerHandL20Can.get_version)
     assert "[0] * 5" in torque_source
     assert "[0] * 5" in version_source
+
+
+def test_l20_send_command_swallows_can_error_without_resending():
+    """固定 SDK 的发送失败边界必须保持为显式的上游限制。"""
+    package_root = LINKER_SDK / "LinkerHand"
+    sys.path[:0] = [str(LINKER_SDK), str(package_root)]
+    try:
+        from LinkerHand.core.can.linker_hand_l20_can import LinkerHandL20Can
+    finally:
+        sys.path.remove(str(package_root))
+        sys.path.remove(str(LINKER_SDK))
+
+    source = inspect.getsource(LinkerHandL20Can.send_command)
+    assert "except can.CanError" in source
+    assert "raise" not in source
+    assert source.count("self.bus.send(msg)") == 1

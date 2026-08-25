@@ -25,10 +25,14 @@ class FakeLowLevelHand:
         self.running = True
         self.closed = False
         self.close_calls = 0
+        self.close_failures_remaining = 0
         self.receive_thread = FakeReceiveThread()
 
     def close_can_interface(self):
         self.close_calls += 1
+        if self.close_failures_remaining:
+            self.close_failures_remaining -= 1
+            raise RuntimeError("close failed")
         self.closed = True
 
 
@@ -37,6 +41,8 @@ class FakeLinkerApi:
         self.hand = FakeLowLevelHand()
         self.version = "3.1.1"
         self.positions = list(range(20))
+        self.state_request_calls = 0
+        self.cache_read_calls = 0
         self.commands = []
         self.speed = [10, 20, 30, 40, 50]
         self.current = [50, 40, 30, 20, 10]
@@ -47,9 +53,11 @@ class FakeLinkerApi:
         self.commands.append(list(pose))
 
     def get_state(self):
+        self.state_request_calls += 1
         return list(self.positions)
 
     def get_state_for_pub(self):
+        self.cache_read_calls += 1
         return list(self.positions)
 
     def set_speed(self, speed):
@@ -112,6 +120,27 @@ def test_disconnect_thread_timeout_is_bounded_and_retryable():
     assert not hand.is_connected()
 
 
+def test_disconnect_retries_failed_bus_close_after_thread_has_stopped():
+    api = FakeLinkerApi()
+    api.hand.close_failures_remaining = 1
+    hand = LinkerHandL20(api_factory=lambda **kwargs: api, join_timeout=0.01)
+    hand.connect()
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        hand.disconnect()
+    assert api.hand.receive_thread.is_alive() is False
+    assert api.hand.close_calls == 1
+    assert not hand.is_connected()
+    with pytest.raises(RuntimeError, match="cleanup"):
+        hand.connect()
+
+    hand.disconnect()
+    assert api.hand.close_calls == 2
+    assert api.hand.closed is True
+    hand.connect()
+    assert hand.is_connected()
+
+
 def connected_hand():
     api = FakeLinkerApi()
     hand = LinkerHandL20(api_factory=lambda **kwargs: api)
@@ -168,6 +197,17 @@ def test_fresh_and_cached_positions_are_explicit_copies():
     assert hand.get_active_joint_indices() == L20_ACTIVE_POSITION_INDICES
 
 
+def test_fresh_true_selects_request_path_without_claiming_a_new_generation():
+    hand, api = connected_hand()
+    expected_cached_values = list(api.positions)
+
+    result = hand.get_joint_positions_raw(fresh=True)
+
+    assert result.tolist() == expected_cached_values
+    assert api.state_request_calls == 1
+    assert api.cache_read_calls == 0
+
+
 def test_invalid_sdk_position_feedback_is_not_padded_or_fabricated():
     hand, api = connected_hand()
     api.positions = []
@@ -186,6 +226,13 @@ def test_supported_five_motor_data_and_temperature_shapes():
     hand.clear_faults()
     assert api.fault == [0] * 5
     assert hand.get_sdk_version() == "3.1.1"
+
+
+def test_temperature_rejects_upstream_missing_data_sentinel():
+    hand, api = connected_hand()
+    api.temperature[3] = -1
+    with pytest.raises(RuntimeError, match="temperature feedback"):
+        hand.get_temperature()
 
 
 @pytest.mark.parametrize("method,value", [
@@ -271,6 +318,43 @@ def test_default_factory_lazily_loads_api_class_then_constructs_with_l20_config(
         "hand_type": "left", "hand_joint": "L20",
         "modbus": "None", "can": "can7",
     }]
+
+
+def test_injected_factory_system_exit_is_normalized_to_device_runtime_error():
+    def terminate(**kwargs):
+        raise SystemExit(1)
+
+    hand = LinkerHandL20(api_factory=terminate)
+    with pytest.raises(RuntimeError, match="L20"):
+        hand.connect()
+    assert not hand.is_connected()
+
+
+def test_default_official_partial_object_is_cleaned_when_init_exits(monkeypatch):
+    class ExitingOfficialApi:
+        instance = None
+
+        def __new__(cls):
+            instance = super().__new__(cls)
+            cls.instance = instance
+            return instance
+
+        def __init__(self, **kwargs):
+            self.hand = FakeLowLevelHand()
+            raise SystemExit(1)
+
+    monkeypatch.setattr("robot_control.l20._load_linker_api", lambda: ExitingOfficialApi)
+    hand = LinkerHandL20(join_timeout=0.02)
+
+    with pytest.raises(RuntimeError, match="L20"):
+        hand.connect()
+
+    partial = ExitingOfficialApi.instance
+    assert partial is not None
+    assert partial.hand.running is False
+    assert partial.hand.closed is True
+    assert partial.hand.receive_thread.join_timeout == 0.02
+    assert not hand.is_connected()
 
 
 def test_fresh_position_selection_is_keyword_only():

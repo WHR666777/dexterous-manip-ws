@@ -69,7 +69,8 @@ class RobotSystem:
         Notes
         -----
         映射 :meth:`NeroArm.connect` 后 :meth:`LinkerHandL20.connect`，调用顺序
-        固定为 Nero 后 L20；不会自动使能机械臂。
+        固定为 Nero 后 L20；不会自动使能机械臂。L20 封装会把固定 SDK 构造的
+        ``SystemExit`` 转为 ``RuntimeError``，因此该路径也会执行 Nero 回滚。
         """
         self.arm.connect()
         try:
@@ -241,8 +242,9 @@ class RobotSystem:
         dict[str, object]
             包含 ``arm``、``hand`` 与唯一顶层 ``timestamp``。``arm`` 含
             ``joint_position`` ``(7,)``、``joint_torque`` ``(7,)``、
-            ``tcp_pose`` ``(6,)``；``hand`` 含新鲜的 ``joint_position_raw``
-            ``(20,)``。时间戳为两个设备读取完成后的 Unix wall-clock seconds。
+            ``tcp_pose`` ``(6,)``；``hand`` 含经请求刷新路径读取的
+            ``joint_position_raw`` ``(20,)``。时间戳为两个设备读取完成后的 Unix
+            wall-clock seconds。
 
         Raises
         ------
@@ -253,8 +255,9 @@ class RobotSystem:
         -----
         映射 :meth:`NeroArm.get_observation` 和
         :meth:`LinkerHandL20.get_joint_positions_raw`。丢弃 Nero 子观测自身的
-        时间戳，避免多个不一致的完成时间；L20 始终以 ``fresh=True`` 请求位置，
-        不读取缓存。
+        时间戳，避免多个不一致的完成时间；L20 始终以 ``fresh=True`` 调用请求
+        路径，而非直接缓存路径。但固定 SDK 可能吞掉请求发送的
+        ``can.CanError``，且没有反馈 generation，因此返回值仍可能是较旧缓存。
         """
         try:
             arm_observation = self._feedback_mapping(
@@ -286,7 +289,7 @@ class RobotSystem:
         return {"arm": arm, "hand": hand, "timestamp": float(time.time())}
 
     def step(self, action: Mapping[str, Any]) -> None:
-        """完整预验证后依次发送 Nero 与 L20 的位置目标。
+        """完整预验证后依次调度 Nero 与 L20 的位置目标。
 
         Parameters
         ----------
@@ -298,23 +301,26 @@ class RobotSystem:
         Returns
         -------
         None
-            两个命令都发送后立即返回，不等待运动完成。
+            两个子 Wrapper 的 SDK 调用均正常返回后立即返回，不等待运动完成；
+            不证明 L20 的每个底层 CAN 帧均发送成功。
 
         Raises
         ------
         ValueError
-            ``action`` 不是映射、键不完整，或任一动作在发送前校验失败时抛出。
+            ``action`` 不是映射、键不完整，或任一动作在调度前校验失败时抛出。
         RuntimeError
-            Nero 验证所需反馈不可用，或手部发送失败时抛出；后者明确说明 Nero
-            命令可能已经发送。
+            Nero 验证所需反馈不可用，或手部调用向上传播错误时抛出；后者明确
+            说明 Nero 命令可能已经发送。固定 L20 SDK 吞掉的 ``can.CanError``
+            不会传播到这里，因此不能触发部分发送异常。
 
         Notes
         -----
         映射 :meth:`NeroArm.validate_joint_command`、
         :meth:`NeroArm.command_joint_positions` 和
         :meth:`LinkerHandL20.set_joint_positions_normalized`。两个动作在任何设备
-        发送前均完成验证。发送顺序固定为 Nero 后 L20；若 Nero 发送失败，不会
-        尝试手部发送。
+        调用前均完成验证。调用顺序固定为 Nero 后 L20；若 Nero 调用失败，不会
+        尝试手部调用。L20 调度是 best-effort：其 SDK 调用正常返回只表示调用
+        结束，不保证每个低层 CAN 帧成功。
         """
         if not isinstance(action, Mapping):
             raise ValueError("Action must be a mapping.")
@@ -362,8 +368,9 @@ class RobotSystem:
         dict[str, object]
             仅含普通 Python 值的 ``nero`` 与 ``l20`` 诊断。Nero 项含固定
             ``firmware_config``、SDK 报告的 ``firmware_reported`` 与机械臂状态；
-            L20 项含新鲜 ``joint_position_raw`` 的普通 Python 列表（位置读取
-            失败时为 ``None``）、``position_ok`` 以及五个电机的 ``fault`` 列表。
+            L20 项含经请求刷新路径读取的 ``joint_position_raw`` 普通 Python
+            列表（位置读取失败时为 ``None``）、``position_ok`` 以及五个电机的
+            ``fault`` 列表；该位置不携带反馈 generation 证明。
 
         Raises
         ------
@@ -377,9 +384,10 @@ class RobotSystem:
         :meth:`NeroArm.get_arm_status`、:meth:`LinkerHandL20.is_connected`、
         :meth:`LinkerHandL20.get_joint_positions_raw` 与
         :meth:`LinkerHandL20.get_fault`。本方法只调用状态与反馈读取接口，绝不
-        发送运动、预设或清故障命令。每个已检查类别都会打印一行 ``[OK]`` 或
-        ``[FAIL]`` 摘要。L20 位置读取失败会记录 ``position_ok=False`` 并打印
-        ``[FAIL]``，不会发送运动命令。
+        发送运动、预设或清故障命令。健康判定类别会打印一行 ``[OK]`` 或
+        ``[FAIL]`` 摘要；Nero 使能状态单独打印 ``[INFO]``，因为连接后、动作前
+        的健康机械臂预期可以保持失能。L20 位置读取失败会记录
+        ``position_ok=False`` 并打印 ``[FAIL]``，不会发送运动命令。
         """
         position = None
         position_ok = True
@@ -422,7 +430,6 @@ class RobotSystem:
 
         checks = (
             ("Nero connection", nero["connected"]),
-            ("Nero enabled", nero["enabled"]),
             ("Nero health", nero["ok"]),
             ("Nero firmware", nero["firmware_reported"] == "1.11"),
             ("Nero arm status", nero["arm_status"].get("arm_status") == 0),
@@ -432,4 +439,5 @@ class RobotSystem:
         )
         for label, passed in checks:
             print("[{0}] {1}".format("OK" if passed else "FAIL", label))
+        print("[INFO] Nero enabled: {0}".format(nero["enabled"]))
         return {"nero": nero, "l20": l20}

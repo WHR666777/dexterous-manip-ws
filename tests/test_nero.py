@@ -1,3 +1,4 @@
+from enum import Enum, IntEnum
 from types import SimpleNamespace
 
 import numpy as np
@@ -66,6 +67,7 @@ class FieldBackedV111Status:
 class FakeNeroDriver:
     def __init__(self):
         self.connected = False
+        self.disconnect_calls = 0
         self.enabled = False
         self.enable_after = 1
         self.enable_calls = 0
@@ -103,6 +105,7 @@ class FakeNeroDriver:
         self.connected = True
 
     def disconnect(self):
+        self.disconnect_calls += 1
         self.connected = False
 
     def is_connected(self):
@@ -207,6 +210,14 @@ def test_connect_disconnect_are_idempotent():
     assert not arm.is_connected()
 
 
+def test_disconnect_always_delegates_to_official_idempotent_driver():
+    driver = FakeNeroDriver()
+    arm = NeroArm(driver=driver)
+    assert not arm.is_connected()
+    arm.disconnect()
+    assert driver.disconnect_calls == 1
+
+
 def test_enable_retries_until_success():
     arm, driver = make_connected_arm(enabled=False)
     driver.enable_after = 3
@@ -300,9 +311,34 @@ def test_state_arrays_have_verified_shapes_units_and_copies(monkeypatch):
 
 def test_unavailable_feedback_raises_instead_of_returning_fabricated_arrays():
     arm, driver = make_connected_arm()
-    driver.get_joint_angles = lambda: None
+    original = driver.get_motor_states
+    driver.get_motor_states = lambda index: None if index == 7 else original(index)
     with pytest.raises(RuntimeError, match="unavailable"):
         arm.get_joint_positions()
+
+
+def test_joint_position_requires_all_seven_constituent_motor_frames():
+    arm, driver = make_connected_arm(max_joint_delta=0.1)
+    original = driver.get_motor_states
+    driver.get_motor_states = lambda index: None if index == 4 else original(index)
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        arm.get_joint_positions()
+    with pytest.raises(RuntimeError, match="unavailable"):
+        arm.validate_joint_command([0.01] * 7)
+
+
+@pytest.mark.parametrize("method_name", ["get_flange_pose", "get_tcp_pose"])
+def test_pose_requires_all_three_pinned_v111_parser_frames(method_name):
+    arm, driver = make_connected_arm()
+    driver._parser = SimpleNamespace(
+        end_pose_xy=object(),
+        end_pose_zrx=None,
+        end_pose_ryrz=object(),
+    )
+
+    with pytest.raises(RuntimeError, match="pose feedback is incomplete"):
+        getattr(arm, method_name)()
 
 
 def test_reported_firmware_is_plain_data():
@@ -392,6 +428,25 @@ def test_status_serializes_v111_field_properties_without_private_storage():
     }
 
 
+def test_status_serialization_converts_enums_to_plain_values():
+    class ArmState(IntEnum):
+        OK = 0
+
+    class ControlLabel(Enum):
+        POSITION = "position"
+
+    arm, driver = make_connected_arm()
+    driver.status = SimpleNamespace(
+        arm_status=ArmState.OK,
+        control_label=ControlLabel.POSITION,
+    )
+
+    status = arm.get_arm_status()
+    assert status == {"arm_status": 0, "control_label": "position"}
+    assert type(status["arm_status"]) is int
+    assert type(status["control_label"]) is str
+
+
 @pytest.mark.parametrize("feedback", [
     None,
     ["not-a-number"] * 7,
@@ -400,7 +455,10 @@ def test_status_serializes_v111_field_properties_without_private_storage():
 ])
 def test_joint_position_feedback_malformed_data_raises_runtime_error(feedback):
     arm, driver = make_connected_arm()
-    driver.get_joint_angles = lambda: None if feedback is None else Message(feedback)
+    driver.get_motor_states = lambda index: (
+        None if feedback is None
+        else Message(SimpleNamespace(position=feedback))
+    )
     with pytest.raises(RuntimeError, match="feedback"):
         arm.get_joint_positions()
 
@@ -465,7 +523,7 @@ def test_constructor_normalizes_invalid_delta_settings_to_value_error(setting):
 def test_huge_integer_feedback_is_runtime_error_for_all_numeric_readers():
     huge = 10 ** 1000
     arm, driver = make_connected_arm()
-    driver.get_joint_angles = lambda: Message([huge] * 7)
+    driver.get_motor_states = lambda index: Message(SimpleNamespace(position=huge))
     with pytest.raises(RuntimeError, match="feedback"):
         arm.get_joint_positions()
     driver.get_motor_states = lambda index: Message(SimpleNamespace(torque=huge))

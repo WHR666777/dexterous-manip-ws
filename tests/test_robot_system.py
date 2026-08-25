@@ -3,6 +3,7 @@ from collections.abc import Mapping
 import numpy as np
 import pytest
 
+from robot_control.l20 import LinkerHandL20
 from robot_control.robot_system import RobotSystem
 
 
@@ -68,7 +69,7 @@ class FakeHand:
         self.fault = np.zeros(5, dtype=np.int64)
         self.disconnected = 0
         self.fail_disconnect = False
-        self.position_read_fresh_values = []
+        self.position_request_flags = []
 
     def connect(self):
         if self.fail_connect:
@@ -85,7 +86,7 @@ class FakeHand:
         return self.connected
 
     def get_joint_positions_raw(self, fresh=True):
-        self.position_read_fresh_values.append(fresh)
+        self.position_request_flags.append(fresh)
         return np.arange(20)
 
     def get_fault(self):
@@ -102,6 +103,21 @@ def test_connect_rolls_back_arm_when_hand_fails():
     with pytest.raises(RuntimeError, match="L20"):
         robot.connect()
     assert arm.disconnected == 1
+
+
+def test_connect_normalizes_l20_system_exit_and_rolls_back_nero():
+    """官方 SDK 的退出路径不得终止宿主或绕过已连接 Nero 的回滚。"""
+    def terminate(**kwargs):
+        raise SystemExit(1)
+
+    arm = FakeArm()
+    hand = LinkerHandL20(api_factory=terminate)
+    robot = RobotSystem(arm=arm, hand=hand)
+
+    with pytest.raises(RuntimeError, match="L20"):
+        robot.connect()
+    assert arm.disconnected == 1
+    assert not arm.connected
 
 
 def test_connect_reports_hand_failure_when_arm_rollback_also_fails():
@@ -166,7 +182,7 @@ def connected_enabled_robot():
 
 
 def test_observation_has_fixed_nested_shapes(monkeypatch):
-    """组合观测只保留一个获取完成时间戳和新鲜手部位置。"""
+    """组合观测只保留一个完成时间戳并调用手部请求刷新路径。"""
     robot, _, _ = connected_enabled_robot()
     monkeypatch.setattr("robot_control.robot_system.time.time", lambda: 789.0)
     observation = robot.get_observation()
@@ -265,8 +281,8 @@ def test_step_normalizes_numeric_conversion_overflow_to_value_error():
     assert hand.commands == []
 
 
-def test_step_sends_once_to_arm_then_hand():
-    """验证后的完整动作必须按机械臂再手部的顺序各发送一次。"""
+def test_step_dispatches_once_to_arm_then_hand():
+    """验证后的完整动作必须按机械臂再手部的顺序各调用一次。"""
     robot, arm, hand = connected_enabled_robot()
     robot.step({
         "arm_joint_position": np.full(7, 0.01),
@@ -304,12 +320,28 @@ def test_self_check_is_read_only_structured_and_prints_summary(capsys):
     assert hand.commands == []
 
 
-def test_self_check_reads_fresh_l20_position_and_returns_plain_values(capsys):
-    """自检必须读取新鲜 L20 位置，并把它作为普通 Python 列表返回。"""
+def test_self_check_treats_connected_healthy_disabled_nero_as_informational(capsys):
+    """预使能自检中 disabled 是预期状态，不得产生失败诊断。"""
+    arm, hand = FakeArm(), FakeHand()
+    robot = RobotSystem(arm=arm, hand=hand)
+    robot.connect()
+
+    result = robot.self_check()
+    output = capsys.readouterr().out
+
+    assert result["nero"]["enabled"] is False
+    assert "[INFO] Nero enabled: False" in output
+    assert "[FAIL]" not in output
+    assert arm.commands == []
+    assert hand.commands == []
+
+
+def test_self_check_uses_l20_request_path_and_returns_plain_values(capsys):
+    """自检必须调用 L20 请求刷新路径，并把结果作为普通 Python 列表返回。"""
     robot, _, hand = connected_enabled_robot()
     result = robot.self_check()
     output = capsys.readouterr().out
-    assert hand.position_read_fresh_values == [True]
+    assert hand.position_request_flags == [True]
     assert result["l20"]["joint_position_raw"] == list(range(20))
     assert "[OK] L20 position" in output
     assert hand.commands == []

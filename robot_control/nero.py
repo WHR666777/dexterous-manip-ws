@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 import time
 from typing import Any, Callable, Optional
 
@@ -126,10 +127,10 @@ class NeroArm:
 
         Notes
         -----
-        映射官方 ``Driver.disconnect()``，可能阻塞于线程收尾；重复调用安全。
+        始终映射官方幂等 ``Driver.disconnect()``，可能阻塞于线程收尾；即使
+        ``is_connected()`` 已为假也让 Driver 清理其内部资源。
         """
-        if self.is_connected():
-            self._driver.disconnect()
+        self._driver.disconnect()
 
     def is_connected(self) -> bool:
         """返回官方 Driver 报告的 CAN 连接状态。
@@ -349,7 +350,7 @@ class NeroArm:
         Returns
         -------
         object
-            SDK ``get_joint_angles()`` 返回的消息；其 ``msg`` 为七轴 rad。
+            SDK ``get_joint_angles()`` 返回的聚合消息；其 ``msg`` 为七轴 rad。
 
         Raises
         ------
@@ -358,7 +359,9 @@ class NeroArm:
 
         Notes
         -----
-        直接映射 ``Driver.get_joint_angles()``；不复制消息且不阻塞等待反馈。
+        直接映射 ``Driver.get_joint_angles()``；不复制消息且不阻塞等待反馈。固定
+        SDK 会从零初始化聚合缓存，并在收到任一组成帧后返回，因此本调试接口
+        可能暴露混合了缺失零值或旧值的部分聚合；规范位置读取不会使用它。
         """
         self._require_connected()
         return self._message_or_raise(self._driver.get_joint_angles())
@@ -402,10 +405,28 @@ class NeroArm:
 
         Notes
         -----
-        直接映射 ``Driver.get_flange_pose()``；不复制消息也不阻塞。
+        真实固定 v1.11 Driver 路径先要求三个 parser pose 组成帧全部存在，再映射
+        ``Driver.get_flange_pose()``；不复制消息也不阻塞。无该私有 parser 形状的
+        注入 fake 保持支持。
         """
         self._require_connected()
+        self._require_complete_v111_pose_frames()
         return self._message_or_raise(self._driver.get_flange_pose())
+
+    def _require_complete_v111_pose_frames(self) -> None:
+        """拒绝固定 v1.11 Driver 的部分三帧位姿聚合。
+
+        此窄适配器绑定 pyAgxArm commit
+        ``8cd90f9106219a156c3c0d7e58ee36d838a89baf``。仅当注入对象暴露固定
+        Driver 的完整 ``_parser`` 三字段形状时执行；不具备该私有形状的无硬件
+        fake 保持兼容。
+        """
+        parser = getattr(self._driver, "_parser", None)
+        frame_names = ("end_pose_xy", "end_pose_zrx", "end_pose_ryrz")
+        if parser is None or not all(hasattr(parser, name) for name in frame_names):
+            return
+        if any(getattr(parser, name) is None for name in frame_names):
+            raise RuntimeError("Nero SDK pose feedback is incomplete.")
 
     def get_raw_arm_status(self) -> Any:
         """返回官方原始机械臂状态消息，供底层调试使用。
@@ -442,11 +463,16 @@ class NeroArm:
 
         Notes
         -----
-        由 ``Driver.get_joint_angles().msg`` 转换；不阻塞且不伪造零值。
+        由七次 ``Driver.get_motor_states(1..7).msg.position`` 组成；仅当七个
+        组成消息均存在且位置均为有限标量时返回，不使用可能部分填充的官方
+        ``get_joint_angles()`` 聚合缓存。
         """
-        return self._array_from_feedback(
-            self.get_raw_joint_positions().msg, (NERO_DOF,),
-        )
+        messages = self.get_raw_motor_states()
+        try:
+            positions = [message.msg.position for message in messages]
+        except AttributeError as exc:
+            raise RuntimeError("Nero SDK feedback is unavailable.") from exc
+        return self._array_from_feedback(positions, (NERO_DOF,))
 
     def get_joint_torques(self) -> np.ndarray:
         """读取七轴电机扭矩反馈。
@@ -488,7 +514,8 @@ class NeroArm:
 
         Notes
         -----
-        由 ``Driver.get_flange_pose().msg`` 转换；不阻塞。
+        由 ``Driver.get_flange_pose().msg`` 转换；真实固定 v1.11 Driver 必须先有
+        全部三个 parser pose 组成帧，不从部分聚合返回状态。
         """
         return self._array_from_feedback(self.get_raw_flange_pose().msg, (6,))
 
@@ -508,14 +535,18 @@ class NeroArm:
 
         Notes
         -----
-        由 ``Driver.get_tcp_pose().msg`` 转换；不阻塞，不推算替代位姿。
+        由 ``Driver.get_tcp_pose().msg`` 转换；真实固定 v1.11 Driver 必须先有
+        全部三个 parser pose 组成帧。不阻塞，不推算替代位姿。
         """
         self._require_connected()
+        self._require_complete_v111_pose_frames()
         message = self._message_or_raise(self._driver.get_tcp_pose())
         return self._array_from_feedback(message.msg, (6,))
 
     @staticmethod
     def _to_plain_data(value: Any) -> Any:
+        if isinstance(value, Enum):
+            return NeroArm._to_plain_data(value.value)
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
         if isinstance(value, np.generic):

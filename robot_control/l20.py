@@ -93,7 +93,9 @@ class LinkerHandL20:
     -----
     构造时不导入 SDK、不创建 CAN 对象；仅在 :meth:`connect` 创建官方
     ``LinkerHandApi``。位置始终以官方 20 槽位顺序表示，速度、电流和故障
-    仅暴露 SDK 已支持的五电机数据。注入缝不改变真实 SDK 调用顺序。
+    仅暴露 SDK 已支持的五电机数据。注入缝不改变真实 SDK 调用顺序。固定 SDK
+    的低层 ``send_command()`` 会捕获 ``can.CanError`` 而不重新抛出或重发，
+    因此命令与请求均为 best-effort 调度，不提供逐帧发送成功证明。
     """
 
     def __init__(
@@ -138,6 +140,8 @@ class LinkerHandL20:
             raise ValueError("api_factory must be callable or None.")
         self._api: Optional[Any] = None
         self._cleanup_api: Optional[Any] = None
+        self._cleanup_bus_shutdown_complete = False
+        self._cleanup_thread_shutdown_complete = False
 
     @staticmethod
     def _validate_join_timeout(value: Any) -> float:
@@ -166,28 +170,56 @@ class LinkerHandL20:
         ImportError
             官方 SDK 或其依赖不可导入时抛出。
         RuntimeError
-            上一次断开仍在等待接收线程退出时抛出。
+            上一次断开的总线或接收线程收尾仍未完成，或 SDK 构造以
+            ``SystemExit`` 终止时抛出。
 
         Notes
         -----
-        ``api_factory=None`` 时先在本调用内懒加载 ``LinkerHandApi`` 类，再精确
-        调用 ``LinkerHandApi(hand_type=..., hand_joint="L20", modbus="None",
-        can=...)``。SDK 构造会访问 CAN，可能阻塞；重复调用已连接实例不会重复
-        创建 API。
+        ``api_factory=None`` 时先在本调用内懒加载 ``LinkerHandApi``。对默认
+        官方类先分配实例再调用 ``LinkerHandApi.__init__``，参数精确为
+        ``hand_type=..., hand_joint="L20", modbus="None", can=...``；若初始化
+        ``SystemExit``，会 best-effort 停止已创建的 ``hand`` 资源并转成设备命名
+        的 ``RuntimeError``。SDK 构造会访问 CAN，可能阻塞；重复调用已连接实例
+        不会重复创建 API。注入工厂的 ``SystemExit`` 同样归一化，但工厂没有返回
+        的部分对象无法由 Wrapper 取得或清理。
         """
         if self._api is not None:
             return
         if self._cleanup_api is not None:
-            raise RuntimeError("L20 receive-thread cleanup is still pending.")
-        factory = self._api_factory
-        if factory is None:
-            factory = _load_linker_api()
-        self._api = factory(
+            raise RuntimeError("L20 bus/thread cleanup is still pending.")
+        kwargs = dict(
             hand_type=self._hand_type,
             hand_joint="L20",
             modbus="None",
             can=self._can_channel,
         )
+        factory = self._api_factory
+        if factory is not None:
+            try:
+                api = factory(**kwargs)
+            except SystemExit as exc:
+                raise RuntimeError(
+                    "L20 connection failed: injected API factory terminated the process.",
+                ) from exc
+        else:
+            factory = _load_linker_api()
+            try:
+                if isinstance(factory, type):
+                    api = factory.__new__(factory)
+                    try:
+                        factory.__init__(api, **kwargs)
+                    except SystemExit as exc:
+                        self._best_effort_teardown_api(api, self._join_timeout)
+                        raise RuntimeError(
+                            "L20 connection failed: official SDK terminated the process.",
+                        ) from exc
+                else:
+                    api = factory(**kwargs)
+            except SystemExit as exc:
+                raise RuntimeError(
+                    "L20 connection failed: official SDK terminated the process.",
+                ) from exc
+        self._api = api
 
     def disconnect(self) -> None:
         """停止 SDK 接收循环、关闭其 CAN 总线并有限等待线程退出。
@@ -206,61 +238,111 @@ class LinkerHandL20:
 
         Notes
         -----
-        断开一开始 :meth:`is_connected` 即返回 ``False``。超时时仅保留 SDK
-        引用用于下次有限 join；在确认线程结束后立即清除。绝不调用操作系统
-        ``ip link down``，只调用 SDK 的 ``close_can_interface()``。
+        断开一开始 :meth:`is_connected` 即返回 ``False``。Wrapper 分别记录总线
+        shutdown 与接收线程退出；任一阶段失败或超时都会保留 SDK 引用，并在
+        下次有界 ``disconnect()`` 只重试尚未完成的阶段，二者完成后才允许重连。
+        绝不调用操作系统 ``ip link down``，只调用 SDK 的
+        ``close_can_interface()``。
         """
-        is_cleanup_retry = self._api is None and self._cleanup_api is not None
-        api = self._api if self._api is not None else self._cleanup_api
+        if self._api is not None:
+            self._cleanup_api = self._api
+            self._api = None
+            self._cleanup_bus_shutdown_complete = False
+            self._cleanup_thread_shutdown_complete = False
+        api = self._cleanup_api
         if api is None:
             return
-        self._api = None
-        self._cleanup_api = api
-        errors = []
-        low_level = None
-        try:
-            low_level = api.hand
-        except (AttributeError, TypeError) as exc:
-            errors.append(exc)
 
-        receive_thread = None
-        if low_level is not None and not is_cleanup_retry:
-            try:
-                low_level.running = False
-            except (AttributeError, TypeError) as exc:
-                errors.append(exc)
-            try:
-                low_level.close_can_interface()
-            except Exception as exc:
-                errors.append(exc)
-        if low_level is not None:
-            try:
-                receive_thread = low_level.receive_thread
-                receive_thread.join(timeout=self._join_timeout)
-            except Exception as exc:
-                errors.append(exc)
+        (
+            self._cleanup_bus_shutdown_complete,
+            self._cleanup_thread_shutdown_complete,
+            errors,
+            still_alive,
+        ) = self._teardown_api_once(
+            api,
+            self._join_timeout,
+            bus_shutdown_complete=self._cleanup_bus_shutdown_complete,
+            thread_shutdown_complete=self._cleanup_thread_shutdown_complete,
+        )
 
-        if receive_thread is None:
+        if (
+            self._cleanup_bus_shutdown_complete
+            and self._cleanup_thread_shutdown_complete
+        ):
             self._cleanup_api = None
-            self._raise_teardown_errors(errors)
-            return
+            self._cleanup_bus_shutdown_complete = False
+            self._cleanup_thread_shutdown_complete = False
 
-        try:
-            still_alive = bool(receive_thread.is_alive())
-        except Exception as exc:
-            errors.append(exc)
-            self._raise_teardown_errors(errors)
-            return
-        if still_alive:
+        if not self._cleanup_thread_shutdown_complete and still_alive:
             detail = self._format_teardown_errors(errors)
             if detail:
                 raise TimeoutError(
                     "L20 receive thread did not stop before join_timeout; " + detail,
                 )
             raise TimeoutError("L20 receive thread did not stop before join_timeout.")
-
-        self._cleanup_api = None
         self._raise_teardown_errors(errors)
+        if self._cleanup_api is not None:
+            raise RuntimeError("L20 disconnect teardown is incomplete.")
+
+    @classmethod
+    def _teardown_api_once(
+        cls,
+        api: Any,
+        join_timeout: float,
+        *,
+        bus_shutdown_complete: bool,
+        thread_shutdown_complete: bool,
+    ) -> Tuple[bool, bool, list, bool]:
+        """执行一次窄范围 SDK 总线/接收线程收尾并返回分阶段状态。"""
+        errors = []
+        still_alive = False
+        try:
+            low_level = api.hand
+        except Exception as exc:
+            errors.append(exc)
+            return (
+                bus_shutdown_complete,
+                thread_shutdown_complete,
+                errors,
+                still_alive,
+            )
+
+        if not thread_shutdown_complete:
+            try:
+                low_level.running = False
+            except Exception as exc:
+                errors.append(exc)
+        if not bus_shutdown_complete:
+            try:
+                low_level.close_can_interface()
+                bus_shutdown_complete = True
+            except Exception as exc:
+                errors.append(exc)
+        if not thread_shutdown_complete:
+            try:
+                receive_thread = low_level.receive_thread
+                receive_thread.join(timeout=join_timeout)
+                still_alive = bool(receive_thread.is_alive())
+                if not still_alive:
+                    thread_shutdown_complete = True
+            except Exception as exc:
+                errors.append(exc)
+        return (
+            bus_shutdown_complete,
+            thread_shutdown_complete,
+            errors,
+            still_alive,
+        )
+
+    @classmethod
+    def _best_effort_teardown_api(cls, api: Any, join_timeout: float) -> None:
+        """清理未完成构造的官方 API；所有错误由连接主异常覆盖。"""
+        cls._teardown_api_once(
+            api,
+            join_timeout,
+            bus_shutdown_complete=False,
+            thread_shutdown_complete=False,
+        )
 
     @staticmethod
     def _format_teardown_errors(errors: list) -> str:
@@ -363,7 +445,7 @@ class LinkerHandL20:
         Returns
         -------
         None
-            调用 SDK 发送目标后立即返回。
+            官方 SDK 调用正常返回后返回；不证明每个底层 CAN 帧均发送成功。
 
         Raises
         ------
@@ -374,7 +456,8 @@ class LinkerHandL20:
 
         Notes
         -----
-        映射 ``LinkerHandApi.finger_move(pose=...)``；不等待手部运动完成。
+        映射 ``LinkerHandApi.finger_move(pose=...)``；不等待手部运动完成。固定
+        SDK 可能吞掉低层 ``can.CanError``，此时本方法也可能正常返回。
         """
         raw = self._validate_raw_values(positions, _L20_POSITION_SHAPE, "position")
         self._require_connected().finger_move(pose=raw.tolist())
@@ -391,7 +474,8 @@ class LinkerHandL20:
         Returns
         -------
         None
-            转换并调用 SDK 后立即返回。
+            转换后的官方 SDK 调用正常返回后返回；不证明每个底层 CAN 帧均发送
+            成功。
 
         Raises
         ------
@@ -403,7 +487,8 @@ class LinkerHandL20:
         Notes
         -----
         使用 ``floor((x + 1) * 127.5 + 0.5)`` 半向上量化，再映射
-        ``finger_move(pose=...)``；不等待运动完成。
+        ``finger_move(pose=...)``；不等待运动完成。固定 SDK 可能吞掉低层
+        ``can.CanError``，此时本方法也可能正常返回。
         """
         values = self._array_from_input(action, _L20_POSITION_SHAPE, "position")
         if np.any(values < -1.0) or np.any(values > 1.0):
@@ -419,13 +504,13 @@ class LinkerHandL20:
         )
 
     def get_joint_positions_raw(self, *, fresh: bool = True) -> np.ndarray:
-        """读取新鲜或已缓存的 20 槽位原始位置。
+        """调用请求刷新路径或读取缓存的 20 槽位原始位置。
 
         Parameters
         ----------
         fresh : bool, default=True
-            ``True`` 调用官方 ``get_state()`` 请求状态；``False`` 调用
-            ``get_state_for_pub()`` 读取 SDK 缓存。
+            ``True`` 调用官方 ``get_state()`` 尝试请求状态；``False`` 调用
+            ``get_state_for_pub()`` 直接读取 SDK 缓存。``True`` 不代表新反馈代次。
 
         Returns
         -------
@@ -441,8 +526,11 @@ class LinkerHandL20:
 
         Notes
         -----
-        官方 ``get_state()`` 依次请求四类位置帧，典型源端等待约 40 ms；封装
-        不承诺新鲜读取可超过 20 Hz。缓存读取不请求 CAN，也不制造缺失数据。
+        官方 ``get_state()`` 依次调用四类位置请求，典型源端等待约 40 ms；固定
+        SDK 的 ``send_command()`` 会吞掉 ``can.CanError`` 且没有反馈 generation
+        标记，因此请求失败后仍可能返回较旧但形状合法的缓存。封装只承诺
+        ``fresh=True`` 选择请求路径，不能证明反馈新鲜或超过 20 Hz。缓存读取不
+        请求 CAN，也不制造缺失数据。
         """
         return self._get_joint_positions_raw(self._validate_fresh(fresh))
 
@@ -479,7 +567,7 @@ class LinkerHandL20:
         Returns
         -------
         None
-            设置请求发送后返回。
+            官方 SDK 调用正常返回后返回；不证明底层 CAN 帧发送成功。
 
         Raises
         ------
@@ -490,7 +578,8 @@ class LinkerHandL20:
 
         Notes
         -----
-        精确映射 ``LinkerHandApi.set_speed(speed=...)``；SDK 请求可能短暂阻塞。
+        精确映射 ``LinkerHandApi.set_speed(speed=...)``；SDK 调用可能短暂阻塞，
+        且低层 ``can.CanError`` 可能被固定 SDK 吞掉。
         """
         validated = self._validate_five_raw(speed, "speed")
         self._require_connected().set_speed(speed=validated.tolist())
@@ -510,7 +599,8 @@ class LinkerHandL20:
 
         Notes
         -----
-        映射 ``LinkerHandApi.get_speed()``，该 SDK 调用可能发起 CAN 请求。
+        映射 ``LinkerHandApi.get_speed()``，该 SDK 调用会尝试 CAN 请求；低层
+        发送失败可能被吞掉并返回较旧缓存，Wrapper 无反馈 generation 可核验。
         """
         return self._array_from_feedback(
             self._require_connected().get_speed(), _L20_MOTOR_SHAPE, "speed", raw=True,
@@ -527,7 +617,7 @@ class LinkerHandL20:
         Returns
         -------
         None
-            设置请求发送后返回。
+            官方 SDK 调用正常返回后返回；不证明底层 CAN 帧发送成功。
 
         Raises
         ------
@@ -539,6 +629,7 @@ class LinkerHandL20:
         Notes
         -----
         精确映射 ``LinkerHandApi.set_current(current=...)``；不提供伪造扭矩接口。
+        固定 SDK 可能吞掉低层 ``can.CanError``，此时本方法也可能正常返回。
         """
         validated = self._validate_five_raw(current, "current")
         self._require_connected().set_current(current=validated.tolist())
@@ -558,7 +649,8 @@ class LinkerHandL20:
 
         Notes
         -----
-        映射 ``LinkerHandApi.get_current()``；不会将其命名或转换为扭矩。
+        映射 ``LinkerHandApi.get_current()``；不会将其命名或转换为扭矩。请求的
+        低层发送失败可能被固定 SDK 吞掉并返回较旧缓存。
         """
         return self._array_from_feedback(
             self._require_connected().get_current(), _L20_MOTOR_SHAPE, "current", raw=True,
@@ -581,7 +673,8 @@ class LinkerHandL20:
 
         Notes
         -----
-        映射 ``LinkerHandApi.get_fault()``；SDK 调用可能发起 CAN 请求。
+        映射 ``LinkerHandApi.get_fault()``；SDK 调用会尝试 CAN 请求，但低层
+        发送失败可能被吞掉并返回较旧缓存。
         """
         return self._array_from_feedback(
             self._require_connected().get_fault(), _L20_MOTOR_SHAPE, "fault", raw=True,
@@ -593,7 +686,8 @@ class LinkerHandL20:
         Returns
         -------
         None
-            SDK 清故障请求返回后返回；不会伪造清除后的反馈数组。
+            SDK 清故障调用正常返回后返回；不会伪造清除后的反馈数组，也不证明
+            底层 CAN 帧发送成功。
 
         Raises
         ------
@@ -603,7 +697,8 @@ class LinkerHandL20:
         Notes
         -----
         精确映射 ``LinkerHandApi.clear_faults()``；随后可用 :meth:`get_fault`
-        读取实际 SDK 反馈。
+        尝试请求反馈。固定 SDK 可能吞掉清除或读取路径的低层
+        ``can.CanError``。
         """
         self._require_connected().clear_faults()
 
@@ -619,15 +714,23 @@ class LinkerHandL20:
         Raises
         ------
         RuntimeError
-            未连接或 SDK 温度反馈形状/数值不合法时抛出。
+            未连接，SDK 温度反馈形状/数值不合法，或包含缺失数据哨兵 ``-1``
+            时抛出。
 
         Notes
         -----
-        映射 ``LinkerHandApi.get_temperature()``，该调用可能发起多个 CAN 请求。
+        映射 ``LinkerHandApi.get_temperature()``，该调用尝试发起多个 CAN 请求；
+        低层发送失败可能被吞掉并留下 ``-1`` 或较旧缓存。实际硬件长度、元素顺序
+        和物理单位均待厂商或真机确认。
         """
-        return self._array_from_feedback(
+        result = self._array_from_feedback(
             self._require_connected().get_temperature(), _L20_POSITION_SHAPE, "temperature",
         )
+        if np.any(result == -1.0):
+            raise RuntimeError(
+                "L20 temperature feedback contains the SDK missing-data sentinel -1.",
+            )
+        return result
 
     def get_sdk_version(self) -> str:
         """读取 LinkerHand Python SDK 自身报告的版本字符串。
@@ -658,7 +761,7 @@ class LinkerHandL20:
         Returns
         -------
         None
-            预设目标发送后立即返回。
+            官方 SDK 调用正常返回后立即返回；不证明每个底层 CAN 帧均发送成功。
 
         Raises
         ------
@@ -668,6 +771,7 @@ class LinkerHandL20:
         Notes
         -----
         使用固定官方 20 槽位 ``张开`` 值并映射 ``finger_move``；不等待运动完成。
+        固定 SDK 可能吞掉低层 ``can.CanError``。
         """
         self._require_connected().finger_move(pose=list(_L20_OPEN_PRESET))
 
@@ -677,7 +781,7 @@ class LinkerHandL20:
         Returns
         -------
         None
-            预设目标发送后立即返回。
+            官方 SDK 调用正常返回后立即返回；不证明每个底层 CAN 帧均发送成功。
 
         Raises
         ------
@@ -687,5 +791,6 @@ class LinkerHandL20:
         Notes
         -----
         使用固定官方 20 槽位 ``握拳`` 值并映射 ``finger_move``；不等待运动完成。
+        固定 SDK 可能吞掉低层 ``can.CanError``。
         """
         self._require_connected().finger_move(pose=list(_L20_CLOSE_PRESET))
