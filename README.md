@@ -44,7 +44,11 @@ python3 -m pip install -e ./pyAgxArm
 export PYTHONPATH="$PWD/linkerhand-python-sdk:$PYTHONPATH"
 ```
 
-`requirements.txt` 只列运行时直接依赖：NumPy、python-can、PyYAML 和 typing-extensions。`pytest` 是开发/静态验证工具，刻意不属于运行时依赖；需要开发验证时另行安装。
+`requirements.txt` 只列运行时直接依赖：NumPy、python-can、PyYAML 和 typing-extensions。`pytest` 是开发/静态验证工具，刻意不属于运行时依赖；需要静态验证时单独安装：
+
+```bash
+python3 -m pip install pytest
+```
 
 ## CAN 配置
 
@@ -73,7 +77,7 @@ V111 的官方 motor-state `velocity` 不可信（Driver 强制为零），所�
 
 封装约定：仅支持 `L20`、默认右手、CAN `can1`，位置永远使用官方 20 槽位顺序。官方也提示不要同时运行 linker_hand_sdk_ros、动捕手套或其他控制灵巧手的 topic。`candump` 虽不发命令，正常控制也不得与**任何会发送 L20 命令的进程**并行运行；同一时刻只保留一个控制者。
 
-L20 原始位置是 20 个整数、每项 `[0,255]`。索引 `11..14` 为 reserved，仍必须保留在所有 20 维 action/state 中，不能删掉、压缩或猜测其含义；主动位置索引仅为 `0..10,15..19`。官方当前实现的 torque 和 embedded version 返回伪造占位值，因此封装不公开 `get_torque()`、`set_torque()` 或 `get_version()`；`get_sdk_version()` 仅是 Python SDK 版本。温度形状为 `(20,)`，物理单位由 SDK 未说明，待厂商/真机确认。
+L20 原始位置是 20 个整数、每项 `[0,255]`。索引 `11..14` 为 reserved，仍必须保留在所有 20 维 action/state 中，不能删掉、压缩或猜测其含义；主动位置索引仅为 `0..10,15..19`。官方当前实现的 torque 和 embedded version 返回伪造占位值，因此封装不公开 `get_torque()`、`set_torque()` 或 `get_version()`；`get_sdk_version()` 仅是 Python SDK 版本。封装在运行时校验 temperature 为 `(20,)`，但实际硬件返回长度和物理单位均待真机/厂商确认，不能标为摄氏度。
 
 新鲜的 `get_joint_positions_raw(fresh=True)` 会查询四组反馈，官方源码典型等待约 40 ms，因此不能承诺新鲜观测超过 20 Hz。缓存读取必须明确使用 `get_cached_joint_positions_raw()`，不能把缓存称作最新实测。
 
@@ -125,7 +129,7 @@ python3 examples/nero_l20_example.py --execute
 | Nero action | `NeroArm.command_joint_positions(joints)`；组合键 `arm_joint_position` | `(7,)`，有限数，转为 `float64` | rad；逐轴官方限位，且必须已连接、七轴 enabled |
 | L20 action | `LinkerHandL20.set_joint_positions_raw(positions)` | `(20,)`，整数 | raw `[0,255]`；`11..14` 仍在数组内 |
 | 组合 L20 action | `hand_joint_position` | `(20,)`，有限 `float64` | normalized `[-1,1]`；映射为 `floor((x+1)*127.5+0.5)`，`-1→0`、`0→128`、`1→255` |
-| Nero observation | `arm.joint_position`、`arm.joint_torque`、`arm.tcp_pose` | `(7,)`、`(7,)`、`(6,)` | 分别为 rad、N*m、`[m,m,m,rad,rad,rad]`；没有 joint velocity |
+| Nero observation | `arm.joint_position`、`arm.joint_torque`、`arm.tcp_pose` | `(7,) float64`、`(7,) float64`、`(6,) float64` | 分别为 rad、N*m、`[m,m,m,rad,rad,rad]`；没有 joint velocity |
 | L20 observation | `hand.joint_position_raw` | `(20,)`，`int64` | 新鲜 raw `[0,255]`；含四个 reserved 槽位 |
 | 组合 observation | `{"arm": ..., "hand": ..., "timestamp": ...}` | 嵌套 dict；`timestamp` 为 `float` | 两设备读取完成后的 Unix wall-clock seconds |
 
@@ -133,7 +137,7 @@ python3 examples/nero_l20_example.py --execute
 
 ## 单位与维度
 
-Nero joint position 为 7 维 rad，joint torque 为 7 维 N*m，flange/TCP pose 为 6 维 `[m,m,m,rad,rad,rad]`。L20 position 是 20 维 raw `[0,255]` 或 normalized `[-1,1]`；速度和电流是 5 维 raw `[0,255]`，fault 是 5 维官方错误码（0 正常、1 电流过载、2 温度过高、3 编码错误、4 过压/欠压）。L20 温度为 20 维但单位未公布，不能标为摄氏度。
+Nero joint position 为 7 维 `float64` rad，joint torque 为 7 维 `float64` N*m，flange/TCP pose 为 6 维 `float64` `[m,m,m,rad,rad,rad]`。L20 position 是 20 维 raw `[0,255]` 或 normalized `[-1,1]`；速度和电流是 5 维 raw `[0,255]`，fault 是 5 维官方错误码（0 正常、1 电流过载、2 温度过高、3 编码错误、4 过压/欠压）。L20 temperature 是封装期望并校验的 20 维运行时反馈，实际硬件长度和单位尚未确认，不能标为摄氏度。
 
 ## Diffusion Policy / ACT 接入
 
@@ -161,13 +165,21 @@ VLA 或 Teleoperation 同样只能作为单一命令源，先经过人工监督�
 
 **静态验证：**项目测试使用注入假驱动、官方 API/源码契约和命令行 `--help`，不连接 CAN、不创建真实设备、不发送硬件命令。根目录 `python3 -m pytest -q` 仅发现 `tests/`，避免嵌套官方 SDK 的同名测试包干扰。
 
-**真机验证：**尚未执行。尚未声称 CAN 连接、Nero/L20 实际运动、bitrate、频率、急停、断开 shim、DP/ACT/VLA/遥操作闭环或机械安全已经通过。特别是 L20 fresh 延迟与 Nero 连续命令频率必须在真机上逐级验证。
+**真机验证：**尚未执行。以下均为 true-hardware pending，不得由静态测试推断为已通过：实际 `can0`（Nero）/`can1`（L20）与右手映射、Nero 固件 report、Nero enable 是否实际成功及 disable/急停后 reset 的下落行为、不同 `move_j()` 频率、L20 fresh 延迟、L20 temperature 的长度和单位、五电机 speed/current 与实体电机的对应关系、官方 open/close presets 对当前安装姿态的适用性，以及同一 Python 进程中双 SocketCAN 的稳定性。CAN bitrate、断开 shim、Nero/L20 实际运动、DP/ACT/VLA/遥操作闭环和机械安全也同样待真机验证。
 
 ## 建议的第一次真机测试顺序
 
-1. 断电/安全固定状态下确认机械安装、急停、供电、线缆和控制进程唯一性。
-2. 上电后只运行 `lsusb`、`ip link show`、`ip -details link show can0`、`can1`，核对两条独立通道和 1 Mbps。
-3. 由操作者手动执行 CAN 激活命令，短时 `candump can0`/`candump can1` 观察帧后退出监听。
-4. 分别运行三个不带 `--execute` 的只读示例，检查连接、固件、位置与 fault；任何失败即停止。
-5. 在人员监护、低速、清空工作空间条件下，先单独 Nero 再单独 L20，以 `--execute` 和 `EXECUTE` 完成一次最小相对动作；每次都重新检查反馈。
-6. 最后才联合执行一次最小 `RobotSystem.step()`；记录时间戳、输出和异常处理。DP/ACT、VLA 与 Teleoperation 只在这些逐级验证后接入，并继续保持单一控制者。
+1. **环境/import：**断电或安全固定状态下确认机械安装、急停、供电、线缆和唯一控制进程；完成“环境安装”的三条运行命令及 `python3 -m pip install pytest`，然后执行下列只导入检查，确认 Python 能导入两个 SDK 和本封装（不构造设备）。
+
+   ```bash
+   python3 -c 'import pyAgxArm; import LinkerHand.linker_hand_api; from robot_control import LinkerHandL20, NeroArm, RobotSystem; print("imports OK")'
+   ```
+2. **CAN：**上电后只运行 `lsusb`、`ip link show`、`ip -details link show can0`、`can1`，由操作者激活两个 1 Mbps 接口；短时 `candump can0`/`candump can1` 观察帧后退出监听。
+3. **只读状态：**分别运行三个不带 `--execute` 的示例，检查连接、firmware、位置与 fault；任何失败即停止。
+4. **Nero enable：**在人员监护、低速、清空工作空间条件下，仅使能 Nero 并观察状态；确认没有非预期运动，再继续。
+5. **L20 单独小动作：**运行 `l20_example.py --execute`，输入 `EXECUTE`，只发送一次相对当前反馈的最小主动 raw 槽位变化；重新读取反馈。
+6. **Nero 单独小动作：**运行 `nero_example.py --execute`，输入 `EXECUTE`，只发送一次相对当前 `(7,)` rad 反馈的最小关节变化；重新读取反馈。
+7. **联合动作：**运行 `nero_l20_example.py --execute`，输入 `EXECUTE`，只执行一次最小 `RobotSystem.step()`，并记录时间戳、输出和异常处理。
+8. **连续 step：**只在单次联合动作和频率边界已逐级验证后，才在现场监督下小步扩大连续 `step()` 的频率；它不是跨设备原子事务。
+9. **数据采集：**在已验证的低风险频率下记录 canonical observation、action、timestamp、SDK 提交和 fresh/cached 标记，且保持单一控制者。
+10. **DP/VLA：**最后才接入 Diffusion Policy/ACT、VLA 或 Teleoperation；先只读/回放，再在上述机械与频率边界内受监督运行。
