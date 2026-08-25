@@ -88,12 +88,18 @@ class NeroArm:
     def _validate_delta_setting(value: Optional[float]) -> Optional[float]:
         if value is None:
             return None
-        if isinstance(value, bool) or not np.isscalar(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float, np.integer, np.floating))
+        ):
             raise ValueError("max_joint_delta must be a finite nonnegative value.")
-        value = float(value)
-        if not np.isfinite(value) or value < 0:
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("max_joint_delta must be a finite nonnegative value.") from exc
+        if not np.isfinite(normalized) or normalized < 0:
             raise ValueError("max_joint_delta must be a finite nonnegative value.")
-        return value
+        return normalized
 
     def connect(self) -> None:
         """连接 Nero CAN Driver；重复调用不会重复连接。
@@ -179,16 +185,19 @@ class NeroArm:
             raise RuntimeError("Nero arm is not enabled.")
 
     @staticmethod
-    def _validate_retry_settings(timeout: float, poll_interval: float) -> None:
-        try:
-            timeout_value = float(timeout)
-            poll_interval_value = float(poll_interval)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("timeout and poll_interval must be finite numbers.") from exc
-        if isinstance(timeout, bool) or not np.isfinite(timeout_value) or timeout_value < 0:
+    def _validate_retry_settings(timeout: float, poll_interval: float) -> tuple[float, float]:
+        valid_number_types = (int, float, np.integer, np.floating)
+        if isinstance(timeout, bool) or not isinstance(timeout, valid_number_types):
             raise ValueError("timeout must be nonnegative.")
-        if isinstance(poll_interval, bool) or not np.isfinite(poll_interval_value) or poll_interval_value <= 0:
+        if isinstance(poll_interval, bool) or not isinstance(poll_interval, valid_number_types):
             raise ValueError("poll_interval must be positive.")
+        timeout_value = float(timeout)
+        poll_interval_value = float(poll_interval)
+        if not np.isfinite(timeout_value) or timeout_value < 0:
+            raise ValueError("timeout must be nonnegative.")
+        if not np.isfinite(poll_interval_value) or poll_interval_value <= 0:
+            raise ValueError("poll_interval must be positive.")
+        return timeout_value, poll_interval_value
 
     def _retry_until_true(
         self,
@@ -198,14 +207,16 @@ class NeroArm:
         poll_interval: float,
         message: str,
     ) -> None:
-        self._validate_retry_settings(timeout, poll_interval)
-        deadline = time.monotonic() + timeout
+        timeout_value, poll_interval_value = self._validate_retry_settings(
+            timeout, poll_interval,
+        )
+        deadline = time.monotonic() + timeout_value
         while True:
             if bool(operation()):
                 return
             if time.monotonic() >= deadline:
                 raise TimeoutError(message)
-            time.sleep(poll_interval)
+            time.sleep(poll_interval_value)
 
     def enable(self, timeout: float = 5.0, poll_interval: float = 0.05) -> None:
         """在有限时间内重试使能 Nero 全部七轴。
@@ -279,10 +290,17 @@ class NeroArm:
             七轴目标角度，单位 rad。完整限位校验由 ``validate_joint_command``
             提供。
 
+        Returns
+        -------
+        None
+            目标发送后立即返回。
+
         Raises
         ------
         RuntimeError
-            未连接或七轴未全部使能时抛出。
+            未连接、七轴未全部使能，或启用变化量限制时反馈不可用时抛出。
+        ValueError
+            目标的形状、数值、官方限位或变化量不合法时抛出。
 
         Notes
         -----
@@ -293,9 +311,9 @@ class NeroArm:
         self._driver.move_j(self.validate_joint_command(joints).tolist())
 
     @staticmethod
-    def _array_from_values(values: Any, expected_shape: tuple[int, ...]) -> np.ndarray:
+    def _array_from_input(values: Any, expected_shape: tuple[int, ...]) -> np.ndarray:
         if values is None:
-            raise RuntimeError("Nero SDK feedback is unavailable.")
+            raise ValueError("Values must not be None.")
         try:
             array = np.asarray(values, dtype=np.float64)
         except (TypeError, ValueError) as exc:
@@ -305,6 +323,13 @@ class NeroArm:
         if not np.all(np.isfinite(array)):
             raise ValueError("Values must all be finite.")
         return array.copy()
+
+    @staticmethod
+    def _array_from_feedback(values: Any, expected_shape: tuple[int, ...]) -> np.ndarray:
+        try:
+            return NeroArm._array_from_input(values, expected_shape)
+        except ValueError as exc:
+            raise RuntimeError("Nero SDK feedback is unavailable or malformed.") from exc
 
     @staticmethod
     def _message_or_raise(message: Any) -> Any:
@@ -407,15 +432,15 @@ class NeroArm:
         Raises
         ------
         RuntimeError
-            未连接或官方反馈不可用时抛出。
-        ValueError
-            SDK 反馈形状或数值不合法时抛出。
+            未连接、官方反馈不可用，或反馈形状/数值不合法时抛出。
 
         Notes
         -----
         由 ``Driver.get_joint_angles().msg`` 转换；不阻塞且不伪造零值。
         """
-        return self._array_from_values(self.get_raw_joint_positions().msg, (NERO_DOF,))
+        return self._array_from_feedback(
+            self.get_raw_joint_positions().msg, (NERO_DOF,),
+        )
 
     def get_joint_torques(self) -> np.ndarray:
         """读取七轴电机扭矩反馈。
@@ -428,9 +453,7 @@ class NeroArm:
         Raises
         ------
         RuntimeError
-            未连接或任一反馈不可用时抛出。
-        ValueError
-            SDK 扭矩数值不合法时抛出。
+            未连接、任一反馈不可用，或扭矩反馈形状/数值不合法时抛出。
 
         Notes
         -----
@@ -441,7 +464,7 @@ class NeroArm:
             torques = [message.msg.torque for message in messages]
         except AttributeError as exc:
             raise RuntimeError("Nero SDK feedback is unavailable.") from exc
-        return self._array_from_values(torques, (NERO_DOF,))
+        return self._array_from_feedback(torques, (NERO_DOF,))
 
     def get_flange_pose(self) -> np.ndarray:
         """读取法兰在世界坐标中的六维位姿。
@@ -455,15 +478,13 @@ class NeroArm:
         Raises
         ------
         RuntimeError
-            未连接或反馈不可用时抛出。
-        ValueError
-            SDK 反馈形状或数值不合法时抛出。
+            未连接、反馈不可用，或反馈形状/数值不合法时抛出。
 
         Notes
         -----
         由 ``Driver.get_flange_pose().msg`` 转换；不阻塞。
         """
-        return self._array_from_values(self.get_raw_flange_pose().msg, (6,))
+        return self._array_from_feedback(self.get_raw_flange_pose().msg, (6,))
 
     def get_tcp_pose(self) -> np.ndarray:
         """读取 TCP 在世界坐标中的六维位姿。
@@ -477,9 +498,7 @@ class NeroArm:
         Raises
         ------
         RuntimeError
-            未连接或反馈不可用时抛出。
-        ValueError
-            SDK 反馈形状或数值不合法时抛出。
+            未连接、反馈不可用，或反馈形状/数值不合法时抛出。
 
         Notes
         -----
@@ -487,7 +506,7 @@ class NeroArm:
         """
         self._require_connected()
         message = self._message_or_raise(self._driver.get_tcp_pose())
-        return self._array_from_values(message.msg, (6,))
+        return self._array_from_feedback(message.msg, (6,))
 
     @staticmethod
     def _to_plain_data(value: Any) -> Any:
@@ -499,6 +518,16 @@ class NeroArm:
             return {key: NeroArm._to_plain_data(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [NeroArm._to_plain_data(item) for item in value]
+        fields = getattr(value, "_fields_", None)
+        if fields is not None:
+            try:
+                return {
+                    field: NeroArm._to_plain_data(getattr(value, field))
+                    for field in fields
+                    if isinstance(field, str) and not field.startswith("_")
+                }
+            except AttributeError as exc:
+                raise RuntimeError("Nero SDK feedback cannot be serialized.") from exc
         try:
             attributes = vars(value)
         except TypeError as exc:
@@ -525,7 +554,8 @@ class NeroArm:
 
         Notes
         -----
-        映射 ``Driver.get_firmware()``；不会根据报告结果切换固定的 v1.11 实现。
+        映射 ``Driver.get_firmware()``，官方请求/响应调用可能阻塞；不会根据报告
+        结果切换固定的 v1.11 实现。
         """
         self._require_connected()
         firmware = self._driver.get_firmware()
@@ -573,9 +603,7 @@ class NeroArm:
         Raises
         ------
         RuntimeError
-            未连接或任一底层反馈不可用时抛出。
-        ValueError
-            底层反馈的形状或数值不合法时抛出。
+            未连接、任一底层反馈不可用，或反馈形状/数值不合法时抛出。
 
         Notes
         -----
@@ -600,9 +628,7 @@ class NeroArm:
         Raises
         ------
         RuntimeError
-            未连接或反馈不可用时抛出。
-        ValueError
-            反馈形状或数值不合法时抛出。
+            未连接、反馈不可用，或反馈形状/数值不合法时抛出。
 
         Notes
         -----
@@ -640,7 +666,7 @@ class NeroArm:
         限位只来自 ``Driver.get_config()["joint_limits"]``；不会截断目标，
         变化量检查会读取 ``Driver.get_joint_angles()``，可能短暂阻塞。
         """
-        command = self._array_from_values(joints, (NERO_DOF,))
+        command = self._array_from_input(joints, (NERO_DOF,))
         for index, (lower, upper) in enumerate(self._joint_limits, start=1):
             if command[index - 1] < lower or command[index - 1] > upper:
                 raise ValueError(f"joint {index} violates official joint limits.")
@@ -664,7 +690,7 @@ class NeroArm:
 
     @staticmethod
     def _validate_pose(pose: Any) -> np.ndarray:
-        result = NeroArm._array_from_values(pose, (6,))
+        result = NeroArm._array_from_input(pose, (6,))
         if result[3] < -np.pi or result[3] > np.pi:
             raise ValueError("roll must be in [-pi, pi].")
         if result[4] < -np.pi / 2 or result[4] > np.pi / 2:
@@ -689,6 +715,11 @@ class NeroArm:
             关节 1--7 目标位置，单位 rad，受官方限位与配置变化量限制。
         speed_percent : int or None, optional
             官方速度百分比，范围 ``[0, 100]``；不是 rad/s，``None`` 保持 SDK 设置。
+
+        Returns
+        -------
+        None
+            可选速度设置与目标发送后立即返回。
 
         Raises
         ------
@@ -719,6 +750,11 @@ class NeroArm:
         speed_percent : int or None, optional
             官方速度百分比整数 ``[0, 100]``；``None`` 保持 SDK 设置。
 
+        Returns
+        -------
+        None
+            可选速度设置与目标发送后立即返回。
+
         Raises
         ------
         RuntimeError
@@ -746,6 +782,11 @@ class NeroArm:
             roll/yaw 在 ``[-pi, pi]``，pitch 在 ``[-pi/2, pi/2]``。
         speed_percent : int or None, optional
             官方速度百分比整数 ``[0, 100]``；``None`` 保持 SDK 设置。
+
+        Returns
+        -------
+        None
+            可选速度设置与目标发送后立即返回。
 
         Raises
         ------

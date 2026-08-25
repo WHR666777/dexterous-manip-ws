@@ -13,6 +13,56 @@ class Message:
         self.hz = hz
 
 
+class FieldBackedErrorStatus:
+    """模拟官方 ``AttributeBase`` 的字段顺序和公开属性。"""
+
+    _fields_ = ("joint_1_angle_limit", "communication_status_joint_1")
+
+    def __init__(self):
+        self._internal_bits = 0
+        self.joint_1_angle_limit = False
+        self.communication_status_joint_1 = True
+
+
+class FieldBackedV111Status:
+    """模拟 v1.11 以私有存储和 property 暴露状态字段的对象。"""
+
+    _fields_ = (
+        "ctrl_mode", "arm_status", "mode_feedback", "teach_status",
+        "motion_status", "trajectory_num", "err_status",
+    )
+
+    def __init__(self):
+        self._ctrl_mode = 1
+        self._arm_status = 0
+        self._mode_feedback = 6
+        self._teach_status = 2
+        self._motion_status = 1
+        self.trajectory_num = 17
+        self.err_status = FieldBackedErrorStatus()
+        self._private_cache = "do not leak"
+
+    @property
+    def ctrl_mode(self):
+        return self._ctrl_mode
+
+    @property
+    def arm_status(self):
+        return self._arm_status
+
+    @property
+    def mode_feedback(self):
+        return self._mode_feedback
+
+    @property
+    def teach_status(self):
+        return self._teach_status
+
+    @property
+    def motion_status(self):
+        return self._motion_status
+
+
 class FakeNeroDriver:
     def __init__(self):
         self.connected = False
@@ -323,3 +373,90 @@ def test_status_and_safety_methods_map_without_message_leakage():
     arm.reset()
     assert driver.estopped is True
     assert driver.reset_called is True
+
+
+def test_status_serializes_v111_field_properties_without_private_storage():
+    arm, driver = make_connected_arm()
+    driver.status = FieldBackedV111Status()
+    assert arm.get_arm_status() == {
+        "ctrl_mode": 1,
+        "arm_status": 0,
+        "mode_feedback": 6,
+        "teach_status": 2,
+        "motion_status": 1,
+        "trajectory_num": 17,
+        "err_status": {
+            "joint_1_angle_limit": False,
+            "communication_status_joint_1": True,
+        },
+    }
+
+
+@pytest.mark.parametrize("feedback", [
+    None,
+    ["not-a-number"] * 7,
+    [0.0] * 6,
+    [0.0, 0.0, 0.0, np.nan, 0.0, 0.0, 0.0],
+])
+def test_joint_position_feedback_malformed_data_raises_runtime_error(feedback):
+    arm, driver = make_connected_arm()
+    driver.get_joint_angles = lambda: None if feedback is None else Message(feedback)
+    with pytest.raises(RuntimeError, match="feedback"):
+        arm.get_joint_positions()
+
+
+@pytest.mark.parametrize("method_name", ["get_flange_pose", "get_tcp_pose"])
+@pytest.mark.parametrize("feedback", [
+    None,
+    ["not-a-number"] * 6,
+    [0.0] * 5,
+    [0.0, 0.0, np.nan, 0.0, 0.0, 0.0],
+])
+def test_pose_feedback_malformed_data_raises_runtime_error(method_name, feedback):
+    arm, driver = make_connected_arm()
+    setattr(driver, method_name, lambda: None if feedback is None else Message(feedback))
+    with pytest.raises(RuntimeError, match="feedback"):
+        getattr(arm, method_name)()
+
+
+@pytest.mark.parametrize("torque", [None, "not-a-number", [0.0], np.nan])
+def test_torque_feedback_malformed_data_raises_runtime_error(torque):
+    arm, driver = make_connected_arm()
+    if torque is None:
+        driver.get_motor_states = lambda index: None
+    else:
+        driver.get_motor_states = lambda index: Message(SimpleNamespace(torque=torque))
+    with pytest.raises(RuntimeError, match="feedback"):
+        arm.get_joint_torques()
+
+
+@pytest.mark.parametrize("joint_input", [None, "not-a-number"])
+def test_joint_commands_classify_invalid_values_as_value_error(joint_input):
+    arm, _ = make_connected_arm()
+    with pytest.raises(ValueError):
+        arm.command_joint_positions(joint_input)
+    with pytest.raises(ValueError):
+        arm.move_joints(joint_input)
+
+
+@pytest.mark.parametrize("pose_input", [None, "not-a-number"])
+def test_pose_commands_classify_invalid_values_as_value_error(pose_input):
+    arm, _ = make_connected_arm()
+    with pytest.raises(ValueError):
+        arm.move_pose(pose_input)
+    with pytest.raises(ValueError):
+        arm.move_linear(pose_input)
+
+
+@pytest.mark.parametrize("timeout, poll_interval", [("0.01", 0.001), (0.01, "0.001")])
+def test_lifecycle_rejects_numeric_strings_before_dispatch(timeout, poll_interval):
+    arm, driver = make_connected_arm(enabled=False)
+    with pytest.raises(ValueError):
+        arm.enable(timeout=timeout, poll_interval=poll_interval)
+    assert driver.enable_calls == 0
+
+
+@pytest.mark.parametrize("setting", [1 + 2j, object()])
+def test_constructor_normalizes_invalid_delta_settings_to_value_error(setting):
+    with pytest.raises(ValueError, match="max_joint_delta"):
+        NeroArm(driver=FakeNeroDriver(), max_joint_delta=setting)
