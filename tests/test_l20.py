@@ -235,3 +235,34 @@ def test_malformed_five_motor_inputs_are_value_error_before_connection(method, v
     hand = LinkerHandL20(api_factory=lambda **kwargs: FakeLinkerApi())
     with pytest.raises(ValueError):
         getattr(hand, method)(value)
+
+
+def test_default_factory_lazily_loads_api_class_then_constructs_with_l20_config(monkeypatch):
+    loader_calls = []
+    constructor_calls = []
+    api = FakeLinkerApi()
+
+    def official_api_class(**kwargs):
+        constructor_calls.append(kwargs)
+        return api
+
+    def load_official_api_class():
+        loader_calls.append(True)
+        return official_api_class
+
+    monkeypatch.setattr("robot_control.l20._load_linker_api", load_official_api_class)
+    hand = LinkerHandL20(hand_type="left", can_channel="can7")
+    assert loader_calls == []
+    hand.connect()
+    hand.connect()
+    assert loader_calls == [True]
+    assert constructor_calls == [{
+        "hand_type": "left", "hand_joint": "L20",
+        "modbus": "None", "can": "can7",
+    }]
+
+
+def test_fresh_position_selection_is_keyword_only():
+    hand, _ = connected_hand()
+    with pytest.raises(TypeError):
+        hand.get_joint_positions_raw(False)

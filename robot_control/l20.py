@@ -71,12 +71,29 @@ def _load_linker_api() -> Callable[..., Any]:
 
 
 class LinkerHandL20:
-    """以固定官方 L20 映射控制 LinkerHand 右手。
+    """以固定官方 L20 映射控制 LinkerHand 左手或右手。
 
+    Parameters
+    ----------
+    hand_type : {"left", "right"}, default="right"
+        官方 SDK 的手型标识。
+    can_channel : str, default="can1"
+        官方 SDK 使用的 CAN 通道名称。
+    join_timeout : float, default=1.0
+        每次断开时有限等待 SDK 接收线程退出的秒数。
+    api_factory : callable or None, optional
+        无硬件测试的官方 API 构造注入缝；``None`` 时在连接阶段懒加载 SDK。
+
+    Raises
+    ------
+    ValueError
+        构造配置不合法时抛出。
+
+    Notes
+    -----
     构造时不导入 SDK、不创建 CAN 对象；仅在 :meth:`connect` 创建官方
     ``LinkerHandApi``。位置始终以官方 20 槽位顺序表示，速度、电流和故障
-    仅暴露 SDK 已支持的五电机数据。 ``api_factory`` 是无硬件测试的唯一外部
-    CAN 注入缝，不改变真实 SDK 调用顺序。
+    仅暴露 SDK 已支持的五电机数据。注入缝不改变真实 SDK 调用顺序。
     """
 
     def __init__(
@@ -116,8 +133,8 @@ class LinkerHandL20:
         self._hand_type = hand_type
         self._can_channel = can_channel
         self._join_timeout = self._validate_join_timeout(join_timeout)
-        self._api_factory = _load_linker_api if api_factory is None else api_factory
-        if not callable(self._api_factory):
+        self._api_factory = api_factory
+        if self._api_factory is not None and not callable(self._api_factory):
             raise ValueError("api_factory must be callable or None.")
         self._api: Optional[Any] = None
         self._cleanup_api: Optional[Any] = None
@@ -153,15 +170,19 @@ class LinkerHandL20:
 
         Notes
         -----
-        精确调用 ``LinkerHandApi(hand_type=..., hand_joint="L20",
-        modbus="None", can=...)``。SDK 构造会访问 CAN，可能阻塞；重复调用
-        已连接实例不会重复创建 API。
+        ``api_factory=None`` 时先在本调用内懒加载 ``LinkerHandApi`` 类，再精确
+        调用 ``LinkerHandApi(hand_type=..., hand_joint="L20", modbus="None",
+        can=...)``。SDK 构造会访问 CAN，可能阻塞；重复调用已连接实例不会重复
+        创建 API。
         """
         if self._api is not None:
             return
         if self._cleanup_api is not None:
             raise RuntimeError("L20 receive-thread cleanup is still pending.")
-        self._api = self._api_factory(
+        factory = self._api_factory
+        if factory is None:
+            factory = _load_linker_api()
+        self._api = factory(
             hand_type=self._hand_type,
             hand_joint="L20",
             modbus="None",
@@ -397,7 +418,7 @@ class LinkerHandL20:
             feedback, _L20_POSITION_SHAPE, "position", raw=True,
         )
 
-    def get_joint_positions_raw(self, fresh: bool = True) -> np.ndarray:
+    def get_joint_positions_raw(self, *, fresh: bool = True) -> np.ndarray:
         """读取新鲜或已缓存的 20 槽位原始位置。
 
         Parameters
@@ -420,7 +441,8 @@ class LinkerHandL20:
 
         Notes
         -----
-        新鲜读取可能被 SDK 的 CAN 请求短暂阻塞；缓存读取不制造缺失数据。
+        官方 ``get_state()`` 依次请求四类位置帧，典型源端等待约 40 ms；封装
+        不承诺新鲜读取可超过 20 Hz。缓存读取不请求 CAN，也不制造缺失数据。
         """
         return self._get_joint_positions_raw(self._validate_fresh(fresh))
 
@@ -443,7 +465,7 @@ class LinkerHandL20:
         """
         return self._get_joint_positions_raw(False)
 
-    def get_joint_positions_normalized(self, fresh: bool = True) -> np.ndarray:
+    def get_joint_positions_normalized(self, *, fresh: bool = True) -> np.ndarray:
         """读取新鲜或缓存位置并转换为 ``[-1, 1]``。
 
         Parameters
@@ -465,7 +487,8 @@ class LinkerHandL20:
 
         Notes
         -----
-        不推断保留槽位；它们仍按官方 20 槽位原样转换。
+        ``fresh=True`` 时的源端读取典型等待约 40 ms，封装不承诺可超过 20 Hz；
+        不推断保留槽位，它们仍按官方 20 槽位原样转换。
         """
         return self.get_joint_positions_raw(fresh=fresh).astype(np.float64) / 127.5 - 1.0
 
@@ -594,6 +617,8 @@ class LinkerHandL20:
         -------
         numpy.ndarray, shape (5,), dtype int64
             五电机独立整数故障码副本，范围 ``[0, 255]``。
+            ``0`` 为正常，``1`` 为电流过载，``2`` 为过温，``3`` 为编码器错误，
+            ``4`` 为过压或欠压。
 
         Raises
         ------
