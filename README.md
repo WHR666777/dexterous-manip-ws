@@ -165,7 +165,7 @@ VLA 或 Teleoperation 同样只能作为单一命令源，先经过人工监督�
 
 **静态验证：**项目测试使用注入假驱动、官方 API/源码契约和命令行 `--help`，不连接 CAN、不创建真实设备、不发送硬件命令。根目录 `python3 -m pytest -q` 仅发现 `tests/`，避免嵌套官方 SDK 的同名测试包干扰。
 
-**真机验证：**尚未执行。以下均为 true-hardware pending，不得由静态测试推断为已通过：实际 `can0`（Nero）/`can1`（L20）与右手映射、Nero 固件 report、Nero enable 是否实际成功及 disable/急停后 reset 的下落行为、不同 `move_j()` 频率、L20 fresh 延迟、L20 temperature 的长度和单位、五电机 speed/current 与实体电机的对应关系、官方 open/close presets 对当前安装姿态的适用性，以及同一 Python 进程中双 SocketCAN 的稳定性。CAN bitrate、断开 shim、Nero/L20 实际运动、DP/ACT/VLA/遥操作闭环和机械安全也同样待真机验证。
+**真机验证：**尚未执行。以下均为 true-hardware pending，不得由静态测试推断为已通过：实际 `can0`（Nero）/`can1`（L20）与右手映射、Nero 固件 report、Nero enable 是否实际成功及 disable/急停后 reset 的下落行为、Nero `move_j()` 控制在 10/20/30/50 Hz 的稳定性、L20 fresh 延迟、L20 temperature 的长度和单位、五电机 speed/current 与实体电机的对应关系、官方 open/close presets 对当前安装姿态的适用性，以及同一 Python 进程中双 SocketCAN 的稳定性。CAN bitrate、断开 shim、Nero/L20 实际运动、DP/ACT/VLA/遥操作闭环和机械安全也同样待真机验证。
 
 ## 建议的第一次真机测试顺序
 
