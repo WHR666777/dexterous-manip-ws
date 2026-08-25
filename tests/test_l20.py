@@ -151,6 +151,12 @@ def test_normalized_position_maps_endpoints_and_midpoint_half_up():
     assert api.commands[-1] == [0, 128, 255] + [128] * 17
 
 
+def test_normalized_position_accepts_spec_action_keyword():
+    hand, api = connected_hand()
+    hand.set_joint_positions_normalized(action=[-1.0, 0.0, 1.0] + [0.0] * 17)
+    assert api.commands[-1] == [0, 128, 255] + [128] * 17
+
+
 def test_fresh_and_cached_positions_are_explicit_copies():
     hand, api = connected_hand()
     fresh = hand.get_joint_positions_raw(fresh=True)

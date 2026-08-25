@@ -379,12 +379,12 @@ class LinkerHandL20:
         raw = self._validate_raw_values(positions, _L20_POSITION_SHAPE, "position")
         self._require_connected().finger_move(pose=raw.tolist())
 
-    def set_joint_positions_normalized(self, positions: Any) -> None:
+    def set_joint_positions_normalized(self, action: Any) -> None:
         """将归一化 20 槽位目标半向上转换后发送。
 
         Parameters
         ----------
-        positions : array-like, shape (20,)
+        action : array-like, shape (20,)
             每项为有限值 ``[-1, 1]``；``-1`` 映射 0，``0`` 映射 128，``1``
             映射 255。
 
@@ -405,7 +405,7 @@ class LinkerHandL20:
         使用 ``floor((x + 1) * 127.5 + 0.5)`` 半向上量化，再映射
         ``finger_move(pose=...)``；不等待运动完成。
         """
-        values = self._array_from_input(positions, _L20_POSITION_SHAPE, "position")
+        values = self._array_from_input(action, _L20_POSITION_SHAPE, "position")
         if np.any(values < -1.0) or np.any(values > 1.0):
             raise ValueError("L20 normalized position values must be in [-1, 1].")
         raw = np.floor((values + 1.0) * 127.5 + 0.5).astype(np.int64)
