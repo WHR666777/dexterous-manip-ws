@@ -21,12 +21,26 @@ class FakeReceiveThread:
 
 
 class FakeLowLevelHand:
-    def __init__(self):
+    def __init__(self, api=None):
+        self.api = api
         self.running = True
         self.closed = False
         self.close_calls = 0
         self.close_failures_remaining = 0
         self.receive_thread = FakeReceiveThread()
+        self.sent_commands = []
+        self.x41, self.x42, self.x43, self.x44, self.x45 = (
+            [0] * 6, [1] * 6, [2] * 6, [3] * 6, [4] * 6,
+        )
+        self.cached_mapping_calls = []
+
+    def send_command(self, frame_property, data_list):
+        copied = list(data_list)
+        self.sent_commands.append((frame_property, copied))
+
+    def joint_state_to_cmd_state(self, state):
+        self.cached_mapping_calls.append([list(row) for row in state])
+        return list(self.api.positions)
 
     def close_can_interface(self):
         self.close_calls += 1
@@ -38,15 +52,18 @@ class FakeLowLevelHand:
 
 class FakeLinkerApi:
     def __init__(self):
-        self.hand = FakeLowLevelHand()
+        self.hand = FakeLowLevelHand(self)
         self.version = "3.1.1"
         self.positions = list(range(20))
         self.state_request_calls = 0
         self.cache_read_calls = 0
+        self.cache_returns_none = False
         self.commands = []
-        self.speed = [10, 20, 30, 40, 50]
-        self.current = [50, 40, 30, 20, 10]
-        self.fault = [0, 1, 2, 3, 4]
+        self.speed_commands = []
+        self.speed = list(range(20))
+        self.torque_commands = []
+        self.torque = list(range(20, 40))
+        self.fault = [0, 1, 2, 3, 4] * 4
         self.temperature = list(range(20, 40))
 
     def finger_move(self, pose):
@@ -58,25 +75,27 @@ class FakeLinkerApi:
 
     def get_state_for_pub(self):
         self.cache_read_calls += 1
+        if self.cache_returns_none:
+            return None
         return list(self.positions)
 
     def set_speed(self, speed):
-        self.speed = list(speed)
+        self.speed_commands.append(list(speed))
 
     def get_speed(self):
         return list(self.speed)
 
-    def set_current(self, current):
-        self.current = list(current)
+    def set_torque(self, torque):
+        self.torque_commands.append(list(torque))
 
-    def get_current(self):
-        return list(self.current)
+    def get_torque(self):
+        return list(self.torque)
 
     def get_fault(self):
         return list(self.fault)
 
     def clear_faults(self):
-        self.fault = [0] * 5
+        self.fault = [0] * 20
 
     def get_temperature(self):
         return list(self.temperature)
@@ -98,7 +117,7 @@ def test_connect_is_lazy_and_disconnect_stops_only_the_sdk_bus():
     assert not hand.is_connected()
     hand.connect()
     assert created == [{
-        "hand_type": "right", "hand_joint": "L20",
+        "hand_type": "right", "hand_joint": "G20",
         "modbus": "None", "can": "can1",
     }]
     hand.disconnect()
@@ -197,6 +216,21 @@ def test_fresh_and_cached_positions_are_explicit_copies():
     assert hand.get_active_joint_indices() == L20_ACTIVE_POSITION_INDICES
 
 
+def test_g20_cached_position_recovers_from_sdk_missing_return_without_request():
+    """直接相信 G20 的 None 返回会让缓存观测永久不可用。"""
+    hand, api = connected_hand()
+    api.cache_returns_none = True
+
+    result = hand.get_cached_joint_positions_raw()
+
+    assert result.tolist() == list(range(20))
+    assert api.cache_read_calls == 1
+    assert api.state_request_calls == 0
+    assert api.hand.cached_mapping_calls == [[
+        [0] * 6, [1] * 6, [2] * 6, [3] * 6, [4] * 6,
+    ]]
+
+
 def test_fresh_true_selects_request_path_without_claiming_a_new_generation():
     hand, api = connected_hand()
     expected_cached_values = list(api.positions)
@@ -215,17 +249,29 @@ def test_invalid_sdk_position_feedback_is_not_padded_or_fabricated():
         hand.get_joint_positions_raw(fresh=True)
 
 
-def test_supported_five_motor_data_and_temperature_shapes():
+def test_g20_control_and_diagnostic_shapes_are_preserved_for_physical_l20():
     hand, api = connected_hand()
     hand.set_speed([1, 2, 3, 4, 5])
-    hand.set_current([5, 4, 3, 2, 1])
-    assert hand.get_speed().tolist() == [1, 2, 3, 4, 5]
-    assert hand.get_current().tolist() == [5, 4, 3, 2, 1]
-    assert hand.get_fault().shape == (5,)
+    hand.set_torque([5, 4, 3, 2, 1])
+    assert hand.get_speed().tolist() == list(range(20))
+    assert hand.get_torque().tolist() == list(range(20, 40))
+    assert hand.get_fault().shape == (20,)
     assert hand.get_temperature().shape == (20,)
     hand.clear_faults()
-    assert api.fault == [0] * 5
+    assert api.fault == [0] * 20
+    assert api.speed_commands == [[1, 2, 3, 4, 5]]
+    assert api.torque_commands == [[5, 4, 3, 2, 1]]
     assert hand.get_sdk_version() == "3.1.1"
+
+
+def test_l20_speed_uses_g20_public_five_finger_api():
+    """绕过 G20 公共 API 会退回不适用于当前硬件的旧 L20 速度帧。"""
+    hand, api = connected_hand()
+
+    hand.set_speed([1, 2, 3, 4, 5])
+
+    assert api.speed_commands == [[1, 2, 3, 4, 5]]
+    assert api.hand.sent_commands == []
 
 
 def test_temperature_rejects_upstream_missing_data_sentinel():
@@ -237,9 +283,9 @@ def test_temperature_rejects_upstream_missing_data_sentinel():
 
 @pytest.mark.parametrize("method,value", [
     ("set_speed", [1, 2, 3, 4]),
-    ("set_current", [1, 2, 3, 4, 256]),
+    ("set_torque", [1, 2, 3, 4, 256]),
 ])
-def test_five_motor_setters_validate_exact_shape_and_range(method, value):
+def test_five_finger_setters_validate_exact_shape_and_range(method, value):
     hand, _ = connected_hand()
     with pytest.raises(ValueError):
         getattr(hand, method)(value)
@@ -259,9 +305,9 @@ def test_official_open_and_close_presets_are_used_exactly():
     ]
 
 
-def test_fake_torque_and_embedded_version_are_not_public_wrapper_methods():
-    assert not hasattr(LinkerHandL20, "get_torque")
-    assert not hasattr(LinkerHandL20, "set_torque")
+def test_unsupported_g20_current_and_embedded_version_are_not_public_methods():
+    assert not hasattr(LinkerHandL20, "get_current")
+    assert not hasattr(LinkerHandL20, "set_current")
     assert not hasattr(LinkerHandL20, "get_version")
 
 
@@ -287,15 +333,15 @@ def test_pending_cleanup_is_disconnected_rejects_connect_and_retries_only_join()
 
 @pytest.mark.parametrize("method,value", [
     ("set_speed", None),
-    ("set_current", [10 ** 1000] * 5),
+    ("set_torque", [10 ** 1000] * 5),
 ])
-def test_malformed_five_motor_inputs_are_value_error_before_connection(method, value):
+def test_malformed_five_finger_inputs_are_value_error_before_connection(method, value):
     hand = LinkerHandL20(api_factory=lambda **kwargs: FakeLinkerApi())
     with pytest.raises(ValueError):
         getattr(hand, method)(value)
 
 
-def test_default_factory_lazily_loads_api_class_then_constructs_with_l20_config(monkeypatch):
+def test_default_factory_lazily_constructs_g20_driver_for_physical_l20(monkeypatch):
     loader_calls = []
     constructor_calls = []
     api = FakeLinkerApi()
@@ -315,7 +361,7 @@ def test_default_factory_lazily_loads_api_class_then_constructs_with_l20_config(
     hand.connect()
     assert loader_calls == [True]
     assert constructor_calls == [{
-        "hand_type": "left", "hand_joint": "L20",
+        "hand_type": "left", "hand_joint": "G20",
         "modbus": "None", "can": "can7",
     }]
 
@@ -350,6 +396,60 @@ def test_default_official_partial_object_is_cleaned_when_init_exits(monkeypatch)
         hand.connect()
 
     partial = ExitingOfficialApi.instance
+    assert partial is not None
+    assert partial.hand.running is False
+    assert partial.hand.closed is True
+    assert partial.hand.receive_thread.join_timeout == 0.02
+    assert not hand.is_connected()
+
+
+def test_default_official_partial_object_is_cleaned_when_init_raises(monkeypatch):
+    class FailingOfficialApi:
+        instance = None
+
+        def __new__(cls):
+            instance = super().__new__(cls)
+            cls.instance = instance
+            return instance
+
+        def __init__(self, **kwargs):
+            self.hand = FakeLowLevelHand()
+            raise OSError("CAN initialization failed")
+
+    monkeypatch.setattr("robot_control.l20._load_linker_api", lambda: FailingOfficialApi)
+    hand = LinkerHandL20(join_timeout=0.02)
+
+    with pytest.raises(OSError, match="CAN initialization failed"):
+        hand.connect()
+
+    partial = FailingOfficialApi.instance
+    assert partial is not None
+    assert partial.hand.running is False
+    assert partial.hand.closed is True
+    assert partial.hand.receive_thread.join_timeout == 0.02
+    assert not hand.is_connected()
+
+
+def test_default_official_partial_object_is_cleaned_when_init_is_interrupted(monkeypatch):
+    class InterruptedOfficialApi:
+        instance = None
+
+        def __new__(cls):
+            instance = super().__new__(cls)
+            cls.instance = instance
+            return instance
+
+        def __init__(self, **kwargs):
+            self.hand = FakeLowLevelHand()
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("robot_control.l20._load_linker_api", lambda: InterruptedOfficialApi)
+    hand = LinkerHandL20(join_timeout=0.02)
+
+    with pytest.raises(KeyboardInterrupt):
+        hand.connect()
+
+    partial = InterruptedOfficialApi.instance
     assert partial is not None
     assert partial.hand.running is False
     assert partial.hand.closed is True

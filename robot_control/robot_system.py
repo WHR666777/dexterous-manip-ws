@@ -407,7 +407,7 @@ class RobotSystem:
                 self.arm.get_arm_status(), "Nero arm status",
             )
             fault = self._feedback_array(
-                self.hand.get_fault(), (5,), "L20 fault", integer=True,
+                self.hand.get_fault(), (20,), "L20 fault", integer=True,
             ).tolist()
             nero = {
                 "connected": bool(self.arm.is_connected()),

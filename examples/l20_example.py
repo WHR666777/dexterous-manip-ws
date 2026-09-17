@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -48,9 +49,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--delta-raw",
         type=int,
-        choices=(1, 2, 5, 10),
+        choices=(-10, -5, -2, -1, 1, 2, 5, 10),
         default=1,
-        help="相对当前反馈增加的保守原始位置增量，单位为 L20 raw value。",
+        help="相对当前反馈增减的保守原始位置量，单位为 L20 raw value。",
+    )
+    parser.add_argument(
+        "--speed-raw",
+        type=int,
+        choices=(10, 20, 30, 50),
+        default=30,
+        help="动作前设置的 G20 五指保守原始速度；默认 30。",
     )
     return parser
 
@@ -80,6 +88,7 @@ def run(
     args: argparse.Namespace,
     hand_factory: Callable[..., LinkerHandL20] = LinkerHandL20,
     confirm: Callable[[], bool] = confirm_execution,
+    wait: Callable[[float], None] = time.sleep,
 ) -> int:
     """连接 L20、打印已验证反馈，并在双重确认后改变一个主动槽位。
 
@@ -87,12 +96,15 @@ def run(
     ----------
     args : argparse.Namespace
         ``build_parser`` 解析的参数；``joint_index`` 为零基主动位置索引，
-        ``delta_raw`` 为整数 raw 增量。
+        ``delta_raw`` 为整数 raw 增量，``speed_raw`` 为 G20 五指统一原始速度。
     hand_factory : callable, optional
         创建公开 :class:`LinkerHandL20` 接口的工厂，默认创建真实封装；可注入
         无硬件测试替身。
     confirm : callable, optional
         返回精确执行确认结果的函数。
+    wait : callable, optional
+        动作发送后等待稳定时间的函数；默认映射 :func:`time.sleep`，测试可注入
+        无等待替身。
 
     Returns
     -------
@@ -102,10 +114,12 @@ def run(
 
     Notes
     -----
-    默认路径仅连接和读取 SDK 版本、20 槽位置以及五电机状态，不发送位置命令。
-    执行路径只在 ``--execute`` 与精确确认均成立后，从当前反馈复制 20 槽 raw
-    位置并改变一个主动槽位；不使用张开、握拳等预设。finally 始终尝试断开；断开
-    失败报告到标准错误流且不会掩盖已有主异常。
+    默认路径仅连接并通过 SDK 3.1.1 的 G20 协议读取版本、20 槽位置、速度、
+    最大扭矩、温度与故障，不发送位置命令。执行路径只在 ``--execute`` 与精确确认
+    均成立后，先为五指设置统一的保守 raw 速度，再从当前反馈复制 20 槽 raw 位置并
+    改变一个主动槽位；不使用张开、握拳等预设。发送后再次请求位置反馈供操作者比较，
+    但固定 SDK 不提供响应 generation，回读不单独证明该次 CAN 命令已经执行。
+    finally 始终尝试断开；断开失败报告到标准错误流且不会掩盖已有主异常。
     """
     hand = None
     exit_code = 0
@@ -115,7 +129,7 @@ def run(
         print("L20 SDK version:", hand.get_sdk_version())
         print("L20 position (raw):", hand.get_joint_positions_raw())
         print("L20 speed:", hand.get_speed())
-        print("L20 current:", hand.get_current())
+        print("L20 torque:", hand.get_torque())
         print("L20 temperature:", hand.get_temperature())
         print("L20 fault:", hand.get_fault())
         if not args.execute:
@@ -125,11 +139,18 @@ def run(
         else:
             target = hand.get_joint_positions_raw().copy()
             target[args.joint_index] += args.delta_raw
-            if target[args.joint_index] > 255:
-                print("Candidate L20 raw target exceeds 255: no position command was sent.")
+            if not 0 <= target[args.joint_index] <= 255:
+                print("Candidate L20 raw target is outside [0, 255]: "
+                      "no position command was sent.")
                 exit_code = 2
             else:
+                speed = np.full(5, args.speed_raw, dtype=np.int64)
+                print("L20 command speed (raw):", speed)
+                hand.set_speed(speed)
+                print("L20 command target (raw):", target)
                 hand.set_joint_positions_raw(target)
+                wait(0.5)
+                print("L20 position after command (raw):", hand.get_joint_positions_raw())
     except KeyboardInterrupt:
         print("Interrupted: no further L20 commands will be sent.")
         exit_code = 130

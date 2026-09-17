@@ -9,13 +9,12 @@ import config
 from examples import l20_example, nero_example, nero_l20_example
 
 
-def test_example_configuration_is_v111_and_uses_separate_buses():
-    """配置消费者获得固定固件和隔离的 CAN 总线。"""
+def test_example_configuration_matches_current_single_hand_wiring():
+    """当前仅连接灵巧手时，示例应使用操作者确认过的 can0。"""
     assert config.NERO_FIRMWARE == "1.11"
     assert config.NERO_CAN_INTERFACE == "socketcan"
     assert config.NERO_CAN_CHANNEL == "can0"
-    assert config.L20_CAN_CHANNEL == "can1"
-    assert config.NERO_CAN_CHANNEL != config.L20_CAN_CHANNEL
+    assert config.L20_CAN_CHANNEL == "can0"
     assert config.CONTROL_HZ == 20
 
 
@@ -47,6 +46,20 @@ def test_l20_delta_has_conservative_cli_bound():
     parser = l20_example.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["--execute", "--delta-raw", "100"])
+
+
+def test_l20_delta_accepts_conservative_negative_values():
+    """高位关节必须能用负增量向有效范围内测试。"""
+    args = l20_example.build_parser().parse_args(
+        ["--execute", "--delta-raw", "-5"],
+    )
+    assert args.delta_raw == -5
+
+
+def test_l20_speed_defaults_to_conservative_raw_value():
+    """遗漏速度参数会让位置测试沿用设备中的零速度。"""
+    args = l20_example.build_parser().parse_args([])
+    assert args.speed_raw == 30
 
 
 class FakeNeroArm:
@@ -188,7 +201,11 @@ class FakeL20Hand:
         self.kwargs = kwargs
         self.connected = False
         self.position = np.arange(20, dtype=np.int64) + 20
+        self.position_read_calls = 0
+        self.speed_commands = []
         self.raw_commands = []
+        self.command_events = []
+        self.fault_calls = 0
         self.disconnect_calls = 0
         self.disconnect_error = disconnect_error
         self.version_error = version_error
@@ -208,23 +225,31 @@ class FakeL20Hand:
         return "fake-sdk"
 
     def get_joint_positions_raw(self):
+        self.position_read_calls += 1
         return self.position.copy()
 
     def get_speed(self):
-        return np.zeros(5, dtype=np.int64)
+        return np.zeros(20, dtype=np.int64)
 
-    def get_current(self):
-        return np.zeros(5, dtype=np.int64)
+    def get_torque(self):
+        return np.zeros(20, dtype=np.int64)
 
     def get_temperature(self):
-        return np.zeros(5, dtype=np.int64)
+        return np.zeros(20, dtype=np.int64)
 
     def get_fault(self):
-        return np.zeros(5, dtype=np.int64)
+        self.fault_calls += 1
+        return np.zeros(20, dtype=np.int64)
+
+    def set_speed(self, speed):
+        copied = np.asarray(speed).copy()
+        self.speed_commands.append(copied)
+        self.command_events.append("speed")
 
     def set_joint_positions_raw(self, target):
         copied = np.asarray(target).copy()
         self.raw_commands.append(copied)
+        self.command_events.append("position")
         self.position = copied
 
 
@@ -235,6 +260,18 @@ def test_l20_run_without_execute_only_reads_and_disconnects():
 
     assert l20_example.run(args, hand_factory=lambda **kwargs: hand) == 0
     assert hand.connected is False
+    assert hand.speed_commands == []
+    assert hand.raw_commands == []
+    assert hand.disconnect_calls == 1
+
+
+def test_l20_run_reads_g20_fault_feedback():
+    """物理 L20 采用 G20 协议后应通过五指故障帧读取反馈。"""
+    hand = FakeL20Hand()
+    args = l20_example.build_parser().parse_args([])
+
+    assert l20_example.run(args, hand_factory=lambda **kwargs: hand) == 0
+    assert hand.fault_calls == 1
     assert hand.raw_commands == []
     assert hand.disconnect_calls == 1
 
@@ -250,6 +287,7 @@ def test_l20_execute_changes_one_active_position_from_feedback():
         args,
         hand_factory=lambda **kwargs: hand,
         confirm=lambda: True,
+        wait=lambda seconds: None,
     ) == 0
     assert len(hand.raw_commands) == 1
     assert np.array_equal(
@@ -258,6 +296,76 @@ def test_l20_execute_changes_one_active_position_from_feedback():
                   30, 31, 32, 33, 34, 40, 36, 37, 38, 39]),
     )
     assert hand.disconnect_calls == 1
+
+
+def test_l20_execute_rejects_target_below_zero_without_setting_speed():
+    """允许负增量后仍必须在任何动作发送前阻止 raw 下溢。"""
+    hand = FakeL20Hand()
+    hand.position[0] = 0
+    args = l20_example.build_parser().parse_args(
+        ["--execute", "--joint-index", "0", "--delta-raw", "-5"],
+    )
+
+    assert l20_example.run(
+        args,
+        hand_factory=lambda **kwargs: hand,
+        confirm=lambda: True,
+        wait=lambda seconds: None,
+    ) == 2
+    assert hand.speed_commands == []
+    assert hand.raw_commands == []
+
+
+def test_l20_execute_sets_speed_before_position():
+    """遗漏或晚发速度设置会让零速度设备忽略位置目标。"""
+    hand = FakeL20Hand()
+    args = l20_example.build_parser().parse_args(
+        ["--execute", "--joint-index", "15", "--delta-raw", "5"],
+    )
+
+    assert l20_example.run(
+        args,
+        hand_factory=lambda **kwargs: hand,
+        confirm=lambda: True,
+        wait=lambda seconds: None,
+    ) == 0
+    assert hand.command_events == ["speed", "position"]
+    assert len(hand.speed_commands) == 1
+    assert np.array_equal(hand.speed_commands[0], np.array([30, 30, 30, 30, 30]))
+
+
+def test_l20_execute_reads_position_after_single_command(capsys):
+    """删除动作后回读会让测试误把 SDK 正常返回当成硬件已执行。"""
+    hand = FakeL20Hand()
+    args = l20_example.build_parser().parse_args(
+        ["--execute", "--joint-index", "15", "--delta-raw", "5"],
+    )
+
+    assert l20_example.run(
+        args,
+        hand_factory=lambda **kwargs: hand,
+        confirm=lambda: True,
+        wait=lambda seconds: None,
+    ) == 0
+    assert hand.position_read_calls == 3
+    assert len(hand.raw_commands) == 1
+    assert "L20 position after command (raw):" in capsys.readouterr().out
+
+
+def test_l20_execute_waits_before_position_readback():
+    """删除动作稳定等待会让回读过早地观察到旧位置。"""
+    hand = FakeL20Hand()
+    waits = []
+    args = l20_example.build_parser().parse_args(["--execute"])
+
+    assert l20_example.run(
+        args,
+        hand_factory=lambda **kwargs: hand,
+        confirm=lambda: True,
+        wait=lambda seconds: waits.append(seconds),
+    ) == 0
+    assert waits == [0.5]
+    assert hand.position_read_calls == 3
 
 
 def test_l20_execute_rejected_confirmation_never_sends_position():
@@ -270,6 +378,7 @@ def test_l20_execute_rejected_confirmation_never_sends_position():
         hand_factory=lambda **kwargs: hand,
         confirm=lambda: False,
     ) == 0
+    assert hand.speed_commands == []
     assert hand.raw_commands == []
     assert hand.disconnect_calls == 1
 

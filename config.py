@@ -12,10 +12,12 @@ NERO_CAN_INTERFACE: str = "socketcan"
 NERO_CAN_CHANNEL: str = "can0"
 NERO_FIRMWARE: str = "1.11"
 NERO_MAX_JOINT_DELTA: Optional[float] = None
-NERO_SPEED_PERCENT: int = 10
+NERO_SPEED_PERCENT: int = 20
 
 L20_HAND_TYPE: str = "right"
 L20_HAND_MODEL: str = "L20"
-L20_CAN_CHANNEL: str = "can1"
+# 当前仅连接灵巧手时，它枚举为 can0。联合运行前必须重新核对两设备通道。
+L20_CAN_CHANNEL: str = "can2"
+L20_SPEED: int = [200, 200, 200, 200, 200]
 
 CONTROL_HZ: int = 20

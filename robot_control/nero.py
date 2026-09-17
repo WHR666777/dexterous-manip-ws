@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 import numpy as np
 
@@ -27,7 +27,8 @@ class NeroArm:
     """以固定 v1.11 Driver 控制七自由度 AgileX Nero 机械臂。
 
     该封装仅映射已核查的官方 ``pyAgxArm`` v1.11 接口，不提供逆
-    运动学、MIT/CPV/JS 控制或未经验证的关节速度。通过 ``driver``
+    运动学、底层 MIT/CPV 控制或未经验证的关节速度；支持 JS 关节跟随。
+    通过 ``driver``
     注入的对象仅用于测试隔离，不改变真实 SDK 的调用语义。
     """
 
@@ -341,7 +342,7 @@ class NeroArm:
     @staticmethod
     def _message_or_raise(message: Any) -> Any:
         if message is None or getattr(message, "msg", None) is None:
-            raise RuntimeError("Nero SDK feedback is unavailable.")
+            raise RuntimeError("Nero SDK feedback is unavailable: " + str(message))
         return message
 
     def get_raw_joint_positions(self) -> Any:
@@ -706,7 +707,7 @@ class NeroArm:
         command = self._array_from_input(joints, (NERO_DOF,))
         for index, (lower, upper) in enumerate(self._joint_limits, start=1):
             if command[index - 1] < lower or command[index - 1] > upper:
-                raise ValueError(f"joint {index} violates official joint limits.")
+                raise ValueError(f"joint {index} violates official joint limits: limit {lower}~{upper}, actually {command[index - 1]}")
         delta = self._max_joint_delta if max_joint_delta is None else self._validate_delta_setting(max_joint_delta)
         if delta is not None:
             current = self.get_joint_positions()
@@ -776,6 +777,36 @@ class NeroArm:
             self._driver.set_speed_percent(speed)
         self._driver.move_j(command.tolist())
 
+    def move_js(self, joints: Any) -> None:
+        """验证后以 JS（Follower）模式非阻塞地发送七轴关节目标。
+
+        Parameters
+        ----------
+        joints : array-like, shape (7,)
+            关节 1--7 目标位置，单位 rad；受官方限位与构造时配置的
+            ``max_joint_delta`` 限制。变化量相对于当前关节反馈检查。
+
+        Returns
+        -------
+        None
+            目标发送后立即返回，不等待到达。
+
+        Raises
+        ------
+        RuntimeError
+            未连接、未全部使能或变化量检查所需反馈不可用时抛出。
+        ValueError
+            目标形状、有限性、关节限位或变化量检查不通过时抛出。
+
+        Notes
+        -----
+        映射官方 ``Driver.move_js()``，由 SDK 切换至 JS 模式。
+        不做平滑或轨迹规划，不设置速度百分比；调用方负责控制更新频率。
+        """
+        self._prepare_motion(None)
+        command = self.validate_joint_command(joints)
+        self._driver.move_js(command.tolist())
+
     def move_pose(self, pose: Any, *, speed_percent: Optional[int] = None) -> None:
         """验证后非阻塞地发送法兰笛卡尔位姿目标。
 
@@ -842,6 +873,9 @@ class NeroArm:
         if speed is not None:
             self._driver.set_speed_percent(speed)
         self._driver.move_l(command.tolist())
+
+    def set_tcp_offset(self, pose: List[float]) -> None:
+        self._driver.set_tcp_offset(pose)
 
     def emergency_stop(self) -> None:
         """立即请求 Nero 电子急停。

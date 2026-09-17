@@ -1,0 +1,18 @@
+2026-09-10 17:12:05,598 INFO 主臂=can1 从臂=can0 日志=/home/lab404/ZJX/Nero_L20/teleop_debug_logs/nero_leader_follower_20260910_171205_598717.log
+2026-09-10 17:12:05,599 WARNING 两臂必须同型号、同零位标定。确认从臂整条对齐路径无碰撞，并落实机械支撑/硬件急停。启动会使能两臂并切主臂leader模式；运动后Ctrl+C/故障请求从臂急停，不能保证防坠落。
+2026-09-10 17:12:19,237 INFO 驱动 主臂=pyAgxArm.protocols.can_protocol.drivers.nero.versions.v111.driver 从臂=pyAgxArm.protocols.can_protocol.drivers.nero.versions.v111.driver（沿用NeroArm固定V111，不自动切换DEFAULT）
+2026-09-10 17:12:19,241 INFO Created a socket
+2026-09-10 17:12:19,244 INFO Created a socket
+2026-09-10 17:12:19,300 INFO 主臂 CAN mode enabled，七轴及状态反馈就绪
+2026-09-10 17:12:19,357 INFO 从臂 CAN mode enabled，七轴及状态反馈就绪
+2026-09-10 17:12:20,107 WARNING leader mode七轴反馈已就绪；普通状态可能停止更新，后续按专用七帧检查，非设备无故障保证。
+2026-09-10 17:12:20,109 INFO 主臂目标deg=[-3.70464381 41.11535165  5.36953956 94.95103588  6.12726922  3.13900745
+ 40.78055968] 从臂当前deg=[-4.58366236 62.39510389  1.31780293 89.4960076  -6.01605685  4.1825919
+ 30.82512938] 对齐变化deg=[  0.87901855 -21.27975224   4.05173663   5.45502828  12.14332607
+  -1.04358445   9.95543031]
+2026-09-10 17:12:37,749 ERROR 停止发送，禁止自动恢复 phase=leader_mode
+Traceback (most recent call last):
+  File "/home/lab404/ZJX/Nero_L20/teleop_nero_leader_follower.py", line 235, in main
+    raise RuntimeError('确认期间主臂已移动，请重新启动并保持静止')
+RuntimeError: 确认期间主臂已移动，请重新启动并保持静止
+2026-09-10 17:12:37,785 WARNING 主臂仅断开：不自动退出leader模式、不失能；请现场确认两臂状态。

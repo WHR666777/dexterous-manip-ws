@@ -1,0 +1,21 @@
+2026-09-10 17:28:10,453 INFO 主臂=can1 从臂=can0 日志=/home/lab404/ZJX/Nero_L20/teleop_debug_logs/nero_leader_follower_20260910_172810_453456.log
+2026-09-10 17:28:10,453 WARNING 两臂必须同型号、同零位标定。确认从臂整条对齐路径无碰撞，并落实机械支撑/硬件急停。启动会使能两臂并切主臂leader模式；运动后Ctrl+C/故障请求从臂急停，不能保证防坠落。
+2026-09-10 17:28:10,523 INFO 驱动 主臂=pyAgxArm.protocols.can_protocol.drivers.nero.versions.v111.driver 从臂=pyAgxArm.protocols.can_protocol.drivers.nero.versions.v111.driver（沿用NeroArm固定V111，不自动切换DEFAULT）
+2026-09-10 17:28:10,526 INFO Created a socket
+2026-09-10 17:28:10,528 INFO Created a socket
+2026-09-10 17:28:10,552 INFO 主臂 CAN mode enabled，七轴及状态反馈就绪
+2026-09-10 17:28:10,553 ERROR 停止发送，禁止自动恢复 phase=start_can_modes
+Traceback (most recent call last):
+  File "/home/lab404/ZJX/Nero_L20/teleop_nero_leader_follower.py", line 212, in main
+    start_can_mode(follower, limits, '从臂')
+  File "/home/lab404/ZJX/Nero_L20/teleop_nero_leader_follower.py", line 101, in start_can_mode
+    raise RuntimeError(f'{label}已有故障，禁止自动恢复：{fb}')
+RuntimeError: 从臂已有故障，禁止自动恢复：{'q': array([-0.109,  1.071,  0.094,  1.608, -0.138,  0.022,  0.567]), 'flange': array([[ 9.59953817e-02,  9.94196194e-01,  4.85676267e-02,
+        -3.91253000e-01],
+       [ 4.23993021e-03,  4.83841057e-02, -9.98819804e-01,
+        -5.87100000e-03],
+       [-9.95372749e-01,  9.60880117e-02,  4.29328214e-04,
+         4.60120000e-02],
+       [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
+         1.00000000e+00]]), 'status': {'ctrl_mode': 3, 'arm_status': 1, 'mode_feedback': 1, 'teach_status': 0, 'motion_status': 1, 'trajectory_num': 0, 'err_status': {'joint_1_angle_limit': False, 'joint_2_angle_limit': False, 'joint_3_angle_limit': False, 'joint_4_angle_limit': False, 'joint_5_angle_limit': False, 'joint_6_angle_limit': False, 'joint_7_angle_limit': False, 'communication_status_joint_1': False, 'communication_status_joint_2': False, 'communication_status_joint_3': False, 'communication_status_joint_4': False, 'communication_status_joint_5': False, 'communication_status_joint_6': False, 'communication_status_joint_7': False}}, 'enabled': [False, False, False, False, False, False, False], 'state_fresh': False, 'joint_fresh': True, 'flange_fresh': True, 'errors': {'state': 'AttributeError("\'NoneType\' object has no attribute \'timestamp\'")'}, 'joint_age_s': 0.007970333099365234, 'joint_skew_s': 0.006448030471801758, 'flange_age_s': 0.007178544998168945}
+2026-09-10 17:28:10,579 WARNING 主臂仅断开：不自动退出leader模式、不失能；请现场确认两臂状态。

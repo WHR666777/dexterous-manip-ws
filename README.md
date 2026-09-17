@@ -12,7 +12,7 @@
 官方 SDK（固定源码） -> robot_control 研究封装 -> DP / ACT / VLA / Teleoperation / 数据采集
 ```
 
-Nero 与 L20 使用不同 CAN 通道：默认 `can0` 为 Nero、`can1` 为 L20。`RobotSystem` 组合两者，构造时不连接；显式 `connect()` 后仍须显式 `enable()` Nero。L20 官方 API 没有 enable/disable，封装不会伪造该能力。
+当前 `config.py` 对应“只连接灵巧手”的现场状态，因此 L20 使用 `can0`。联合连接 Nero 与 L20 前必须根据实际枚举结果给两者配置正确通道；不要照搬单手测试配置。`RobotSystem` 构造时不连接；显式 `connect()` 后仍须显式 `enable()` Nero。L20 官方 API 没有 enable/disable，封装不会伪造该能力。
 
 ## 文件结构
 
@@ -30,7 +30,7 @@ linkerhand-python-sdk/            官方 LinkerHand SDK checkout
 官方事实：
 
 - AgileX `pyAgxArm`：`agilexrobotics/pyAgxArm`，`8cd90f9106219a156c3c0d7e58ee36d838a89baf`。
-- LinkerHand SDK：`linker-bot/linkerhand-python-sdk`，`0cc0585b97214b2cc4a9a5afcc84aee9f414e0e8`。
+- LinkerHand SDK 3.1.1：`linker-bot/linkerhand-python-sdk`，`0cc0585b97214b2cc4a9a5afcc84aee9f414e0e8`。
 
 两个目录是独立、固定的源码 checkout，不能为了本封装改动其核心代码。L20 的断开 shim 也以 LinkerHand 提交 `0cc0585b97214b2cc4a9a5afcc84aee9f414e0e8` 为依据：该版本 `close_can()` 引用未定义的 `modbus`；封装仅在私有清理流程中停止 `hand.running`、调用 `hand.close_can_interface()` 并有界等待接收线程，且分别跟踪 bus 与线程阶段，失败阶段会在下次 `disconnect()` 重试并阻止提前重连。官方构造若 `sys.exit()`，默认类路径会 best-effort 清理已分配的 `hand` 后转成设备命名的 `RuntimeError`。清理只关闭当前 SDK bus，绝不执行 `ip link set canX down`。
 
@@ -75,18 +75,18 @@ V111 的官方 motor-state `velocity` 不可信（Driver 强制为零），所�
 
 ## L20 配置与控制冲突
 
-封装约定：仅支持 `L20`、默认右手、CAN `can1`，位置永远使用官方 20 槽位顺序。官方也提示不要同时运行 linker_hand_sdk_ros、动捕手套或其他控制灵巧手的 topic。`candump` 虽不发命令，正常控制也不得与**任何会发送 L20 命令的进程**并行运行；同一时刻只保留一个控制者。
+封装的设备名称仍是物理 `L20`、默认右手；按厂商说明，连接 SDK 3.1.1 时必须传 `hand_joint="G20"`，不能选择旧 L20 CAN 驱动。当前单手配置为 `can0`。位置永远使用官方 20 槽位顺序。官方也提示不要同时运行 linker_hand_sdk_ros、动捕手套或其他控制灵巧手的 topic。`candump` 虽不发命令，正常控制也不得与**任何会发送 L20 命令的进程**并行运行；同一时刻只保留一个控制者。
 
-L20 原始位置是 20 个整数、每项 `[0,255]`。索引 `11..14` 为 reserved，仍必须保留在所有 20 维 action/state 中，不能删掉、压缩或猜测其含义；主动位置索引仅为 `0..10,15..19`。官方当前实现的 torque 和 embedded version 返回伪造占位值，因此封装不公开 `get_torque()`、`set_torque()` 或 `get_version()`；`get_sdk_version()` 仅是 Python SDK 版本。封装依据当前固定源码在运行时要求 temperature 为有限 `(20,)` 且拒绝缺失哨兵 `-1`，但实际硬件返回长度、元素顺序和物理单位均待真机/厂商确认，不能称为官方 20 槽顺序或摄氏度。
+L20 原始位置是 20 个整数、每项 `[0,255]`。索引 `11..14` 为 reserved，仍必须保留在所有 20 维 action/state 中，不能删掉、压缩或猜测其含义；主动位置索引仅为 `0..10,15..19`。G20 协议支持五指 `(5,)` 的速度和最大扭矩设置，并把 speed、torque、fault、temperature 映射为 `(20,)` 反馈；G20 不提供可用的 current 接口，所以封装不公开 `get_current()`/`set_current()`。`get_sdk_version()` 仅是 Python SDK 版本。temperature 会拒绝缺失哨兵 `-1`；其实际物理单位仍待厂商或真机确认。
 
-`get_joint_positions_raw(fresh=True)` 会调用四组反馈的请求路径，官方源码典型等待约 40 ms；这里的 `fresh=True` 只表示“尝试请求刷新”，不表示可证明的新反馈代次。固定 SDK 的低层 `send_command()` 捕获 `can.CanError` 后可能尝试重连，但不重新抛出也不重发失败帧，且反馈没有 generation，所以请求失败后仍可能返回较旧但 shape/range 合法的缓存。缓存直读必须明确使用 `get_cached_joint_positions_raw()`；两条路径都不能在没有额外真机证据时称为最新实测。所有 L20 setter、preset 和 `step()` 中的手部侧都是 best-effort 调度：正常返回只表示 SDK 调用返回，不证明每个 CAN 帧发送成功。
+`get_joint_positions_raw(fresh=True)` 会请求 G20 五指位置帧 `0x41`--`0x45`；位置设置也使用这五类帧，速度设置使用 `0x49`--`0x4D`，不再发送旧 L20 的 `0x11`--`0x15` 位置格式。这里的 `fresh=True` 只表示“尝试请求刷新”，不表示可证明的新反馈代次。SDK 3.1.1 的 G20 `get_state_for_pub()` 遗漏返回值，封装的缓存读取路径会读取 `x41`--`x45` 并调用 SDK 自己的映射函数。固定 SDK 的低层 `send_command()` 捕获 `can.CanError` 后可能尝试重连，但不重新抛出也不重发失败帧，所以所有手部命令仍是 best-effort 调度。
 
 ## 运行前检查
 
 1. 固定机械臂和灵巧手，清出运动范围，准备急停，并确认电源、USB-CAN 和线缆。
 2. 确认没有其他 ROS、GUI、脚本、遥操作或 policy 进程占用/发送两个设备的命令。
-3. 用 `ip -details link show can0`、`can1` 核实接口已 up 且为 1 Mbps；用 `candump` 只做监听排查后退出。
-4. 核对 `config.py`：`can0`/`can1` 不得相同，固件为 `1.11`、型号为 `L20`。
+3. 用 `ip -details link show can0`（联合运行时也检查实际的第二个通道）核实接口已 up 且为 1 Mbps；用 `candump` 只做监听排查后退出。
+4. 核对 `config.py`：当前单手测试的 L20 是 `can0`；联合运行前重新确认两设备实际通道，固件为 `1.11`、物理型号为 `L20`。
 5. 从最小只读示例开始，观察 `self_check()` 的连接、固件、状态、故障和位置结果；健康但尚未使能的 Nero 只显示 `[INFO]`，不是失败。其他类别失败时不要使能或重试运动。
 
 ## 单独运行 Nero
@@ -105,7 +105,7 @@ python3 examples/l20_example.py
 python3 examples/l20_example.py --execute
 ```
 
-默认路径读取 SDK 版本、20 槽位位置、五电机速度/电流/故障与运行时期望 `(20,)` 的温度序列。执行路径同样需要 `EXECUTE`，只相对当前反馈改变一个主动 raw 槽位；不操作 reserved 槽位。动作调用正常返回仍不能证明底层帧已成功发送，应重新读取并结合现场观测核验。
+默认路径读取 SDK 版本以及 20 槽位的位置、速度、最大扭矩、温度和故障。执行路径同样需要 `EXECUTE`，先通过 G20 五指速度接口设置 `(5,)` 速度，再只相对当前反馈改变一个主动 raw 槽位；不操作 reserved 槽位。动作调用正常返回仍不能证明底层帧已成功发送，应重新读取并结合现场观测核验。
 
 ## 联合运行
 
@@ -118,7 +118,7 @@ python3 examples/nero_l20_example.py --execute
 
 ## API 说明
 
-`NeroArm` 提供连接、使能、状态、七轴 rad 命令与只读观测；`LinkerHandL20` 提供惰性连接、20 槽 raw/normalized 位置和经核查的五电机诊断；`RobotSystem` 负责连接回滚、组合诊断、规范 observation 与 action 分发。连接、读取和向上传播的 SDK 调用失败可能抛出 `RuntimeError`；固定 L20 SDK 吞掉的低层 `can.CanError` 是明确例外。输入 shape、范围或有限性错误为 `ValueError`。
+`NeroArm` 提供连接、使能、状态、七轴 rad 命令与只读观测；`LinkerHandL20` 提供惰性连接、20 槽 raw/normalized 位置、五指速度/扭矩设置和 G20 诊断；`RobotSystem` 负责连接回滚、组合诊断、规范 observation 与 action 分发。连接、读取和向上传播的 SDK 调用失败可能抛出 `RuntimeError`；固定 LinkerHand SDK 吞掉的低层 `can.CanError` 是明确例外。输入 shape、范围或有限性错误为 `ValueError`。
 
 `RobotSystem.connect()` 只连接，不使能。`disconnect()` 按 L20 再 Nero 尝试清理并聚合失败；重复调用安全。不要依赖断开替你失能 Nero。
 
@@ -137,15 +137,15 @@ python3 examples/nero_l20_example.py --execute
 
 ## 单位与维度
 
-Nero joint position 为 7 维 `float64` rad，joint torque 为 7 维 `float64` N*m，flange/TCP pose 为 6 维 `float64` `[m,m,m,rad,rad,rad]`。L20 position 是 20 维 raw `[0,255]` 或 normalized `[-1,1]`；速度和电流是 5 维 raw `[0,255]`，fault 是 5 维官方错误码（0 正常、1 电流过载、2 温度过高、3 编码错误、4 过压/欠压）。L20 temperature 是封装依据固定源码期望并校验的有限 20 维运行时反馈，`-1` 会作为缺失哨兵拒绝；实际硬件长度、元素顺序和单位尚未确认，不能标为官方 20 槽顺序或摄氏度。
+Nero joint position 为 7 维 `float64` rad，joint torque 为 7 维 `float64` N*m，flange/TCP pose 为 6 维 `float64` `[m,m,m,rad,rad,rad]`。L20 position 是 20 维 raw `[0,255]` 或 normalized `[-1,1]`；速度与最大扭矩 setter 是五指 `(5,)` raw `[0,255]`，speed、torque、fault、temperature getter 均是 G20 映射后的 `(20,)`。fault 码为 0 正常、1 电流过载、2 温度过高、3 编码错误、4 过压/欠压。temperature 的 `-1` 会作为缺失哨兵拒绝，物理单位尚未确认。
 
 ## Diffusion Policy / ACT 接入
 
-DP/ACT 应把本封装当作硬件边界，而不是依赖官方消息对象。建议在 policy 侧保存上述明确的 key、shape、单位和 slot 顺序；将模型输出裁剪/拒绝在 policy 安全层后，再调用 `RobotSystem.step()`。观测循环必须容忍 L20 请求路径约 40 ms、无超过 20 Hz 或新反馈 generation 保证和设备时间不同步；动作循环必须容忍 L20 best-effort 调度且用独立反馈/现场安全措施核验。初期以只读日志/回放验证，再在受监督下逐级提高命令频率。此仓库不包含 DP 或 ACT 实现、训练权重或安全证明。
+DP/ACT 应把本封装当作硬件边界，而不是依赖官方消息对象。建议在 policy 侧保存上述明确的 key、shape、单位和 slot 顺序；将模型输出裁剪/拒绝在 policy 安全层后，再调用 `RobotSystem.step()`。观测循环必须容忍 G20 五指顺序请求、无新反馈 generation 保证和设备时间不同步；动作循环必须容忍 L20 best-effort 调度且用独立反馈/现场安全措施核验。初期以只读日志/回放验证，再在受监督下逐级提高命令频率。此仓库不包含 DP 或 ACT 实现、训练权重或安全证明。
 
 ## VLA / Teleoperation 接入
 
-VLA 或 Teleoperation 同样只能作为单一命令源，先经过人工监督、工作空间/速率限制和本封装的 action 校验。遥操作采集应记录 canonical observation、动作、时间戳、`config.py`、SDK 固定提交和请求路径/直接缓存路径；该标记不是反馈 generation。不要把缺失 V111 velocity、L20 torque/version 占位数据或 reserved 槽位伪造成训练特征。VLA/遥操作实现不在本仓库，且其闭环安全性待真机验证。
+VLA 或 Teleoperation 同样只能作为单一命令源，先经过人工监督、工作空间/速率限制和本封装的 action 校验。遥操作采集应记录 canonical observation、动作、时间戳、`config.py`、SDK 固定提交和请求路径/直接缓存路径；该标记不是反馈 generation。不要把缺失 V111 velocity、G20 current、embedded version 或 reserved 槽位伪造成训练特征。VLA/遥操作实现不在本仓库，且其闭环安全性待真机验证。
 
 ## 常见错误
 
@@ -165,7 +165,7 @@ VLA 或 Teleoperation 同样只能作为单一命令源，先经过人工监督�
 
 **静态验证：**项目测试使用注入假驱动、官方 API/源码契约和命令行 `--help`，不连接 CAN、不创建真实设备、不发送硬件命令。根目录 `python3 -m pytest -q` 仅发现 `tests/`，避免嵌套官方 SDK 的同名测试包干扰。
 
-**真机验证：**尚未执行。以下均为 true-hardware pending，不得由静态测试推断为已通过：实际 `can0`（Nero）/`can1`（L20）与右手映射、Nero 固件 report、Nero enable 是否实际成功及 disable/急停后 reset 的下落行为、Nero `move_j()` 控制在 10/20/30/50 Hz 的稳定性、七个 motor-state 与三组 pose 帧在实机启动/丢帧时的完整性、L20 请求路径的真实刷新率/延迟/旧缓存行为、低层 CAN 发送失败后的动作与反馈表现、L20 temperature 的实际长度/元素顺序/物理单位、五电机 speed/current 与实体电机的对应关系、官方 open/close presets 对当前安装姿态的适用性，以及同一 Python 进程中双 SocketCAN 的稳定性。CAN bitrate、构造失败和断开 shim、Nero/L20 实际运动、DP/ACT/VLA/遥操作闭环和机械安全也同样待真机验证。
+**真机验证：**用户已确认当前单手在 `can0` 可连接和读取基础反馈，但 G20 改造后的实际运动尚待重新测试。以下仍为 true-hardware pending：右手映射、Nero 固件与使能行为、Nero `move_j()` 稳定性、七个 motor-state 与三组 pose 帧完整性、L20 G20 请求路径的真实刷新率/旧缓存行为、`0x41`--`0x45` 实际动作、低层 CAN 发送失败后的表现、各类 20 槽诊断与实体关节对应、temperature 物理单位、官方 open/close presets 适用性，以及联合运行的通道归属与双 SocketCAN 稳定性。静态测试不构成机械安全证明。
 
 ## 建议的第一次真机测试顺序
 

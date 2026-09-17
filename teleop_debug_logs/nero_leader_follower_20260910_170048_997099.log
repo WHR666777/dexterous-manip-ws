@@ -1,0 +1,11 @@
+2026-09-10 17:00:48,997 INFO 主臂=can1 从臂=can0 日志=/home/lab404/ZJX/Nero_L20/teleop_debug_logs/nero_leader_follower_20260910_170048_997099.log
+2026-09-10 17:00:48,997 WARNING 两臂必须同型号、同零位标定。确认从臂整条对齐路径无碰撞，并落实机械支撑/硬件急停。程序不控制主臂；运动后Ctrl+C/故障会请求从臂电子急停，不能保证防坠落。
+2026-09-10 17:00:49,069 INFO Created a socket
+2026-09-10 17:00:49,071 INFO Created a socket
+2026-09-10 17:00:49,572 ERROR 停止发送，禁止自动恢复 phase=connect
+Traceback (most recent call last):
+  File "/home/lab404/ZJX/Nero_L20/teleop_nero_leader_follower.py", line 130, in main
+    target = require_feedback(master_fb, limits, follower=False)
+  File "/home/lab404/ZJX/Nero_L20/teleop_nero_leader_follower.py", line 47, in require_feedback
+    raise RuntimeError(f'反馈过期、限位或设备故障：{fb}')
+RuntimeError: 反馈过期、限位或设备故障：{'q': None, 'flange': None, 'status': None, 'enabled': [], 'state_fresh': False, 'joint_fresh': False, 'flange_fresh': False, 'errors': {'joints': "RuntimeError('Nero SDK feedback is unavailable: None')", 'state': "RuntimeError('Nero SDK feedback is unavailable: None')", 'flange': "RuntimeError('Nero SDK feedback is unavailable: None')"}}

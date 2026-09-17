@@ -1,4 +1,4 @@
-"""LinkerHand L20 官方 SDK 的轻量研究控制封装。"""
+"""物理 LinkerHand L20 使用官方 G20 CAN 协议的轻量研究控制封装。"""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _load_linker_api() -> Callable[..., Any]:
 
 
 class LinkerHandL20:
-    """以固定官方 L20 映射控制 LinkerHand 左手或右手。
+    """用官方 G20 CAN 协议控制物理 LinkerHand L20 左手或右手。
 
     Parameters
     ----------
@@ -92,10 +92,11 @@ class LinkerHandL20:
     Notes
     -----
     构造时不导入 SDK、不创建 CAN 对象；仅在 :meth:`connect` 创建官方
-    ``LinkerHandApi``。位置始终以官方 20 槽位顺序表示，速度、电流和故障
-    仅暴露 SDK 已支持的五电机数据。注入缝不改变真实 SDK 调用顺序。固定 SDK
-    的低层 ``send_command()`` 会捕获 ``can.CanError`` 而不重新抛出或重发，
-    因此命令与请求均为 best-effort 调度，不提供逐帧发送成功证明。
+    ``LinkerHandApi``，并按厂商说明用 ``hand_joint="G20"`` 选择 CAN 驱动。
+    位置和各类反馈始终以官方 20 槽位顺序表示；速度和最大扭矩 setter 接受五指值。
+    注入缝不改变真实 SDK 调用顺序。固定 SDK 的低层 ``send_command()`` 会捕获
+    ``can.CanError`` 而不重新抛出或重发，因此命令与请求均为 best-effort 调度，
+    不提供逐帧发送成功证明。
     """
 
     def __init__(
@@ -177,11 +178,12 @@ class LinkerHandL20:
         -----
         ``api_factory=None`` 时先在本调用内懒加载 ``LinkerHandApi``。对默认
         官方类先分配实例再调用 ``LinkerHandApi.__init__``，参数精确为
-        ``hand_type=..., hand_joint="L20", modbus="None", can=...``；若初始化
-        ``SystemExit``，会 best-effort 停止已创建的 ``hand`` 资源并转成设备命名
-        的 ``RuntimeError``。SDK 构造会访问 CAN，可能阻塞；重复调用已连接实例
-        不会重复创建 API。注入工厂的 ``SystemExit`` 同样归一化，但工厂没有返回
-        的部分对象无法由 Wrapper 取得或清理。
+        ``hand_type=..., hand_joint="G20", modbus="None", can=...``；若初始化
+        失败，会 best-effort 停止已创建的 ``hand`` 资源；其中 ``SystemExit``
+        会转成设备命名的 ``RuntimeError``，普通异常保持原类型重新抛出。SDK
+        构造会访问 CAN，可能阻塞；重复调用已连接实例不会重复创建 API。注入
+        工厂的 ``SystemExit`` 同样归一化，但工厂没有返回的部分对象无法由
+        Wrapper 取得或清理。
         """
         if self._api is not None:
             return
@@ -189,7 +191,7 @@ class LinkerHandL20:
             raise RuntimeError("L20 bus/thread cleanup is still pending.")
         kwargs = dict(
             hand_type=self._hand_type,
-            hand_joint="L20",
+            hand_joint="G20",
             modbus="None",
             can=self._can_channel,
         )
@@ -213,6 +215,9 @@ class LinkerHandL20:
                         raise RuntimeError(
                             "L20 connection failed: official SDK terminated the process.",
                         ) from exc
+                    except BaseException:
+                        self._best_effort_teardown_api(api, self._join_timeout)
+                        raise
                 else:
                     api = factory(**kwargs)
             except SystemExit as exc:
@@ -499,6 +504,21 @@ class LinkerHandL20:
     def _get_joint_positions_raw(self, fresh: bool) -> np.ndarray:
         api = self._require_connected()
         feedback = api.get_state() if fresh else api.get_state_for_pub()
+        if not fresh and feedback is None:
+            try:
+                low_level = api.hand
+                cached_by_finger = [
+                    low_level.x41,
+                    low_level.x42,
+                    low_level.x43,
+                    low_level.x44,
+                    low_level.x45,
+                ]
+                feedback = low_level.joint_state_to_cmd_state(cached_by_finger)
+            except Exception as exc:
+                raise RuntimeError(
+                    "L20 G20-protocol position cache is unavailable.",
+                ) from exc
         return self._array_from_feedback(
             feedback, _L20_POSITION_SHAPE, "position", raw=True,
         )
@@ -526,11 +546,11 @@ class LinkerHandL20:
 
         Notes
         -----
-        官方 ``get_state()`` 依次调用四类位置请求，典型源端等待约 40 ms；固定
-        SDK 的 ``send_command()`` 会吞掉 ``can.CanError`` 且没有反馈 generation
-        标记，因此请求失败后仍可能返回较旧但形状合法的缓存。封装只承诺
-        ``fresh=True`` 选择请求路径，不能证明反馈新鲜或超过 20 Hz。缓存读取不
-        请求 CAN，也不制造缺失数据。
+        G20 ``get_state()`` 依次请求五指位置帧 ``0x41``--``0x45``；固定 SDK 的
+        ``send_command()`` 会吞掉 ``can.CanError`` 且没有反馈 generation 标记，
+        因此请求失败后仍可能返回较旧但形状合法的缓存。封装只承诺
+        ``fresh=True`` 选择请求路径，不能证明反馈新鲜。缓存读取不请求 CAN，
+        也不制造缺失数据。
         """
         return self._get_joint_positions_raw(self._validate_fresh(fresh))
 
@@ -549,7 +569,9 @@ class LinkerHandL20:
 
         Notes
         -----
-        精确映射 ``LinkerHandApi.get_state_for_pub()``；不请求 CAN 更新。
+        先调用 ``LinkerHandApi.get_state_for_pub()``；固定 SDK 3.1.1 的 G20
+        实现遗漏返回值，得到 ``None`` 时读取其 ``x41``--``x45`` 缓存并调用
+        SDK 自己的 ``joint_state_to_cmd_state()`` 映射，不请求额外 CAN 更新。
         """
         return self._get_joint_positions_raw(False)
 
@@ -557,12 +579,12 @@ class LinkerHandL20:
         return self._validate_raw_values(values, _L20_MOTOR_SHAPE, name)
 
     def set_speed(self, speed: Any) -> None:
-        """验证后设置 L20 支持的五电机速度原始值。
+        """验证后设置物理 L20 的 G20 五指速度原始值。
 
         Parameters
         ----------
         speed : array-like, shape (5,)
-            五电机整数速度原始值，每项在 ``[0, 255]``；SDK 未声明物理单位。
+            五指整数速度原始值，每项在 ``[0, 255]``；SDK 未声明物理单位。
 
         Returns
         -------
@@ -578,19 +600,21 @@ class LinkerHandL20:
 
         Notes
         -----
-        精确映射 ``LinkerHandApi.set_speed(speed=...)``；SDK 调用可能短暂阻塞，
-        且低层 ``can.CanError`` 可能被固定 SDK 吞掉。
+        映射以 ``hand_joint="G20"`` 创建的 ``LinkerHandApi.set_speed()``；官方
+        G20 驱动负责把五指速度拆分为每指六关节 CAN 指令。低层
+        ``can.CanError`` 仍可能被 SDK 吞掉。
         """
         validated = self._validate_five_raw(speed, "speed")
         self._require_connected().set_speed(speed=validated.tolist())
 
     def get_speed(self) -> np.ndarray:
-        """读取 L20 支持的五电机速度原始值。
+        """读取 G20 协议映射后的 20 槽位速度原始值。
 
         Returns
         -------
-        numpy.ndarray, shape (5,), dtype int64
-            五电机的独立整数速度副本，范围 ``[0, 255]``；无物理单位声明。
+        numpy.ndarray, shape (20,), dtype int64
+            L20 关节顺序的独立整数速度副本，范围 ``[0, 255]``；包含四个
+            保留槽位，SDK 未声明物理单位。
 
         Raises
         ------
@@ -603,16 +627,16 @@ class LinkerHandL20:
         发送失败可能被吞掉并返回较旧缓存，Wrapper 无反馈 generation 可核验。
         """
         return self._array_from_feedback(
-            self._require_connected().get_speed(), _L20_MOTOR_SHAPE, "speed", raw=True,
+            self._require_connected().get_speed(), _L20_POSITION_SHAPE, "speed", raw=True,
         )
 
-    def set_current(self, current: Any) -> None:
-        """验证后设置 L20 支持的五电机电流原始值。
+    def set_torque(self, torque: Any) -> None:
+        """验证后设置 G20 协议支持的五指最大扭矩原始值。
 
         Parameters
         ----------
-        current : array-like, shape (5,)
-            五电机整数电流原始值，每项在 ``[0, 255]``；SDK 未声明物理单位。
+        torque : array-like, shape (5,)
+            五指整数扭矩原始值，每项在 ``[0, 255]``；SDK 未声明物理单位。
 
         Returns
         -------
@@ -628,41 +652,42 @@ class LinkerHandL20:
 
         Notes
         -----
-        精确映射 ``LinkerHandApi.set_current(current=...)``；不提供伪造扭矩接口。
-        固定 SDK 可能吞掉低层 ``can.CanError``，此时本方法也可能正常返回。
+        映射以 ``hand_joint="G20"`` 创建的 ``LinkerHandApi.set_torque()``；官方
+        G20 驱动负责把五指值拆分为每指六关节 CAN 指令。
         """
-        validated = self._validate_five_raw(current, "current")
-        self._require_connected().set_current(current=validated.tolist())
+        validated = self._validate_five_raw(torque, "torque")
+        self._require_connected().set_torque(torque=validated.tolist())
 
-    def get_current(self) -> np.ndarray:
-        """读取 L20 支持的五电机电流原始值。
+    def get_torque(self) -> np.ndarray:
+        """读取 G20 协议映射后的 20 槽位最大扭矩原始值。
 
         Returns
         -------
-        numpy.ndarray, shape (5,), dtype int64
-            五电机的独立整数电流副本，范围 ``[0, 255]``；无物理单位声明。
+        numpy.ndarray, shape (20,), dtype int64
+            L20 关节顺序的独立整数扭矩副本，范围 ``[0, 255]``；包含四个
+            保留槽位，SDK 未声明物理单位。
 
         Raises
         ------
         RuntimeError
-            未连接或 SDK 电流反馈形状/数值不合法时抛出。
+            未连接或 SDK 扭矩反馈形状/数值不合法时抛出。
 
         Notes
         -----
-        映射 ``LinkerHandApi.get_current()``；不会将其命名或转换为扭矩。请求的
-        低层发送失败可能被固定 SDK 吞掉并返回较旧缓存。
+        映射 ``LinkerHandApi.get_torque()``；SDK 调用会请求五指的六关节扭矩
+        后转换为 20 槽位顺序。
         """
         return self._array_from_feedback(
-            self._require_connected().get_current(), _L20_MOTOR_SHAPE, "current", raw=True,
+            self._require_connected().get_torque(), _L20_POSITION_SHAPE, "torque", raw=True,
         )
 
     def get_fault(self) -> np.ndarray:
-        """读取 L20 支持的五电机故障码。
+        """读取 G20 协议映射后的 20 槽位故障码。
 
         Returns
         -------
-        numpy.ndarray, shape (5,), dtype int64
-            五电机独立整数故障码副本，范围 ``[0, 255]``。
+        numpy.ndarray, shape (20,), dtype int64
+            L20 关节顺序的独立整数故障码副本，范围 ``[0, 255]``。
             ``0`` 为正常，``1`` 为电流过载，``2`` 为过温，``3`` 为编码器错误，
             ``4`` 为过压或欠压。
 
@@ -677,11 +702,11 @@ class LinkerHandL20:
         发送失败可能被吞掉并返回较旧缓存。
         """
         return self._array_from_feedback(
-            self._require_connected().get_fault(), _L20_MOTOR_SHAPE, "fault", raw=True,
+            self._require_connected().get_fault(), _L20_POSITION_SHAPE, "fault", raw=True,
         )
 
     def clear_faults(self) -> None:
-        """请求清除 L20 的五电机故障码。
+        """请求清除物理 L20 的 G20 五指关节故障码。
 
         Returns
         -------

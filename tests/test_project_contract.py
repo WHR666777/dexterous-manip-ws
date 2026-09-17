@@ -8,11 +8,11 @@ import config
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_config_uses_v111_and_separate_can_channels():
-    """The documented default wiring must select the supported devices."""
+def test_config_uses_v111_and_current_single_hand_channel():
+    """The checked-in config matches the currently connected physical hand."""
     assert config.NERO_FIRMWARE == "1.11"
     assert config.NERO_CAN_INTERFACE == "socketcan"
-    assert config.NERO_CAN_CHANNEL != config.L20_CAN_CHANNEL
+    assert config.L20_CAN_CHANNEL == "can0"
     assert config.L20_HAND_MODEL == "L20"
     assert config.CONTROL_HZ == 20
 

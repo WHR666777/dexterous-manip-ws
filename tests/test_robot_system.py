@@ -66,7 +66,7 @@ class FakeHand:
         self.connected = False
         self.fail_connect = fail_connect
         self.commands = []
-        self.fault = np.zeros(5, dtype=np.int64)
+        self.fault = np.zeros(20, dtype=np.int64)
         self.disconnected = 0
         self.fail_disconnect = False
         self.position_request_flags = []
@@ -314,7 +314,7 @@ def test_self_check_is_read_only_structured_and_prints_summary(capsys):
     result = robot.self_check()
     assert result["nero"]["firmware_config"] == "V111"
     assert result["nero"]["firmware_reported"] == "1.11"
-    assert result["l20"]["fault"] == [0, 0, 0, 0, 0]
+    assert result["l20"]["fault"] == [0] * 20
     assert "[OK]" in capsys.readouterr().out
     assert arm.commands == []
     assert hand.commands == []
