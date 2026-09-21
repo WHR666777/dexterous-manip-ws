@@ -1,5 +1,66 @@
 # Nero + LinkerHand L20 研究控制封装
 
+## Quest 双臂/双灵巧手遥操采集
+
+新增入口均默认 **dry-run 且不记录数据**。Quest 使用 HTS 1.1 的 Unity world
+位姿；头姿只用于发现世界系重置，不参与腕部到机械臂的映射。先安装可选依赖并
+安装同级 AnyDexRetarget：
+
+```bash
+pip install -r requirements-quest.txt
+pip install -e ../AnyDexRetarget
+```
+
+推荐按以下顺序验证：
+
+```bash
+# 1. 不连接硬件，检查双腕在只转头时是否保持稳定
+python quest_tracking_check.py --transport tcp --port 8000 --head-turn-check
+
+# 2. 生成右侧 Quest world -> NERO Base 旋转标定
+python quest_calibrate.py --side right --output quest_calibration_right.yaml
+
+# 3. 单臂末端 dry-run；默认 --no-record，不创建任何文件
+python quest_single_arm.py --side right --calibration quest_calibration_right.yaml
+
+# 4. 单臂末端 + L20 dry-run
+python quest_single_arm_hand.py --side right --calibration quest_calibration_right.yaml
+
+# 5. 完成左右标定及 config/quest_teleop.yaml 四路 CAN 后再测试双侧
+python quest_bimanual_collect.py \
+  --calibration quest_calibration_left.yaml \
+  --calibration quest_calibration_right.yaml
+```
+
+USB TCP 模式在启动 Quest 应用前执行 `adb reverse tcp:8000 tcp:8000`；无线
+TCP 则把 Quest 应用目标设为主机 IP 和同一端口。左右标定文件可通过重复
+`--calibration` 同时加载，程序不会把一侧外参复用于另一侧。
+
+真机命令必须额外传 `--execute` 并输入终端给出的精确确认文本。运行中使用
+`R` 重新锚定、空格启停、`B` 开始 episode、`S` 结束并保存、`Q` 退出；
+暂停后必须重新 `R` 才能恢复。HTS 接收实现按官方
+[`hand-tracking-sdk 1.1`](https://github.com/wengmister/hand-tracking-sdk) 的
+`HandFrame`/`HeadFrame` 接口；原始数据仍是 Quest Unity world space，正常转头
+不会乘入腕部目标。
+
+录制是显式 opt-in：
+
+```bash
+# 无相机低维采集
+python quest_bimanual_collect.py --execute --record --no-camera --output data/task1
+
+# RealSense RGB-D + 低维采集
+python quest_bimanual_collect.py --execute --record --camera --output data/task1
+
+# 派生训练格式
+python quest_export_dataset.py data/task1 data/task1_dp --format diffusion-policy
+python quest_export_dataset.py data/task1 data/task1_act --format act
+```
+
+只有 `--record --output PATH` 会创建目录或导入 Zarr；RealSense 也只会在同时
+启用 `--record --camera` 时启动。默认配置中的四个 `SET_*_CAN` 是拒绝真机执行
+的占位符，必须按现场枚举结果填写且四路不得重复。
+
 ## 项目目的
 
 这是面向研究控制的薄封装：在官方 Nero `pyAgxArm` 和 LinkerHand Python SDK 之上提供稳定的 NumPy 接口，以便接入策略、遥操作和数据采集。它不是安全认证控制器，也不实现 CAN 编解码、IK、ROS、相机或训练算法。默认示例只读；只有同时给出 `--execute` 并在终端精确输入 `EXECUTE`，才会发送一次保守动作。

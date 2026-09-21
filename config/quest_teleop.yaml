@@ -1,0 +1,49 @@
+schema_version: 1
+quest:
+  transport: tcp
+  host: 0.0.0.0
+  port: 8000
+  max_age_s: 0.15
+  max_pair_skew_s: 0.04
+
+control:
+  hz: 20
+  position_scale: 0.5
+  max_tracker_position_step_m: 0.04
+  max_tracker_rotation_step_deg: 12.0
+  max_target_position_step_m: 0.01
+  max_target_rotation_step_deg: 5.0
+  max_joint_step_deg: 5.0
+  hand_max_raw_step: 10
+
+# Replace all four CAN placeholders before using --execute.  Dry-run and
+# tracking/calibration tools intentionally do not require hardware channels.
+sides:
+  left:
+    arm_can: SET_LEFT_ARM_CAN
+    hand_can: SET_LEFT_HAND_CAN
+    hand_type: left
+    calibrated: false
+    base_from_quest_rotation:
+      - [1.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0]
+      - [0.0, 0.0, 1.0]
+  right:
+    arm_can: SET_RIGHT_ARM_CAN
+    hand_can: SET_RIGHT_HAND_CAN
+    hand_type: right
+    calibrated: false
+    base_from_quest_rotation:
+      - [1.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0]
+      - [0.0, 0.0, 1.0]
+
+recording:
+  enabled: false
+  output: null
+  realsense:
+    enabled: true
+    serial: null
+    width: 640
+    height: 480
+    fps: 30

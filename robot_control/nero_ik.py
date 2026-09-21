@@ -11,8 +11,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-URDF_PATH = (Path(__file__).resolve().parents[1] / 'agilex_teleop/pyAgxArm/asserts/'
-             'agx_arm_urdf/nero/urdf/nero_description.urdf')
+URDF_PATH = Path(__file__).resolve().parents[1] / 'assets/nero_description.urdf'
 MAX_FK_POSITION_ERROR_M = 0.002
 MAX_FK_ROTATION_ERROR_DEG = 2.0
 MAX_IK_JOINT_JUMP_DEG = 10.0

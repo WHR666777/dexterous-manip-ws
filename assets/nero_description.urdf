@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!--
+  Kinematic-only extraction of AgileX agx_arm_urdf/nero/urdf/nero_description.urdf.
+  Joint origins, axes and limits are unchanged; visual/collision meshes are not
+  needed by the local numerical IK parser.
+  Source: https://github.com/agilexrobotics/agx_arm_urdf
+  Verified against commit f6642ce0d7872c686f29c99e9e10cd23d1d49313.
+-->
+<robot name="nero">
+  <link name="base_link"/>
+  <link name="link1"/><link name="link2"/><link name="link3"/>
+  <link name="link4"/><link name="link5"/><link name="link6"/><link name="link7"/>
+  <joint name="joint1" type="revolute">
+    <origin xyz="0 0 0.138" rpy="0 0 0"/><parent link="base_link"/><child link="link1"/>
+    <axis xyz="0 0 1"/><limit lower="-2.70526" upper="2.70526" effort="100" velocity="5"/>
+  </joint>
+  <joint name="joint2" type="revolute">
+    <origin xyz="0 0 0" rpy="1.5707963 3.1415926 0"/><parent link="link1"/><child link="link2"/>
+    <axis xyz="0 0 1"/><limit lower="-1.74" upper="1.74" effort="100" velocity="5"/>
+  </joint>
+  <joint name="joint3" type="revolute">
+    <origin xyz="0 -0.31 0" rpy="-1.5707963 0 3.1415926926"/><parent link="link2"/><child link="link3"/>
+    <axis xyz="0 0 1"/><limit lower="-2.75" upper="2.75" effort="100" velocity="5"/>
+  </joint>
+  <joint name="joint4" type="revolute">
+    <origin xyz="0 0 0" rpy="-1.5707963 0 3.1415926926"/><parent link="link3"/><child link="link4"/>
+    <axis xyz="0 0 1"/><limit lower="-1.01" upper="2.14" effort="100" velocity="5"/>
+  </joint>
+  <joint name="joint5" type="revolute">
+    <origin xyz="0 -0.27001 0" rpy="1.5707963 -1.5707963 0"/><parent link="link4"/><child link="link5"/>
+    <axis xyz="0 0 1"/><limit lower="-2.75" upper="2.75" effort="100" velocity="5"/>
+  </joint>
+  <joint name="joint6" type="revolute">
+    <origin xyz="0 0 0" rpy="1.5707963 -1.5707963 0"/><parent link="link5"/><child link="link6"/>
+    <axis xyz="0 0 1"/><limit lower="-0.73" upper="0.95" effort="100" velocity="5"/>
+  </joint>
+  <joint name="joint7" type="revolute">
+    <origin xyz="0 -0.0235 0" rpy="1.5707963 0 0"/><parent link="link6"/><child link="link7"/>
+    <axis xyz="0 0 1"/><limit lower="-1.5707963" upper="1.5707963" effort="100" velocity="5"/>
+  </joint>
+</robot>
