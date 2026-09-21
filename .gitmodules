@@ -1,3 +1,9 @@
 [submodule "AnyDexRetarget"]
 	path = AnyDexRetarget
 	url = https://github.com/WHR666777/AnyDexRetarget.git
+[submodule "agilex_teleop"]
+	path = agilex_teleop
+	url = https://github.com/Key-Zzs/agilex_teleop.git
+[submodule "dp_real_0309"]
+	path = dp_real_0309
+	url = https://github.com/zk-yue/dp_real_0309.git
