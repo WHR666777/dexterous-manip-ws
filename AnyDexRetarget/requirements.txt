@@ -1,0 +1,19 @@
+# Core dependencies
+numpy==1.26.4
+nlopt>=2.7,<2.8
+pyyaml
+pin
+
+# Simulation & visualization
+mujoco
+opencv-contrib-python==4.10.0.84
+mediapipe>=0.10,<1
+matplotlib
+
+# Input devices (optional, install as needed)
+# avp_stream          # Apple Vision Pro
+# wujihandpy          # Wuji Hand real hardware
+# pyserial            # Inspire Hand real hardware
+python-can>=4,<5      # Linker L20 SocketCAN real hardware
+# handsdk             # Gaia Hand20 vendor SDK; install the matching wheel separately
+# pyrealsense2        # Intel RealSense

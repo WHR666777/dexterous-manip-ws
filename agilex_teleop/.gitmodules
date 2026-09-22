@@ -1,0 +1,4 @@
+[submodule "nero/pinocchio-kinematics-lite"]
+	path = nero/pinocchio-kinematics-lite
+	url = https://github.com/Key-Zzs/pinocchio-kinematics-lite.git
+	branch = main

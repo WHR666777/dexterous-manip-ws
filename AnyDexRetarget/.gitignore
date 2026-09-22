@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.DS_Store
+
+# Python build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+
+# Logs
+logs/
+MUJOCO_LOG.TXT
+
+# Temporary files
+*.tmp
+*.log
+
+# Sharpa source files (large)
+assets/sharpa-urdf-usd-xml-main.zip
+assets/sharpa-urdf-usd-xml-main/
+*.bak-*
