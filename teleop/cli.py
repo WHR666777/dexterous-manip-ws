@@ -5,7 +5,14 @@ from __future__ import annotations
 import argparse
 
 from .config import load_config, require_site_configuration
-from .controller import enable_arm, input_check, preflight, run, reset_arm
+from .controller import (
+    enable_arm,
+    input_check,
+    preflight,
+    record_start_pose,
+    reset_arm,
+    run,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +22,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("input-check", help="Quest + AnyDex only; never opens CAN")
     preflight_parser = subparsers.add_parser("preflight", help="read-only hardware/FK check")
     preflight_parser.add_argument("--control", choices=("arm", "hand", "both"), default="both")
+    record_parser = subparsers.add_parser(
+        "record-start-pose",
+        help="save the current Nero joint angles without enabling or moving",
+    )
+    record_parser.add_argument("--output", help="defaults to arm.start_pose_file")
+    record_parser.add_argument("--overwrite", action="store_true")
     enable_parser = subparsers.add_parser("arm-enable", help="enable Nero without a motion target")
     enable_parser.add_argument("--execute", action="store_true", help="required acknowledgement")
     reset_parser = subparsers.add_parser(
@@ -35,11 +48,21 @@ def main() -> None:
     if args.command == "input-check":
         input_check(config)
         return
+    if args.command == "record-start-pose":
+        require_site_configuration(
+            config,
+            control="arm",
+            require_calibration=False,
+            require_start_pose=False,
+        )
+        record_start_pose(config, args.output, overwrite=args.overwrite)
+        return
     control = "arm" if args.command in ("arm-enable", "arm-reset") else args.control
     require_site_configuration(
         config,
         control=control,
         require_calibration=args.command == "run",
+        require_start_pose=args.command == "run",
     )
     if args.command == "preflight":
         preflight(config, args.control)

@@ -375,6 +375,12 @@ def test_motion_methods_map_to_verified_sdk_calls():
     assert driver.speed == 8
 
 
+def test_move_joints_can_override_configured_delta_for_explicit_ptp_move():
+    arm, driver = make_connected_arm(max_joint_delta=0.01)
+    arm.move_joints([0.02] * 7, speed_percent=10, max_joint_delta=0.1)
+    assert driver.sent_joints == [[0.02] * 7]
+
+
 def test_invalid_motion_target_does_not_change_the_sdk_speed_setting():
     arm, driver = make_connected_arm()
     with pytest.raises(ValueError, match="joint 1"):

@@ -33,6 +33,16 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("hand.type and quest.side must select the same side.")
     if float(config.get("control_hz", 0)) <= 0:
         raise ValueError("control_hz must be positive.")
+    try:
+        tcp_cube_side = float(config["safety"]["tcp_workspace_cube_side_m"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "safety.tcp_workspace_cube_side_m must be a finite positive number."
+        ) from exc
+    if not np.isfinite(tcp_cube_side) or tcp_cube_side <= 0:
+        raise ValueError(
+            "safety.tcp_workspace_cube_side_m must be a finite positive number."
+        )
 
     rotation = np.asarray(config["calibration"].get("R_base_quest"), dtype=float)
     if (
@@ -50,12 +60,21 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not retarget_path.is_file():
         raise ValueError(f"AnyDex retarget config does not exist: {retarget_path}")
     config["hand"]["retarget_config"] = str(retarget_path.resolve())
+
+    start_pose_path = Path(config["arm"]["start_pose_file"])
+    if not start_pose_path.is_absolute():
+        start_pose_path = project_root / start_pose_path
+    config["arm"]["start_pose_file"] = str(start_pose_path.resolve())
     config["_path"] = str(config_path)
     return config
 
 
 def require_site_configuration(
-    config: dict[str, Any], *, control: str, require_calibration: bool = True
+    config: dict[str, Any],
+    *,
+    control: str,
+    require_calibration: bool = True,
+    require_start_pose: bool = False,
 ) -> None:
     unresolved: list[str] = []
     if control in ("arm", "both") and config["arm"].get("can_channel") == PLACEHOLDER:
@@ -68,6 +87,12 @@ def require_site_configuration(
         and not bool(config["calibration"].get("calibrated"))
     ):
         unresolved.append("calibration.calibrated/R_base_quest")
+    if (
+        require_start_pose
+        and control in ("arm", "both")
+        and not Path(config["arm"]["start_pose_file"]).is_file()
+    ):
+        unresolved.append("arm.start_pose_file")
     if unresolved:
         raise RuntimeError(
             "Site configuration is incomplete: " + ", ".join(unresolved)

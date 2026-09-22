@@ -8,8 +8,9 @@
 4. `teleop/wrist_tracker.py`：对照参考项目，检查相对锚定、平移 EMA、旋转残差乘法顺序。
 5. `robot_control/nero_ik.py` 与 `assets/nero/nero_description.urdf`：确认 link7 是 SDK flange，并现场比较 FK。
 6. `teleop/hand_retarget.py`：确认只从根目录 AnyDex 导入、qpos joint names 用于名称映射、保留槽为 255。
-7. `teleop/target_gate.py` 与 `teleop/controller.py`：检查锁定条件、`R` 恢复、Nero→L20 非原子发送顺序及退出不自动 disable/e-stop。
-8. `teleop/recording.py` 与 `docs/dataset_schema.md`：确认 OP 训练需要的 action/observation/timestamp 是否完整。
+7. `teleop/controller.py`：检查起始关节文件、低速点到点运动、到位等待，以及到位后必须按 `R` 的语义。
+8. `teleop/target_gate.py` 与 `teleop/controller.py`：检查 TCP 立方体换算与中心、锁定条件、`R` 恢复、Nero→L20 非原子发送顺序及退出不自动 disable/e-stop。
+9. `teleop/recording.py` 与 `docs/dataset_schema.md`：确认 OP 训练需要的 action/observation/timestamp 是否完整。
 
 ## 本次保留的既有逻辑
 

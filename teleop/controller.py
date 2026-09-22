@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+import yaml
 
 from robot_control.l20 import LinkerHandL20
 from robot_control.nero import NeroArm
@@ -24,6 +25,10 @@ from .keyboard import Keyboard
 from .recording import EpisodeRecorder
 from .target_gate import TargetGate
 from .wrist_tracker import WristTracker
+
+
+NERO_JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 8))
+START_MOVE_MAX_JOINT_DELTA_RAD = float(2.0 * np.pi)
 
 
 def _quest_input(config: dict[str, Any]):
@@ -112,6 +117,101 @@ def _disconnect_devices(hand: LinkerHandL20 | None, arm: NeroArm | None) -> list
     return errors
 
 
+def record_start_pose(
+    config: dict[str, Any], output: str | None, *, overwrite: bool = False
+) -> Path:
+    """Read the current Nero joints and save them without enabling or moving."""
+    output_path = Path(output).expanduser().resolve() if output else Path(
+        config["arm"]["start_pose_file"]
+    )
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Start pose already exists: {output_path}. Use --overwrite to replace it."
+        )
+
+    arm = _make_arm(config)
+    try:
+        arm.connect()
+        joints = arm.get_joint_positions()
+        print("Nero start pose (rad):", joints.tolist())
+        print("Nero start pose (deg):", np.degrees(joints).tolist())
+    finally:
+        errors = _disconnect_devices(None, arm)
+        if errors:
+            print("Disconnect errors: " + "; ".join(errors))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        "robot": "nero",
+        "joint_names": list(NERO_JOINT_NAMES),
+        "joint_positions_rad": [float(value) for value in joints],
+    }
+    output_path.write_text(
+        yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+    )
+    print(f"Nero start pose saved: {output_path}")
+    return output_path
+
+
+def _load_start_pose(config: dict[str, Any]) -> np.ndarray:
+    path = Path(config["arm"]["start_pose_file"])
+    with path.open("r", encoding="utf-8") as stream:
+        document = yaml.safe_load(stream)
+    if not isinstance(document, dict) or document.get("robot") != "nero":
+        raise ValueError(f"Invalid Nero start pose file: {path}")
+    if tuple(document.get("joint_names", ())) != NERO_JOINT_NAMES:
+        raise ValueError(
+            "Nero start pose joint_names must be joint1 through joint7 in order."
+        )
+    try:
+        joints = np.asarray(document["joint_positions_rad"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Nero start pose must contain seven numeric joint angles.") from exc
+    if joints.shape != (7,) or not np.all(np.isfinite(joints)):
+        raise ValueError("Nero start pose must contain seven finite joint angles.")
+    return joints
+
+
+def _move_arm_to_start_pose(arm: NeroArm, config: dict[str, Any]) -> None:
+    """Move to the recorded joint pose and wait for feedback convergence."""
+    arm_config = config["arm"]
+    target = _load_start_pose(config)
+    tolerance = float(arm_config["start_tolerance_rad"])
+    timeout = float(arm_config["start_timeout_s"])
+    if not np.isfinite(tolerance) or tolerance <= 0:
+        raise ValueError("arm.start_tolerance_rad must be finite and positive.")
+    if not np.isfinite(timeout) or timeout <= 0:
+        raise ValueError("arm.start_timeout_s must be finite and positive.")
+
+    target = arm.validate_joint_command(
+        target, max_joint_delta=START_MOVE_MAX_JOINT_DELTA_RAD
+    )
+    current = arm.get_joint_positions()
+    error = float(np.max(np.abs(target - current)))
+    print("Nero recorded start pose (rad):", target.tolist())
+    if error <= tolerance:
+        print(f"Nero is already at the recorded start pose; max error={error:.6f} rad.")
+        return
+
+    arm.move_joints(
+        target,
+        speed_percent=arm_config["start_speed_percent"],
+        max_joint_delta=START_MOVE_MAX_JOINT_DELTA_RAD,
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        current = arm.get_joint_positions()
+        error = float(np.max(np.abs(target - current)))
+        if error <= tolerance:
+            print(f"Nero reached the recorded start pose; max error={error:.6f} rad.")
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Nero start-pose move timed out; max joint error={error:.6f} rad."
+            )
+        time.sleep(0.05)
+
+
 def preflight(config: dict[str, Any], control: str) -> None:
     """Read feedback only. This function never enables or commands a device."""
     arm = _make_arm(config) if control in ("arm", "both") else None
@@ -190,7 +290,12 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     calibration = np.asarray(config["calibration"]["R_base_quest"], dtype=np.float64)
     tracking = config["tracking"]
     safety = config["safety"]
-    gate = TargetGate(safety["max_position_step_m"], safety["max_rotation_step_deg"])
+    gate = TargetGate(
+        safety["max_position_step_m"],
+        safety["max_rotation_step_deg"],
+        safety["tcp_workspace_cube_side_m"],
+    )
+    flange_to_tcp: np.ndarray | None = None
     tracker: WristTracker | None = None
     paused = True
     recorder = EpisodeRecorder(
@@ -222,16 +327,28 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         print("Re-anchored; command streaming resumed.")
 
     try:
-        quest_input = _quest_input(config)
         if arm is not None:
             arm.connect()
             arm.enable_normal_mode()
             if not arm.is_enabled():
                 raise RuntimeError("Nero is not enabled. Enable it using the approved site procedure before run.")
+            _move_arm_to_start_pose(arm, config)
+            start_flange = pose6_to_matrix(arm.get_flange_pose())
+            start_tcp = pose6_to_matrix(arm.get_tcp_pose())
+            flange_to_tcp = np.linalg.inv(start_flange) @ start_tcp
+            gate.set_tcp_workspace_center(start_tcp[:3, 3])
+            half_side = gate.tcp_workspace_cube_side_m / 2.0
+            print(
+                "TCP workspace cube centered at startup TCP (base frame): "
+                f"center={start_tcp[:3, 3].tolist()}, half-side={half_side:.4f} m."
+            )
         if hand is not None:
             hand.connect()
             hand.set_speed(config["hand"]["speed"])
+        quest_input = _quest_input(config)
         period = 1.0 / float(config["control_hz"])
+        if arm is not None:
+            print("Start pose ready. Hold a comfortable Quest pose, then press R to anchor.")
         print("Keys: R=re-anchor, B=begin recording, S=save recording, Q=quit")
         with Keyboard() as keyboard:
             while True:
@@ -269,11 +386,14 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 hand_action = np.full(20, -1, dtype=np.int64)
                 target_transform = np.full((4, 4), np.nan)
                 if arm is not None:
+                    if flange_to_tcp is None:
+                        raise RuntimeError("TCP workspace transform is not initialized.")
                     target_position, target_quaternion = tracker.update(wrist_position, wrist_quaternion)
                     target_transform = position_quaternion_to_matrix(target_position, target_quaternion)
+                    target_tcp_position = (target_transform @ flange_to_tcp)[:3, 3]
                     seed = arm.get_joint_positions()
                     solved = ik.solve(target_transform, seed)
-                    if solved is None or not gate.accept(target_transform):
+                    if solved is None or not gate.accept(target_transform, target_tcp_position):
                         paused = True
                         reason = gate.reason if gate.paused else ik.last_diagnostics.get("code", "IK failed")
                         print(f"PAUSED: {reason}; press R to re-anchor.")

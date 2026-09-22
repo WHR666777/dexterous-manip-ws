@@ -13,7 +13,7 @@
 ## 状态转换
 
 ```text
-start → paused
+start → validate recorded joints → move_joints to recorded pose → wait in tolerance → paused
 paused --R + fresh frame--> streaming
 streaming --Quest timeout / target step violation / IK failure--> paused
 streaming --B--> streaming + recording
@@ -22,6 +22,10 @@ any --Q/Ctrl+C/exception--> stop sends → disconnect (no auto disable/e-stop)
 ```
 
 锁定是有意的：数据恢复后不会自动沿旧锚点继续运动，必须由操作者观察现场并按 `R`。
+
+启动点到点运动显式覆盖遥操作的 10° 单周期关节增量限制，但仍受官方关节限位、低速百分比、到位容差和超时约束。进入 `move_js` 后立即恢复原单周期限制。运行中的 `R` 只重置 Quest/当前 flange 的相对锚点，不执行返回起始姿态的运动。
+
+机械臂到达记录姿态后，控制器用同一时刻的 SDK flange/TCP 反馈计算固定的 flange→TCP 变换，并以该 TCP 为中心建立 Nero base 轴对齐立方体。每个候选 flange 目标都先换算为 TCP；任一轴超出半边长时目标门锁定暂停，当前目标不发送。重新按 `R` 只更新遥操作锚点，不改变工作区中心。
 
 ## 为什么不使用 RobotSystem.step
 

@@ -27,19 +27,35 @@ def test_wrist_tracker_preserves_reference_ema_semantics():
 
 
 def test_target_gate_latches_until_reanchor():
-    gate = TargetGate(0.01, 5.0)
+    gate = TargetGate(0.01, 5.0, 0.30)
+    gate.set_tcp_workspace_center(np.zeros(3))
     origin = np.eye(4)
     gate.reanchor(origin)
     small = origin.copy()
     small[0, 3] = 0.005
-    assert gate.accept(small)
+    assert gate.accept(small, small[:3, 3])
     large = small.copy()
     large[0, 3] += 0.02
-    assert not gate.accept(large)
+    assert not gate.accept(large, large[:3, 3])
     assert gate.paused
-    assert not gate.accept(small)
+    assert not gate.accept(small, small[:3, 3])
     gate.reanchor(small)
     assert not gate.paused
+
+
+def test_target_gate_pauses_outside_tcp_workspace_cube():
+    gate = TargetGate(0.20, 5.0, 0.30)
+    origin = np.eye(4)
+    gate.set_tcp_workspace_center(np.array([0.4, 0.0, 0.2]))
+    gate.reanchor(origin)
+
+    inside = np.array([0.549, 0.0, 0.2])
+    assert gate.accept(origin, inside)
+
+    outside = np.array([0.551, 0.0, 0.2])
+    assert not gate.accept(origin, outside)
+    assert gate.paused
+    assert "TCP workspace cube exceeded on x" in gate.reason
 
 
 class _ResetArm:

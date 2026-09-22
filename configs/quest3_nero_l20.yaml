@@ -9,7 +9,7 @@ quest:
   max_pair_skew_s: 0.05
 
 calibration:
-  # 现场标定后改为 true；此矩阵把 canonical Quest 坐标旋转到 Nero base。
+  # 现场标定后改为 true；此矩阵把 AnyDex RH 坐标旋转到 Nero base。
   calibrated: false
   R_base_quest:
     - [1.0, 0.0, 0.0]
@@ -27,6 +27,8 @@ tracking:
 safety:
   max_position_step_m: 0.01
   max_rotation_step_deg: 5.0
+  # 以启动到位后的 TCP 为中心、在 Nero base 坐标系中轴对齐的立方体边长。
+  tcp_workspace_cube_side_m: 0.30
   startup_fk_position_error_m: 0.01
   startup_fk_rotation_error_deg: 5.0
 
@@ -34,6 +36,10 @@ arm:
   can_interface: socketcan
   can_channel: can0
   max_joint_delta_rad: 0.1745329252
+  start_pose_file: configs/nero_start_pose.yaml
+  start_speed_percent: 10
+  start_tolerance_rad: 0.02
+  start_timeout_s: 30.0
 
 hand:
   type: right

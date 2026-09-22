@@ -25,9 +25,10 @@ R_base_wrist = R_base_quest · R_anydex_rh_wrist
 
 1. 运行 `input-check`，只动手和腕，确认 TCP 持续、side 正确、L20 raw 数值随手指合理变化。
 2. 分别执行两项 preflight，确认反馈稳定且无其他控制者。
-3. 仅运行 `--control hand`，使用最慢、最小范围动作检查 20 槽映射。
-4. 在 Nero 已通过 `arm-enable --execute` 或现场流程使能，并有人监护、急停可达时，仅运行 `--control arm`；按 `R` 后做毫米级位移和很小旋转。
-5. 确认 1 cm / 5° 目标步门、10° 关节变化限制、Quest 超时锁定均符合预期。
-6. 最后才运行 `--control both`，先不录制，再按 `B/S` 录短 episode 并离线检查字段。
+3. 将 Nero 放到确认过的起点，用 `record-start-pose` 保存七轴 rad；检查 YAML 顺序是 `joint1`–`joint7`。
+4. 仅运行 `--control hand`，使用最慢、最小范围动作检查 20 槽映射。
+5. 在 Nero 已通过 `arm-enable --execute` 或现场流程使能，并有人监护、急停可达时，仅运行 `--control arm`；确认它先低速到达记录姿态，随后保持暂停，按 `R` 后再做毫米级位移和很小旋转。
+6. 确认 1 cm / 5° 目标步门、10° 遥操作关节变化限制、TCP 立方体边界和 Quest 超时锁定均符合预期；首次检查立方体时逐轴缓慢靠近边界，并确认越界目标未发送。
+7. 最后才运行 `--control both`，先不录制，再按 `B/S` 录短 episode 并离线检查字段。
 
 初次实机验证期间不要提高 20 Hz、步长或 L20 raw slew；这些值只有在记录到现场证据后才能调整。

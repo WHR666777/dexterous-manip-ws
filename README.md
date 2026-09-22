@@ -36,8 +36,9 @@ python3 -m pip install -e .
 1. 将 `arm.can_channel` 和 `hand.can_channel` 从 `CHANGE_ME` 改为现场确认的通道。
 2. 标定 `calibration.R_base_quest`，再把 `calibration.calibrated` 改为 `true`。
 3. 确认 `quest.side` 与 `hand.type` 对应同一只手。
+4. 用下面的 `record-start-pose` 命令记录 Nero 的七轴起始姿态。
 
-在这些值未完成前，`preflight`/`run` 会拒绝继续，不会猜测 CAN 通道或安装方向。
+在这些值未完成前，`run --control arm/both` 会拒绝继续，不会猜测 CAN 通道、安装方向或起始姿态。
 
 ## 无硬件输入检查
 
@@ -101,6 +102,29 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-enable --execute
 
 该进程使能后断开连接，不自动失能；如果现场已有批准的使能流程，也可以使用现场流程。
 
+## 记录 Nero 起始姿态
+
+先通过现场允许的方式将 Nero 放到期望起始姿态，然后读取并保存当前七轴关节角：
+
+```bash
+python3 -m teleop.cli \
+  --config configs/quest3_nero_l20.yaml \
+  record-start-pose \
+  --output configs/nero_start_pose.yaml
+```
+
+该命令只连接、读取和保存，不使能、不发送运动目标；终端会同时打印 rad 和 degree。目标文件已存在时默认拒绝覆盖，确认需要替换后添加 `--overwrite`。
+
+起始姿态文件只包含固定顺序的 `joint1`–`joint7` 和七个 rad 值。`arm.start_pose_file` 指向该文件；启动运动参数为：
+
+```yaml
+arm:
+  start_pose_file: configs/nero_start_pose.yaml
+  start_speed_percent: 10
+  start_tolerance_rad: 0.02
+  start_timeout_s: 30.0
+```
+
 需要恢复 Nero 控制状态时，可使用以下命令。它先请求失能并确认已失能，才发送
 `reset`；失能或急停后的复位可能造成机械臂下落，因此必须先提供机械支撑、清空
 工作区并确认急停可达。它不是物理急停的替代品。
@@ -112,6 +136,10 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-reset --execute
 ## 正式控制与录制
 
 `--control` 必须明确指定，`run` 还要求 `--execute` 并在终端输入 `EXECUTE`。Nero 必须已通过上面的命令或现场批准流程使能；`run` 不会隐式使能或自动失能。
+
+对于 `--control arm/both`，程序首先校验记录的七轴目标和官方关节限位，然后使用低速 `move_joints` 到达起始姿态并等待反馈误差收敛。到位后仍保持暂停：操作者摆好 Quest，再按 `R` 才建立腕部零点并开始叠加。运行中再次按 `R` 只在机械臂当前位置重新锚定，不会自动返回起始姿态。
+
+到达起始姿态后，程序还会以当时的实际 TCP 为中心建立一个 Nero base 坐标系轴对齐的立方体工作区。默认边长为 `safety.tcp_workspace_cube_side_m: 0.30`，即每个轴相对起始 TCP 最多移动 ±0.15 m。程序使用启动时测得的 flange→TCP 偏置检查候选 TCP；任何一轴越界都会在发送机械臂目标前暂停，不会把目标截断到边界。检查现场空间后再调整此值；按 `R` 不会移动或重置立方体中心。
 
 ```bash
 # 先手，再臂，最后联合验证
@@ -128,6 +156,8 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control both -
 - `Q`：停止发送；若正在录制则保存，然后断开。
 
 正常退出、Quest 超时、步长越界和程序异常都不会自动触发电子急停或 Nero disable。程序的职责是停止继续发送并断开；现场急停与故障处置仍由操作者执行。
+
+单个起始关节姿态只定义终点，不定义无碰撞路径。启动运动使用 Nero 官方点到点关节运动；现场必须保证从当前姿态到记录姿态的路径可用。如果需要绕开障碍物，应另行定义多个 waypoint，而不是提高速度或放宽到位检查。
 
 ## 低层只读示例
 

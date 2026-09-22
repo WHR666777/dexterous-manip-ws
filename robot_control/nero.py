@@ -754,7 +754,13 @@ class NeroArm:
             return None
         return self._validate_speed_percent(speed_percent)
 
-    def move_joints(self, joints: Any, *, speed_percent: Optional[int] = None) -> None:
+    def move_joints(
+        self,
+        joints: Any,
+        *,
+        speed_percent: Optional[int] = None,
+        max_joint_delta: Optional[float] = None,
+    ) -> None:
         """验证后非阻塞地发送七轴关节目标。
 
         Parameters
@@ -763,6 +769,9 @@ class NeroArm:
             关节 1--7 目标位置，单位 rad，受官方限位与配置变化量限制。
         speed_percent : int or None, optional
             官方速度百分比，范围 ``[0, 100]``；不是 rad/s，``None`` 保持 SDK 设置。
+        max_joint_delta : float or None, optional
+            本次点到点命令的关节变化上限，单位 rad。``None`` 使用构造时配置；
+            显式有限值可为已确认的启动点到点运动覆盖遥操作单周期限制。
 
         Returns
         -------
@@ -782,7 +791,9 @@ class NeroArm:
         连续目标频率必须经真机逐级验证。
         """
         speed = self._prepare_motion(speed_percent)
-        command = self.validate_joint_command(joints)
+        command = self.validate_joint_command(
+            joints, max_joint_delta=max_joint_delta,
+        )
         if speed is not None:
             self._driver.set_speed_percent(speed)
         self._driver.move_j(command.tolist())
