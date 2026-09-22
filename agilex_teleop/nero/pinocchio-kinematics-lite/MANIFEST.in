@@ -1,4 +1,0 @@
-include README.md
-include LICENSE
-recursive-include src/pinocchio_kinematics_lite/assets *.urdf *.stl *.dae
-recursive-include src/pinocchio_kinematics_lite/assets *.STL

@@ -13,12 +13,6 @@ import numpy as np
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import (  # noqa: E402
-    NERO_CAN_CHANNEL,
-    NERO_CAN_INTERFACE,
-    NERO_MAX_JOINT_DELTA,
-    NERO_SPEED_PERCENT,
-)
 from examples._safety import _disconnect_or_report  # noqa: E402
 from robot_control import NeroArm  # noqa: E402
 
@@ -36,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     仅创建内存中的解析器，不构造 Wrapper、不访问 CAN，也不发送硬件命令。
     """
     parser = argparse.ArgumentParser(description="默认只读的 Nero 状态与小动作示例。")
+    parser.add_argument("--can-channel", required=True, help="现场确认的 Nero CAN 通道，例如 can0。")
+    parser.add_argument("--can-interface", default="socketcan")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -114,9 +110,9 @@ def run(
     exit_code = 0
     try:
         arm = arm_factory(
-            can_interface=NERO_CAN_INTERFACE,
-            can_channel=NERO_CAN_CHANNEL,
-            max_joint_delta=NERO_MAX_JOINT_DELTA,
+            can_interface=args.can_interface,
+            can_channel=args.can_channel,
+            max_joint_delta=np.deg2rad(10.0),
         )
         arm.connect()
         print("Nero healthy:", arm.is_ok())
@@ -131,7 +127,7 @@ def run(
             target = arm.get_joint_positions().copy()
             target[args.joint_index] += args.delta_rad
             try:
-                arm.move_joints(target, speed_percent=NERO_SPEED_PERCENT)
+                arm.move_joints(target, speed_percent=20)
             except ValueError as error:
                 print("Nero command rejected:", error, file=sys.stderr)
                 exit_code = 2
