@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 pyAgxArm/
 linkerhand-python-sdk/
+data/

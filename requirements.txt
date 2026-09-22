@@ -1,4 +1,7 @@
 numpy
+nlopt
+pin
 python-can>=4,<5
 PyYAML
+scipy
 typing-extensions>=3.7.4.3

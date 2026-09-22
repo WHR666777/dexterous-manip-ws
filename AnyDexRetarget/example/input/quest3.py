@@ -111,6 +111,18 @@ def _convert_quat(quat: np.ndarray) -> np.ndarray:
 
 
 @dataclass
+class Quest3HandFrame:
+    """Thread-safe snapshot exposed to integrated arm/hand teleoperation."""
+
+    side: str
+    wrist_position: np.ndarray
+    wrist_quat: np.ndarray
+    landmarks: np.ndarray
+    received_at: float
+    pair_skew: float
+
+
+@dataclass
 class _HandState:
     """State for a single hand."""
 
@@ -119,6 +131,8 @@ class _HandState:
     wrist_quat: Optional[np.ndarray] = None
     landmarks_local: Optional[np.ndarray] = None
     last_update: float = field(default_factory=time.monotonic)
+    wrist_updated_at: Optional[float] = None
+    landmarks_updated_at: Optional[float] = None
 
     def update_wrist(self, data: Iterable[float]) -> None:
         values = np.array(list(data), dtype=float)
@@ -126,7 +140,9 @@ class _HandState:
             return
         self.wrist_position = _convert_vec(values[:3])
         self.wrist_quat = _convert_quat(values[3:7])
-        self.last_update = time.monotonic()
+        now = time.monotonic()
+        self.last_update = now
+        self.wrist_updated_at = now
 
     def update_landmarks(self, data: Iterable[float]) -> None:
         values = np.array(list(data), dtype=float)
@@ -136,7 +152,9 @@ class _HandState:
             values = values[: values.size - (values.size % 3)]
         reshaped = values.reshape((-1, 3))
         self.landmarks_local = (_UNITY_TO_RH @ reshaped.T).T
-        self.last_update = time.monotonic()
+        now = time.monotonic()
+        self.last_update = now
+        self.landmarks_updated_at = now
 
     def world_points(self) -> Optional[np.ndarray]:
         """Return landmarks transformed to world space (N, 3)."""
@@ -230,6 +248,36 @@ class Quest3:
             "left_fingers": left,
             "right_fingers": right,
         }
+
+    def get_hand_frame(self, side: str) -> Optional[Quest3HandFrame]:
+        """Return one complete converted wrist/landmark snapshot.
+
+        This exposes the data already maintained by the Quest3 plugin; it does
+        not add another socket, parser, coordinate conversion, or smoothing
+        path. ``None`` means that either wrist or landmarks has not arrived.
+        """
+        normalized_side = side.lower()
+        if normalized_side not in self._hands:
+            raise ValueError("side must be 'left' or 'right'")
+        with self._lock:
+            hand = self._hands[normalized_side]
+            landmarks = hand.world_points()
+            if (
+                hand.wrist_position is None
+                or hand.wrist_quat is None
+                or landmarks is None
+                or hand.wrist_updated_at is None
+                or hand.landmarks_updated_at is None
+            ):
+                return None
+            return Quest3HandFrame(
+                side=normalized_side,
+                wrist_position=hand.wrist_position.copy(),
+                wrist_quat=hand.wrist_quat.copy(),
+                landmarks=landmarks.copy(),
+                received_at=max(hand.wrist_updated_at, hand.landmarks_updated_at),
+                pair_skew=abs(hand.wrist_updated_at - hand.landmarks_updated_at),
+            )
 
     def stop(self) -> None:
         """Stop the receiver thread."""

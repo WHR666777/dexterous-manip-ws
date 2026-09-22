@@ -1,0 +1,47 @@
+control_hz: 20
+
+quest:
+  transport: tcp
+  listen_host: 0.0.0.0
+  port: 8000
+  side: right
+  max_age_s: 0.25
+  max_pair_skew_s: 0.05
+
+calibration:
+  # 现场标定后改为 true；此矩阵把 canonical Quest 坐标旋转到 Nero base。
+  calibrated: false
+  R_base_quest:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+
+tracking:
+  # 保留参考 vr_teleop WristTracker 的相对锚定与平移 EMA 语义。
+  position_scale: 1.0
+  ema_alpha: 0.8
+  negate_rot_xy: false
+  position_deadband_m: 0.0
+  rotation_deadband_deg: 0.0
+
+safety:
+  max_position_step_m: 0.01
+  max_rotation_step_deg: 5.0
+  startup_fk_position_error_m: 0.01
+  startup_fk_rotation_error_deg: 5.0
+
+arm:
+  can_interface: socketcan
+  can_channel: CHANGE_ME
+  max_joint_delta_rad: 0.1745329252
+
+hand:
+  type: right
+  model: L20
+  can_channel: CHANGE_ME
+  speed: [30, 30, 30, 30, 30]
+  max_raw_step: 10
+  retarget_config: AnyDexRetarget/example/config/adaptive/quest3/quest3_linker_l20.yaml
+
+recording:
+  output_dir: data/episodes

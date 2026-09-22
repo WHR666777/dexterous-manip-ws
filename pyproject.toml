@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quest3-nero-l20-teleop"
+version = "0.1.0"
+description = "Single-arm Quest 3 teleoperation for AgileX Nero and LinkerHand L20"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "nlopt",
+  "pin",
+  "python-can>=4,<5",
+  "PyYAML",
+  "scipy",
+  "typing-extensions>=3.7.4.3",
+]
+
+[tool.setuptools.packages.find]
+include = ["robot_control*", "teleop*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

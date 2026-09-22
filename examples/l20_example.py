@@ -14,7 +14,6 @@ import numpy as np
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import L20_CAN_CHANNEL, L20_HAND_MODEL, L20_HAND_TYPE  # noqa: E402
 from examples._safety import _disconnect_or_report  # noqa: E402
 from robot_control import L20_ACTIVE_POSITION_INDICES, LinkerHandL20  # noqa: E402
 
@@ -32,8 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     仅创建内存中的解析器，不构造 Wrapper、不访问 CAN，也不发送硬件命令。
     """
     parser = argparse.ArgumentParser(
-        description="默认只读的 LinkerHand {0} 状态与小动作示例。".format(L20_HAND_MODEL),
+        description="默认只读的 LinkerHand L20 状态与小动作示例。",
     )
+    parser.add_argument("--can-channel", required=True, help="现场确认的 L20 CAN 通道，例如 can1。")
+    parser.add_argument("--hand-type", choices=("left", "right"), default="right")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -124,7 +125,7 @@ def run(
     hand = None
     exit_code = 0
     try:
-        hand = hand_factory(hand_type=L20_HAND_TYPE, can_channel=L20_CAN_CHANNEL)
+        hand = hand_factory(hand_type=args.hand_type, can_channel=args.can_channel)
         hand.connect()
         print("L20 SDK version:", hand.get_sdk_version())
         print("L20 position (raw):", hand.get_joint_positions_raw())
