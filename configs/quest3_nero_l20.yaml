@@ -32,13 +32,13 @@ safety:
 
 arm:
   can_interface: socketcan
-  can_channel: CHANGE_ME
+  can_channel: can0
   max_joint_delta_rad: 0.1745329252
 
 hand:
   type: right
   model: L20
-  can_channel: CHANGE_ME
+  can_channel: can1
   speed: [30, 30, 30, 30, 30]
   max_raw_step: 10
   retarget_config: AnyDexRetarget/example/config/adaptive/quest3/quest3_linker_l20.yaml

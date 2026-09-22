@@ -101,6 +101,14 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-enable --execute
 
 该进程使能后断开连接，不自动失能；如果现场已有批准的使能流程，也可以使用现场流程。
 
+需要恢复 Nero 控制状态时，可使用以下命令。它先请求失能并确认已失能，才发送
+`reset`；失能或急停后的复位可能造成机械臂下落，因此必须先提供机械支撑、清空
+工作区并确认急停可达。它不是物理急停的替代品。
+
+```bash
+python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-reset --execute
+```
+
 ## 正式控制与录制
 
 `--control` 必须明确指定，`run` 还要求 `--execute` 并在终端输入 `EXECUTE`。Nero 必须已通过上面的命令或现场批准流程使能；`run` 不会隐式使能或自动失能。

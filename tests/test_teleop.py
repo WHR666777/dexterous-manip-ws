@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from teleop.coordinate_frames import anydex_wrist_to_base
+from teleop import controller
 from teleop.target_gate import TargetGate
 from teleop.wrist_tracker import WristTracker
 
@@ -38,3 +40,42 @@ def test_target_gate_latches_until_reanchor():
     assert not gate.accept(small)
     gate.reanchor(small)
     assert not gate.paused
+
+
+class _ResetArm:
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self.calls: list[str] = []
+
+    def connect(self) -> None:
+        self.calls.append("connect")
+
+    def is_enabled(self) -> bool:
+        self.calls.append("is_enabled")
+        return self.enabled
+
+    def disable(self) -> None:
+        self.calls.append("disable")
+        self.enabled = False
+
+    def reset(self) -> None:
+        self.calls.append("reset")
+
+    def disconnect(self) -> None:
+        self.calls.append("disconnect")
+
+
+@pytest.mark.parametrize("initially_enabled", (True, False))
+def test_reset_arm_disables_before_reset_and_disconnects(monkeypatch, initially_enabled):
+    arm = _ResetArm(enabled=initially_enabled)
+    monkeypatch.setattr(controller, "_make_arm", lambda config: arm)
+
+    controller.reset_arm({})
+
+    assert arm.calls[0] == "connect"
+    assert arm.calls[-1] == "disconnect"
+    assert "reset" in arm.calls
+    if initially_enabled:
+        assert arm.calls.index("disable") < arm.calls.index("reset")
+    else:
+        assert "disable" not in arm.calls

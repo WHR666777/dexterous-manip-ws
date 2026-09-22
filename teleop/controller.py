@@ -119,6 +119,7 @@ def preflight(config: dict[str, Any], control: str) -> None:
     try:
         if arm is not None:
             arm.connect()
+            arm.enable_normal_mode()
             joints = arm.get_joint_positions()
             flange = pose6_to_matrix(arm.get_flange_pose())
             predicted = NeroIK().forward(joints)
@@ -145,6 +146,7 @@ def enable_arm(config: dict[str, Any]) -> None:
     arm = _make_arm(config)
     try:
         arm.connect()
+        arm.enable_normal_mode()
         print("Nero joint position before enable (rad):", arm.get_joint_positions())
         arm.enable()
         print("Nero enabled:", arm.is_enabled())
@@ -153,6 +155,30 @@ def enable_arm(config: dict[str, Any]) -> None:
         if errors:
             print("Disconnect errors: " + "; ".join(errors))
         print("Nero disconnect attempted; no motion target or automatic disable was sent.")
+
+
+def reset_arm(config: dict[str, Any]) -> None:
+    """Disable Nero and request a control-state reset without motion targets.
+
+    Disabling can cause the arm to fall.  The caller must ensure the arm is
+    mechanically supported and the workcell is clear before invoking this.
+    """
+    arm = _make_arm(config)
+    try:
+        arm.connect()
+        enabled_before = arm.is_enabled()
+        print("Nero enabled before reset:", enabled_before)
+        if enabled_before:
+            arm.disable()
+        if arm.is_enabled():
+            raise RuntimeError("Nero remains enabled after disable request; reset was not sent.")
+        arm.reset()
+        print("Nero reset requested; enabled:", arm.is_enabled())
+    finally:
+        errors = _disconnect_devices(None, arm)
+        if errors:
+            print("Disconnect errors: " + "; ".join(errors))
+        print("Nero disconnect attempted after disable/reset; no motion target was sent.")
 
 
 def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
@@ -199,6 +225,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         quest_input = _quest_input(config)
         if arm is not None:
             arm.connect()
+            arm.enable_normal_mode()
             if not arm.is_enabled():
                 raise RuntimeError("Nero is not enabled. Enable it using the approved site procedure before run.")
         if hand is not None:

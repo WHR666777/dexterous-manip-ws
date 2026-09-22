@@ -186,6 +186,16 @@ class NeroArm:
         if not self.is_enabled():
             raise RuntimeError("Nero arm is not enabled.")
 
+    def enable_normal_mode(self) -> None:
+        while not self._driver.enable():
+            self._driver.set_normal_mode()
+            time.sleep(0.01)
+    
+    def enable_leader_mode(self) -> None:
+        while not self._driver.enable():
+            self._driver.set_leader_mode()
+            time.sleep(0.01)
+
     @staticmethod
     def _validate_retry_settings(timeout: float, poll_interval: float) -> tuple[float, float]:
         valid_number_types = (int, float, np.integer, np.floating)
