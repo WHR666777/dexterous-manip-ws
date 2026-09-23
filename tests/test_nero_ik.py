@@ -19,6 +19,15 @@ def test_nero_fk_identity_shape_and_limits():
     assert solver.limits.shape == (7, 2)
 
 
+def test_ik_joint_continuity_uses_configured_delta():
+    seed = np.zeros(7)
+    candidate = seed.copy()
+    candidate[0] = np.deg2rad(11.0)
+
+    assert not NeroIK().continuous(candidate, seed)
+    assert NeroIK(max_joint_delta_rad=np.deg2rad(15.0)).continuous(candidate, seed)
+
+
 def test_ik_uses_one_seed_and_returns_first_valid_solution(monkeypatch):
     solver = NeroIK()
     seed = np.zeros(7)

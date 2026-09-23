@@ -40,9 +40,10 @@ safety:
 arm:
   can_interface: socketcan
   can_channel: can0
-  max_joint_delta_rad: 0.2545329252
+  max_joint_delta_rad: 0.3345329252
   start_pose_file: configs/nero_start_pose.yaml
   start_speed_percent: 10
+  follow_speed_percent: 30 # legacy for move_joints
   start_tolerance_rad: 0.02
   start_timeout_s: 30.0
 

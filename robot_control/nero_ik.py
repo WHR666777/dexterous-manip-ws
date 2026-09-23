@@ -19,7 +19,7 @@ URDF_PATH = (
 )
 MAX_FK_POSITION_ERROR_M = 0.002
 MAX_FK_ROTATION_ERROR_DEG = 2.0
-MAX_IK_JOINT_JUMP_DEG = 10.0
+DEFAULT_MAX_IK_JOINT_DELTA_RAD = np.deg2rad(10.0)
 REGULARIZATION_WEIGHT = 0.05
 MAX_NFEV = 80
 MAX_SOLVE_SECONDS = 0.075  # 单次求解软预算；当前超过 20 Hz 周期，仅用于实机诊断。
@@ -48,8 +48,19 @@ def pose_error(actual, target):
 
 
 class NeroIK:
-    def __init__(self, urdf_path=URDF_PATH):
+    def __init__(
+        self,
+        urdf_path=URDF_PATH,
+        *,
+        max_joint_delta_rad=DEFAULT_MAX_IK_JOINT_DELTA_RAD,
+    ):
         self.urdf_path = Path(urdf_path).resolve()
+        self.max_joint_delta_rad = float(max_joint_delta_rad)
+        if (
+            not np.isfinite(self.max_joint_delta_rad)
+            or self.max_joint_delta_rad < 0
+        ):
+            raise ValueError('IK max_joint_delta_rad 必须是有限非负数')
         root = ET.parse(self.urdf_path).getroot()
         self.joint_names = [f'joint{i}' for i in range(1, 8)]
         self.base_link, self.flange_link = 'base_link', 'link7'
@@ -98,8 +109,8 @@ class NeroIK:
             return False
         direct = np.asarray(q) - np.asarray(reference)
         # Nero 七轴均非 continuous。实际发送必须走合法的直接路径。
-        return bool(np.max(np.abs(direct)) <= np.deg2rad(MAX_IK_JOINT_JUMP_DEG)
-                    and np.max(np.abs(wrap_angle(direct))) <= np.deg2rad(MAX_IK_JOINT_JUMP_DEG))
+        return bool(np.max(np.abs(direct)) <= self.max_joint_delta_rad
+                    and np.max(np.abs(wrap_angle(direct))) <= self.max_joint_delta_rad)
 
     def forward(self, q):
         q = np.asarray(q, dtype=float)

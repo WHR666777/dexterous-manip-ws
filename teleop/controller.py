@@ -380,7 +380,11 @@ def reset_arm(config: dict[str, Any]) -> None:
 def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     arm = _make_arm(config) if control in ("arm", "both") else None
     hand = _make_hand(config) if control in ("hand", "both") else None
-    ik = NeroIK() if arm is not None else None
+    ik = (
+        NeroIK(max_joint_delta_rad=config["arm"]["max_joint_delta_rad"])
+        if arm is not None
+        else None
+    )
     hand_retargeter = _retargeter(config) if hand is not None else None
     quest_input = None
     calibration = np.asarray(config["calibration"]["R_base_quest"], dtype=np.float64)
@@ -427,6 +431,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         print("Re-anchored; command streaming resumed.")
 
     try:
+        arm_config = config["arm"]
         quest_input = _quest_input(config)
         if isinstance(quest_input, QuestRelayClient) and not quest_input.is_available():
             raise RuntimeError(
@@ -525,6 +530,10 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 hand_sent_at = np.nan
                 if arm is not None:
                     arm.move_js(arm_action)
+                    # arm.move_joints(
+                    #     arm_action,
+                    #     speed_percent=arm_config["follow_speed_percent"],
+                    # )
                     arm_sent_at = time.monotonic()
                 if hand is not None:
                     hand.set_joint_positions_raw(hand_action)
