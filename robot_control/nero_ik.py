@@ -22,8 +22,7 @@ MAX_FK_ROTATION_ERROR_DEG = 2.0
 MAX_IK_JOINT_JUMP_DEG = 10.0
 REGULARIZATION_WEIGHT = 0.05
 MAX_NFEV = 80
-MAX_SOLVE_SECONDS = 0.075  # 总软预算；不是实时保证，超时未收敛候选不使用。
-RESTART_OFFSET_RAD = np.deg2rad(2.0)
+MAX_SOLVE_SECONDS = 0.075  # 单次求解软预算；当前超过 20 Hz 周期，仅用于实机诊断。
 
 
 def wrap_angle(angle):
@@ -114,7 +113,7 @@ class NeroIK:
         return T
 
     def solve(self, target_pose, q_seed):
-        """在有限多初值中选最接近 seed 的已收敛合法解，失败返回 None。
+        """从单个 seed 求连续局部解，失败返回 None。
 
         不把数值失败解释为全局不可达；详细原因放在 last_diagnostics。
         """
@@ -141,6 +140,17 @@ class NeroIK:
                         fk_rotation_error_deg=np.rad2deg(r0), dq_ik_deg=[0.0]*7)
             return seed
 
+        progress = {
+            'residual_evaluations': 0,
+            'best_score': (
+                (p0 / MAX_FK_POSITION_ERROR_M) ** 2
+                + (r0 / np.deg2rad(MAX_FK_ROTATION_ERROR_DEG)) ** 2
+            ),
+            'best_q': seed.copy(),
+            'best_position_error_m': p0,
+            'best_rotation_error_rad': r0,
+        }
+
         def residual(candidate):
             if time.monotonic() - started > MAX_SOLVE_SECONDS:
                 raise TimeoutError('IK 时间预算耗尽')
@@ -148,33 +158,54 @@ class NeroIK:
             position = (actual[:3, 3] - target[:3, 3]) / MAX_FK_POSITION_ERROR_M
             rotation = Rotation.from_matrix(target[:3, :3] @ actual[:3, :3].T).as_rotvec()
             rotation /= np.deg2rad(MAX_FK_ROTATION_ERROR_DEG)
+            progress['residual_evaluations'] += 1
+            score = float(position @ position + rotation @ rotation)
+            if score < progress['best_score']:
+                progress.update(
+                    best_score=score,
+                    best_q=np.asarray(candidate, dtype=float).copy(),
+                    best_position_error_m=float(
+                        np.linalg.norm(actual[:3, 3] - target[:3, 3])
+                    ),
+                    best_rotation_error_rad=float(
+                        np.linalg.norm(rotation)
+                        * np.deg2rad(MAX_FK_ROTATION_ERROR_DEG)
+                    ),
+                )
             return np.r_[position, rotation, REGULARIZATION_WEIGHT * wrap_angle(candidate - seed)]
 
-        # 确定性小扰动，包含 q7；正则参考始终是真实 seed，不跟着初值漂移。
-        direction = np.array([1, -1, 1, -1, 1, -1, 1]) * RESTART_OFFSET_RAD
-        starts = [seed, seed + direction, seed - direction]
-        accepted = []
-        for initial in starts:
-            try:
-                result = least_squares(residual, np.clip(initial, self.limits[:, 0], self.limits[:, 1]),
-                                       bounds=(self.limits[:, 0], self.limits[:, 1]), max_nfev=MAX_NFEV)
-            except TimeoutError:
-                diag['budget_exhausted'] = True
-                break
-            except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
-                diag['candidates'].append(dict(code='IK_NUMERICAL_ERROR', error=str(exc)))
-                continue
-            q = result.x
-            info = dict(converged=bool(result.success), nfev=int(result.nfev), q_deg=np.rad2deg(q).tolist())
+        def record_progress():
+            best_q = progress['best_q']
+            diag.update(
+                residual_evaluations=progress['residual_evaluations'],
+                best_intermediate={
+                    'fk_position_error_mm': progress['best_position_error_m'] * 1000,
+                    'fk_rotation_error_deg': np.rad2deg(
+                        progress['best_rotation_error_rad']
+                    ),
+                    'dq_ik_deg': np.rad2deg(best_q - seed).tolist(),
+                    'q_deg': np.rad2deg(best_q).tolist(),
+                },
+            )
+
+        def assess_candidate(candidate, *, converged, accept_unconverged=False):
+            q = np.asarray(candidate, dtype=float)
+            info = dict(
+                converged=bool(converged),
+                q_deg=np.rad2deg(q).tolist(),
+            )
             if not np.isfinite(q).all():
                 info['code'] = 'IK_NUMERICAL_ERROR'
             elif not self.in_limits(q):
                 info['code'] = 'IK_JOINT_LIMIT'
             else:
                 p, r = pose_error(self.forward(q), target)
-                info.update(fk_position_error_mm=p*1000, fk_rotation_error_deg=np.rad2deg(r),
-                            dq_ik_deg=np.rad2deg(q-seed).tolist())
-                if not result.success:
+                info.update(
+                    fk_position_error_mm=p * 1000,
+                    fk_rotation_error_deg=np.rad2deg(r),
+                    dq_ik_deg=np.rad2deg(q - seed).tolist(),
+                )
+                if not converged and not accept_unconverged:
                     info['code'] = 'IK_FAILED'
                 elif p >= MAX_FK_POSITION_ERROR_M or r >= np.deg2rad(MAX_FK_ROTATION_ERROR_DEG):
                     info['code'] = 'IK_FK_ERROR'
@@ -182,17 +213,51 @@ class NeroIK:
                     info['code'] = 'IK_JUMP'
                 else:
                     info['code'] = 'IK_SUCCESS'
-                    accepted.append((float(np.linalg.norm(wrap_angle(q-seed))), q.copy(), info))
+            return q, info
+
+        try:
+            result = least_squares(
+                residual,
+                seed,
+                bounds=(self.limits[:, 0], self.limits[:, 1]),
+                max_nfev=MAX_NFEV,
+            )
+        except TimeoutError:
+            record_progress()
+            q, info = assess_candidate(
+                progress['best_q'], converged=False, accept_unconverged=True
+            )
+            info['deadline_fallback'] = True
             diag['candidates'].append(info)
-        diag['solve_ms'] = (time.monotonic() - started) * 1000
-        if not accepted:
-            if diag['candidates']:
-                best = min(diag['candidates'], key=lambda x: x.get('fk_position_error_mm', float('inf')))
-                diag.update(best)
+            diag.update(
+                info,
+                budget_exhausted=True,
+                solve_ms=(time.monotonic() - started) * 1000,
+            )
+            if info['code'] != 'IK_SUCCESS':
+                return None
+            diag['ik_success'] = True
+            return q.copy()
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+            record_progress()
+            info = dict(code='IK_NUMERICAL_ERROR', error=str(exc))
+            diag['candidates'].append(info)
+            diag.update(info, solve_ms=(time.monotonic() - started) * 1000)
             return None
-        _, q, info = min(accepted, key=lambda item: item[0])
-        diag.update(info, ik_success=True)
-        return q
+
+        record_progress()
+        q, info = assess_candidate(
+            result.x, converged=bool(result.success)
+        )
+        info['nfev'] = int(result.nfev)
+
+        diag['candidates'].append(info)
+        diag['solve_ms'] = (time.monotonic() - started) * 1000
+        diag.update(info)
+        if info['code'] != 'IK_SUCCESS':
+            return None
+        diag['ik_success'] = True
+        return q.copy()
 
 
 def self_test(urdf_path=URDF_PATH):

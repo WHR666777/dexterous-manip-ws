@@ -15,7 +15,7 @@ R_base_wrist = R_base_quest · R_anydex_rh_wrist
 
 现场至少用三个不共线的小方向动作确认正负方向。将正交、行列式为 `+1` 的 3×3 矩阵写入 YAML 后，才把 `calibrated` 改为 `true`。
 
-绝对平移不需要测量：按 `R` 时，当前 Quest 腕位置与当前 Nero flange 被相对锚定。旋转也以按 `R` 时的腕姿作为零残差。
+绝对平移不需要测量：按 `R` 时，当前 Quest 腕位置与当前七轴反馈经 URDF/FK 得到的 Nero flange 被相对锚定。旋转也以按 `R` 时的腕姿作为零残差；SDK flange 保留给 preflight 做独立一致性检查，不作为 IK 锚点。
 
 ## 3. URDF/FK 一致性
 

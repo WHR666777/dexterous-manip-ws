@@ -1,0 +1,17 @@
+robot: nero
+joint_names:
+- joint1
+- joint2
+- joint3
+- joint4
+- joint5
+- joint6
+- joint7
+joint_positions_rad:
+- -0.039
+- 0.734
+- -0.064
+- 1.492
+- 0.026000000000000002
+- -0.096
+- -1.018

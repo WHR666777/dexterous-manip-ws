@@ -23,16 +23,25 @@ from .coordinate_frames import (
 from .hand_retarget import L20Retargeter
 from .keyboard import Keyboard
 from .recording import EpisodeRecorder
+from .quest_listener import QuestRelayClient
 from .target_gate import TargetGate
 from .wrist_tracker import WristTracker
 
 
 NERO_JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 8))
 START_MOVE_MAX_JOINT_DELTA_RAD = float(2.0 * np.pi)
+START_POSE_FEEDBACK_TIMEOUT_S = 3.0
+START_POSE_FEEDBACK_POLL_S = 0.05
 
 
 def _quest_input(config: dict[str, Any]):
-    """Construct the authoritative AnyDex Quest3 plugin."""
+    """Construct the configured Quest input, direct or persistent relay."""
+    quest = config["quest"]
+    if quest.get("input_mode") == "relay":
+        return QuestRelayClient(quest["relay_host"], quest["relay_port"])
+
+    # Direct mode remains available for isolated debugging.  The persistent
+    # listener owns this same authoritative AnyDex input in normal operation.
     project_root = Path(__file__).resolve().parents[1]
     anydex_root = project_root / "AnyDexRetarget"
     example_root = anydex_root / "example"
@@ -41,7 +50,6 @@ def _quest_input(config: dict[str, Any]):
             sys.path.insert(0, str(path))
     from input.quest3 import Quest3
 
-    quest = config["quest"]
     return Quest3(
         host=quest["listen_host"],
         port=quest["port"],
@@ -70,7 +78,13 @@ def input_check(config: dict[str, Any]) -> None:
     """Validate the Quest stream and AnyDex result without opening CAN."""
     retargeter = _retargeter(config)
     quest_input = _quest_input(config)
-    print(f"Listening for Quest TCP on {config['quest']['listen_host']}:{config['quest']['port']} (Ctrl+C to stop)")
+    if config["quest"].get("input_mode") == "relay":
+        print(
+            "Reading Quest frames from persistent local relay "
+            f"{config['quest']['relay_host']}:{config['quest']['relay_port']} (Ctrl+C to stop)"
+        )
+    else:
+        print(f"Listening for Quest TCP on {config['quest']['listen_host']}:{config['quest']['port']} (Ctrl+C to stop)")
     seen_at = 0.0
     try:
         while True:
@@ -117,6 +131,88 @@ def _disconnect_devices(hand: LinkerHandL20 | None, arm: NeroArm | None) -> list
     return errors
 
 
+def _read_complete_arm_joint_positions(arm: NeroArm) -> np.ndarray:
+    """Wait briefly for all seven read-only Nero motor-state feedback frames."""
+    deadline = time.monotonic() + START_POSE_FEEDBACK_TIMEOUT_S
+    last_error: RuntimeError | None = None
+    while True:
+        try:
+            return arm.get_joint_positions()
+        except RuntimeError as exc:
+            if not str(exc).startswith("Nero SDK feedback is unavailable"):
+                raise
+            last_error = exc
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "Nero 未在 3.0 s 内收到完整的七轴关节反馈。"
+            ) from last_error
+        time.sleep(START_POSE_FEEDBACK_POLL_S)
+
+
+def _print_ik_failure_diagnostics(
+    ik: NeroIK,
+    seed: np.ndarray,
+    target: np.ndarray,
+    previous_target: np.ndarray,
+) -> None:
+    """Print compact, actionable diagnostics after a failed IK solve."""
+    diag = ik.last_diagnostics
+    target_step_position, target_step_rotation = pose_error(previous_target, target)
+    feedback_position, feedback_rotation = pose_error(ik.forward(seed), target)
+    print(
+        "IK diagnostics: "
+        f"code={diag.get('code', 'IK_FAILED')} "
+        f"solve_ms={float(diag.get('solve_ms', 0.0)):.1f} "
+        f"budget_exhausted={bool(diag.get('budget_exhausted', False))} "
+        f"target_step={target_step_position * 1000.0:.2f}mm/"
+        f"{np.degrees(target_step_rotation):.2f}deg "
+        f"target_from_feedback={feedback_position * 1000.0:.2f}mm/"
+        f"{np.degrees(feedback_rotation):.2f}deg"
+    )
+    print(
+        "IK seed deg J1..J7: "
+        + np.array2string(np.degrees(seed), precision=2, suppress_small=True)
+    )
+    best = diag.get("best_intermediate")
+    if best is not None:
+        details = [
+            f"residual_evals={diag.get('residual_evaluations', 'n/a')}",
+            f"fk_position={best['fk_position_error_mm']:.3f}mm",
+            f"fk_rotation={best['fk_rotation_error_deg']:.3f}deg",
+        ]
+        dq = np.asarray(best.get("dq_ik_deg", []), dtype=np.float64)
+        if dq.shape == (7,) and np.all(np.isfinite(dq)):
+            joint_index = int(np.argmax(np.abs(dq)))
+            details.append(f"max_dq=J{joint_index + 1}:{dq[joint_index]:+.2f}deg")
+            details.append(
+                "dq=" + np.array2string(dq, precision=2, suppress_small=True)
+            )
+        print("IK best intermediate: " + " ".join(details))
+    candidates = diag.get("candidates", [])
+    if not candidates:
+        print("IK candidates: none completed within the solve budget.")
+        return
+    for index, candidate in enumerate(candidates):
+        details = [
+            f"code={candidate.get('code', 'unknown')}",
+            f"nfev={candidate.get('nfev', 'n/a')}",
+        ]
+        if "fk_position_error_mm" in candidate:
+            details.append(f"fk_position={candidate['fk_position_error_mm']:.3f}mm")
+        if "fk_rotation_error_deg" in candidate:
+            details.append(f"fk_rotation={candidate['fk_rotation_error_deg']:.3f}deg")
+        dq = np.asarray(candidate.get("dq_ik_deg", []), dtype=np.float64)
+        if dq.shape == (7,) and np.all(np.isfinite(dq)):
+            joint_index = int(np.argmax(np.abs(dq)))
+            details.append(f"max_dq=J{joint_index + 1}:{dq[joint_index]:+.2f}deg")
+            details.append(
+                "dq=" + np.array2string(dq, precision=2, suppress_small=True)
+            )
+        if "error" in candidate:
+            details.append(f"error={candidate['error']}")
+        print(f"IK candidate {index}: " + " ".join(details))
+
+
 def record_start_pose(
     config: dict[str, Any], output: str | None, *, overwrite: bool = False
 ) -> Path:
@@ -132,7 +228,7 @@ def record_start_pose(
     arm = _make_arm(config)
     try:
         arm.connect()
-        joints = arm.get_joint_positions()
+        joints = _read_complete_arm_joint_positions(arm)
         print("Nero start pose (rad):", joints.tolist())
         print("Nero start pose (deg):", np.degrees(joints).tolist())
     finally:
@@ -297,6 +393,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     )
     flange_to_tcp: np.ndarray | None = None
     tracker: WristTracker | None = None
+    last_accepted_target: np.ndarray | None = None
     paused = True
     recorder = EpisodeRecorder(
         record_dir or config["recording"]["output_dir"],
@@ -304,9 +401,11 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     )
 
     def reanchor(frame) -> None:
-        nonlocal tracker, paused
+        nonlocal tracker, last_accepted_target, paused
         if arm is not None:
-            flange = pose6_to_matrix(arm.get_flange_pose())
+            # Keep the teleoperation target in the same URDF model used by IK.
+            # SDK flange feedback remains an independent preflight observation.
+            flange = ik.forward(arm.get_joint_positions())
             wrist_position, wrist_quaternion = anydex_wrist_to_base(
                 frame.wrist_position, frame.wrist_quat, calibration
             )
@@ -321,31 +420,41 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
             )
             tracker.update(wrist_position, wrist_quaternion)
             gate.reanchor(flange)
+            last_accepted_target = flange.copy()
         if hand is not None:
             hand_retargeter.reset(hand.get_joint_positions_raw(fresh=True))
         paused = False
         print("Re-anchored; command streaming resumed.")
 
     try:
+        quest_input = _quest_input(config)
+        if isinstance(quest_input, QuestRelayClient) and not quest_input.is_available():
+            raise RuntimeError(
+                "Persistent Quest listener is unavailable. Start `teleop.cli ... "
+                "quest-listener` before running teleoperation."
+            )
         if arm is not None:
             arm.connect()
             arm.enable_normal_mode()
             if not arm.is_enabled():
                 raise RuntimeError("Nero is not enabled. Enable it using the approved site procedure before run.")
             _move_arm_to_start_pose(arm, config)
-            start_flange = pose6_to_matrix(arm.get_flange_pose())
-            start_tcp = pose6_to_matrix(arm.get_tcp_pose())
-            flange_to_tcp = np.linalg.inv(start_flange) @ start_tcp
-            gate.set_tcp_workspace_center(start_tcp[:3, 3])
+            start_joints = arm.get_joint_positions()
+            model_start_flange = ik.forward(start_joints)
+            sdk_start_flange = pose6_to_matrix(arm.get_flange_pose())
+            sdk_start_tcp = pose6_to_matrix(arm.get_tcp_pose())
+            flange_to_tcp = np.linalg.inv(sdk_start_flange) @ sdk_start_tcp
+            model_start_tcp = model_start_flange @ flange_to_tcp
+            gate.set_tcp_workspace_center(model_start_tcp[:3, 3])
             half_side = gate.tcp_workspace_cube_side_m / 2.0
             print(
-                "TCP workspace cube centered at startup TCP (base frame): "
-                f"center={start_tcp[:3, 3].tolist()}, half-side={half_side:.4f} m."
+                "TCP workspace cube centered at model-consistent startup TCP "
+                "(base frame): "
+                f"center={model_start_tcp[:3, 3].tolist()}, half-side={half_side:.4f} m."
             )
         if hand is not None:
             hand.connect()
             hand.set_speed(config["hand"]["speed"])
-        quest_input = _quest_input(config)
         period = 1.0 / float(config["control_hz"])
         if arm is not None:
             print("Start pose ready. Hold a comfortable Quest pose, then press R to anchor.")
@@ -393,12 +502,22 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     target_tcp_position = (target_transform @ flange_to_tcp)[:3, 3]
                     seed = arm.get_joint_positions()
                     solved = ik.solve(target_transform, seed)
-                    if solved is None or not gate.accept(target_transform, target_tcp_position):
+                    if solved is None:
                         paused = True
-                        reason = gate.reason if gate.paused else ik.last_diagnostics.get("code", "IK failed")
+                        reason = ik.last_diagnostics.get("code", "IK failed")
                         print(f"PAUSED: {reason}; press R to re-anchor.")
+                        if last_accepted_target is None:
+                            raise RuntimeError("IK diagnostic anchor is not initialized.")
+                        _print_ik_failure_diagnostics(
+                            ik, seed, target_transform, last_accepted_target
+                        )
+                        continue
+                    if not gate.accept(target_transform, target_tcp_position):
+                        paused = True
+                        print(f"PAUSED: {gate.reason}; press R to re-anchor.")
                         continue
                     arm_action = solved
+                    last_accepted_target = target_transform.copy()
                 if hand is not None:
                     _, hand_action = hand_retargeter.retarget(landmarks)
 

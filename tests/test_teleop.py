@@ -95,3 +95,49 @@ def test_reset_arm_disables_before_reset_and_disconnects(monkeypatch, initially_
         assert arm.calls.index("disable") < arm.calls.index("reset")
     else:
         assert "disable" not in arm.calls
+
+
+class _DelayedFeedbackArm:
+    def __init__(self, unavailable_reads: int) -> None:
+        self.unavailable_reads = unavailable_reads
+        self.read_calls = 0
+        self.connected = False
+        self.disconnected = False
+
+    def connect(self) -> None:
+        self.connected = True
+
+    def get_joint_positions(self) -> np.ndarray:
+        self.read_calls += 1
+        if self.read_calls <= self.unavailable_reads:
+            raise RuntimeError("Nero SDK feedback is unavailable: None")
+        return np.arange(7, dtype=np.float64)
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def test_record_start_pose_waits_for_complete_feedback(monkeypatch, tmp_path):
+    arm = _DelayedFeedbackArm(unavailable_reads=2)
+    output = tmp_path / "nero_start_pose.yaml"
+    monkeypatch.setattr(controller, "_make_arm", lambda config: arm)
+    monkeypatch.setattr(controller.time, "sleep", lambda _: None)
+
+    controller.record_start_pose({}, str(output))
+
+    assert arm.read_calls == 3
+    assert arm.disconnected
+    assert "joint_positions_rad:\n- 0.0" in output.read_text(encoding="utf-8")
+
+
+def test_record_start_pose_times_out_without_complete_feedback(monkeypatch, tmp_path):
+    arm = _DelayedFeedbackArm(unavailable_reads=99)
+    ticks = iter((0.0, 3.0))
+    monkeypatch.setattr(controller, "_make_arm", lambda config: arm)
+    monkeypatch.setattr(controller.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(controller.time, "sleep", lambda _: None)
+
+    with pytest.raises(TimeoutError, match="未在 3.0 s 内收到完整的七轴关节反馈"):
+        controller.record_start_pose({}, str(tmp_path / "nero_start_pose.yaml"))
+
+    assert arm.disconnected

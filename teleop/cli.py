@@ -13,6 +13,7 @@ from .controller import (
     reset_arm,
     run,
 )
+from .quest_listener import serve as serve_quest_listener
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="configs/quest3_nero_l20.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("input-check", help="Quest + AnyDex only; never opens CAN")
+    subparsers.add_parser(
+        "quest-listener",
+        help="persistently receive HTS on the Quest TCP port and relay frames locally",
+    )
     preflight_parser = subparsers.add_parser("preflight", help="read-only hardware/FK check")
     preflight_parser.add_argument("--control", choices=("arm", "hand", "both"), default="both")
     record_parser = subparsers.add_parser(
@@ -47,6 +52,9 @@ def main() -> None:
     config = load_config(args.config)
     if args.command == "input-check":
         input_check(config)
+        return
+    if args.command == "quest-listener":
+        serve_quest_listener(config)
         return
     if args.command == "record-start-pose":
         require_site_configuration(

@@ -4,38 +4,43 @@ quest:
   transport: tcp
   listen_host: 0.0.0.0
   port: 8000
+  # Start `teleop.cli ... quest-listener` once before opening HTS. Control
+  # processes read its localhost relay, so restarting them will not drop HTS.
+  input_mode: relay
+  relay_host: 127.0.0.1
+  relay_port: 8001
   side: right
   max_age_s: 0.25
   max_pair_skew_s: 0.05
 
 calibration:
   # 现场标定后改为 true；此矩阵把 AnyDex RH 坐标旋转到 Nero base。
-  calibrated: false
+  calibrated: true
   R_base_quest:
-    - [1.0, 0.0, 0.0]
     - [0.0, 1.0, 0.0]
+    - [-1.0, 0.0, 0.0]
     - [0.0, 0.0, 1.0]
 
 tracking:
   # 保留参考 vr_teleop WristTracker 的相对锚定与平移 EMA 语义。
   position_scale: 1.0
-  ema_alpha: 0.8
+  ema_alpha: 0.4
   negate_rot_xy: false
   position_deadband_m: 0.0
   rotation_deadband_deg: 0.0
 
 safety:
-  max_position_step_m: 0.01
-  max_rotation_step_deg: 5.0
+  max_position_step_m: 0.1
+  max_rotation_step_deg: 16.0
   # 以启动到位后的 TCP 为中心、在 Nero base 坐标系中轴对齐的立方体边长。
-  tcp_workspace_cube_side_m: 0.30
+  tcp_workspace_cube_side_m: 0.9
   startup_fk_position_error_m: 0.01
   startup_fk_rotation_error_deg: 5.0
 
 arm:
   can_interface: socketcan
   can_channel: can0
-  max_joint_delta_rad: 0.1745329252
+  max_joint_delta_rad: 0.2545329252
   start_pose_file: configs/nero_start_pose.yaml
   start_speed_percent: 10
   start_tolerance_rad: 0.02
@@ -45,7 +50,7 @@ hand:
   type: right
   model: L20
   can_channel: can1
-  speed: [30, 30, 30, 30, 30]
+  speed: [50, 50, 50, 50, 50]
   max_raw_step: 10
   retarget_config: AnyDexRetarget/example/config/adaptive/quest3/quest3_linker_l20.yaml
 

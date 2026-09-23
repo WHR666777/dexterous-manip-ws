@@ -27,6 +27,17 @@ def load_config(path: str | Path) -> dict[str, Any]:
     quest = config["quest"]
     if quest.get("transport") != "tcp":
         raise ValueError("Quest transport is fixed to 'tcp' for this project.")
+    if quest.get("input_mode", "direct") not in ("direct", "relay"):
+        raise ValueError("quest.input_mode must be 'direct' or 'relay'.")
+    if quest.get("input_mode") == "relay":
+        if quest.get("relay_host") not in ("127.0.0.1", "localhost"):
+            raise ValueError("quest.relay_host must be localhost-only.")
+        try:
+            relay_port = int(quest["relay_port"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("quest.relay_port must be a TCP port number.") from exc
+        if not 1 <= relay_port <= 65535:
+            raise ValueError("quest.relay_port must be a TCP port number.")
     if quest.get("side") not in ("left", "right"):
         raise ValueError("quest.side must be 'left' or 'right'.")
     if config["hand"].get("type") != quest.get("side"):

@@ -49,11 +49,19 @@ adb devices
 adb reverse tcp:8000 tcp:8000
 ```
 
-PC 侧直接使用根目录 AnyDexRetarget 的 Quest3 plugin 监听 TCP 8000。再运行只检查 Quest 与 AnyDex、不打开 CAN 的命令：
+先启动本机常驻监听。它使用根目录 AnyDexRetarget 的 Quest3 plugin 监听 HTS 的 TCP 8000，并只在 `127.0.0.1:8001` 转发最新完整帧。保持这个终端运行；之后重启 `run`、`input-check` 不会断开 HTS，也无需重启头显端 streamer：
+
+```bash
+python3 -m teleop.cli --config configs/quest3_nero_l20.yaml quest-listener
+```
+
+再运行只检查 Quest 与 AnyDex、不打开 CAN 的命令：
 
 ```bash
 python3 -m teleop.cli --config configs/quest3_nero_l20.yaml input-check
 ```
+
+如需恢复每个命令自行监听 TCP 8000 的旧方式，将 `quest.input_mode` 改为 `direct`；此时不要运行 `quest-listener`，且重启控制进程可能导致 HTS 断线。
 
 该命令不包含另一套 TCP 或 CSV 解析器；它与 `AnyDexRetarget/example/teleop_sim.py`、`teleop_real.py` 使用同一个 `example/input/quest3.py`。AnyDex 已完成 Unity 左手系到右手系、腕姿和 landmarks 转换，集成控制只额外应用现场 `R_base_quest`。
 
@@ -113,7 +121,7 @@ python3 -m teleop.cli \
   --output configs/nero_start_pose.yaml
 ```
 
-该命令只连接、读取和保存，不使能、不发送运动目标；终端会同时打印 rad 和 degree。目标文件已存在时默认拒绝覆盖，确认需要替换后添加 `--overwrite`。
+该命令只连接、读取和保存，不使能、不发送运动目标；连接后最多等待 3 秒以收齐七轴反馈，终端会同时打印 rad 和 degree。目标文件已存在时默认拒绝覆盖，确认需要替换后添加 `--overwrite`。
 
 起始姿态文件只包含固定顺序的 `joint1`–`joint7` 和七个 rad 值。`arm.start_pose_file` 指向该文件；启动运动参数为：
 
@@ -139,7 +147,7 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-reset --execute
 
 对于 `--control arm/both`，程序首先校验记录的七轴目标和官方关节限位，然后使用低速 `move_joints` 到达起始姿态并等待反馈误差收敛。到位后仍保持暂停：操作者摆好 Quest，再按 `R` 才建立腕部零点并开始叠加。运行中再次按 `R` 只在机械臂当前位置重新锚定，不会自动返回起始姿态。
 
-到达起始姿态后，程序还会以当时的实际 TCP 为中心建立一个 Nero base 坐标系轴对齐的立方体工作区。默认边长为 `safety.tcp_workspace_cube_side_m: 0.30`，即每个轴相对起始 TCP 最多移动 ±0.15 m。程序使用启动时测得的 flange→TCP 偏置检查候选 TCP；任何一轴越界都会在发送机械臂目标前暂停，不会把目标截断到边界。检查现场空间后再调整此值；按 `R` 不会移动或重置立方体中心。
+到达起始姿态后，程序用同一时刻的 SDK flange/TCP 反馈求固定的 flange→TCP 偏置，再把它应用到当前关节反馈的 URDF/FK flange，以此建立与 IK 模型一致的起始 TCP 和 Nero base 轴对齐立方体工作区。默认边长为 `safety.tcp_workspace_cube_side_m: 0.30`，即每个轴相对起始 TCP 最多移动 ±0.15 m。任何一轴越界都会在发送机械臂目标前暂停，不会把目标截断到边界。检查现场空间后再调整此值；按 `R` 不会移动或重置立方体中心。
 
 ```bash
 # 先手，再臂，最后联合验证
@@ -150,7 +158,7 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control both -
 
 运行键：
 
-- `R`：以当前 Quest 腕部和当前 Nero flange 重新锚定；L20 滤波/速率状态同步重置。
+- `R`：以当前 Quest 腕部和当前七轴反馈经 URDF/FK 得到的 Nero flange 重新锚定；L20 滤波/速率状态同步重置。
 - `B`：开始一个 episode。
 - `S`：停止并保存当前 episode。
 - `Q`：停止发送；若正在录制则保存，然后断开。
