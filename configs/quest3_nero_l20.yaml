@@ -51,7 +51,7 @@ hand:
   type: right
   model: L20
   can_channel: can1
-  speed: [130, 130, 130, 130, 130]
+  speed: [160, 160, 160, 160, 160]
   max_raw_step: 10
   retarget_config: AnyDexRetarget/example/config/adaptive/quest3/quest3_linker_l20.yaml
 

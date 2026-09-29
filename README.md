@@ -194,6 +194,42 @@ data/episodes/
 
 单个起始关节姿态只定义终点，不定义无碰撞路径。启动运动使用 Nero 官方点到点关节运动；现场必须保证从当前姿态到记录姿态的路径可用。如果需要绕开障碍物，应另行定义多个 waypoint，而不是提高速度或放宽到位检查。
 
+## 轨迹重放与视频查看
+
+让 Nero 重现录制的实际关节轨迹，并同步显示当时的 RGB-D（替换为实际 episode 目录）：
+
+```bash
+python3 scripts/replay_episode.py data/episodes/episode_20260929T120000.000000Z \
+  --config configs/quest3_nero_l20.yaml --execute
+```
+
+同时重放机械臂和灵巧手，加 `--control both`；仅灵巧手用 `--control hand`。默认 `--control arm`，原命令仍只控制 Nero：
+
+```bash
+python3 scripts/replay_episode.py data/episodes/episode_20260929T120000.000000Z \
+  --config configs/quest3_nero_l20.yaml --control both --execute
+```
+
+输入 `EXECUTE` 后，先用 `arm.start_speed_percent` 点到点移动到该 episode 的第一条 `arm_joint_position`，按 `start_tolerance_rad` / `start_timeout_s` 等待到位；不使用 `nero_start_pose.yaml`。必须保证起始移动及整段录制轨迹的现场路径无碰撞。机械臂需已使能；脚本不会自动使能，可通过已有的 `teleop.cli --config ... arm-enable --execute` 命令使能。
+
+选中灵巧手时，使用 `hand.can_channel` / `hand.type` 连接，按 `hand.speed` 设置五指速度，并发送第一条 `hand_position_raw`；`both` 模式在 Nero 初始到位后才发送手部首姿态。请确认手部周围无夹持风险、手指已到首姿态，再按空格开始。手部不自动判断到位；仅手模式不连接 Nero。
+
+到位后，在视频窗口按空格开始/暂停发送。Nero 把 `arm_joint_position` 作为 `move_js` 目标；L20 把同一行 `hand_position_raw` 原样作为 raw 位置目标，保留 20 槽位顺序。不使用 `arm_action` / `hand_action_raw`，不调用 Quest/IK。手部数据必须为 `(N,20)` 的 0–255 整数，且记录的 `quest_side` 必须与 `hand.type` 一致；缺失、-1 占位或侧别不匹配会在机械臂开始移动前拒绝，不回退到动作目标。L20 原始记录来自 SDK 反馈缓存，不能保证每行都是新反馈。
+
+发送间隔取自轨迹时间戳；可加 `--speed 0.5` 延长为两倍间隔，实机不允许大于 1 倍速。`--speed` 不改变 L20 的 `hand.speed`。慢帧只延后后续发送，不突发补发；同一行按顺序发送给两台设备，不是硬件同步或精确到位保证。Nero 检查全段关节限位、相邻关节步长，并在每次发送前按 `arm.max_joint_delta_rad` 检查目标与当前反馈的差值。
+
+实机模式禁用 `A/D` 跳帧及末尾循环重播；末尾停止发送，`Q/Esc` 或 Ctrl+C 退出。**暂停/退出只停止后续目标，不是急停，机械臂和灵巧手可能继续到达最后目标；不会自动失能、松手或 reset。** 需紧急停止时使用现场急停。RGB-D 是录制视频，与同一条轨迹样本关联，不是实时相机画面。
+
+离线回放已录制的 episode（不连接设备），将示例目录替换为实际录制目录：
+
+```bash
+python3 scripts/replay_episode.py data/episodes/episode_20260929T120000.000000Z
+# 可选：半速播放，深度伪彩色固定显示 0～3 米
+python3 scripts/replay_episode.py data/episodes/episode_20260929T120000.000000Z --speed 0.5 --depth-max-m 3
+```
+
+窗口显示 RGB、深度伪彩色和轨迹字段；空格暂停/继续，`A/D` 暂停并前后逐条查看，`J/L` 翻页查看全部 NPZ 字段（原始单位），`Q/Esc` 退出。离线模式末尾自动暂停，空格从头重播。完整元数据打印到终端。播放按轨迹时间戳调度，RGB-D 按 `camera_frame_index` 关联，缺失图像明确显示为空。支持无相机 episode 和原有同名 `.npz + .json`（传入 `.npz` 路径）。需要有图形桌面的 OpenCV、NumPy、h5py，沿用视觉依赖，无需 RealSense SDK；仅实机重放额外需要所选设备的 Nero / LinkerHand SDK 和 CAN 连接。
+
 ## 低层只读示例
 
 单设备排障命令必须显式给通道：
