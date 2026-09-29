@@ -17,6 +17,13 @@ dependencies = [
   "typing-extensions>=3.7.4.3",
 ]
 
+[project.optional-dependencies]
+vision = [
+  "pyrealsense2>=2.50,<2.55",
+  "opencv-python>=4.8,<5",
+  "h5py>=3.8,<4",
+]
+
 [tool.setuptools.packages.find]
 include = ["robot_control*", "teleop*"]
 

@@ -141,3 +141,103 @@ def test_record_start_pose_times_out_without_complete_feedback(monkeypatch, tmp_
         controller.record_start_pose({}, str(tmp_path / "nero_start_pose.yaml"))
 
     assert arm.disconnected
+
+
+@pytest.mark.parametrize("camera_enabled", [True, False])
+@pytest.mark.parametrize("interrupt_recording", [True, False])
+def test_run_records_camera_before_action_and_cleans_up(
+    monkeypatch, tmp_path, camera_enabled, interrupt_recording,
+):
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from teleop.config import load_config
+    from teleop.realsense_camera import RGBDFrame
+
+    if camera_enabled:
+        pytest.importorskip("cv2")
+        pytest.importorskip("h5py")
+    config = load_config(Path(__file__).resolve().parents[1] / "configs/quest3_nero_l20.yaml")
+    config["camera"].update(enabled=camera_enabled, width=64, height=48)
+    events = []
+    quest_frame = SimpleNamespace(wrist_position=np.zeros(3), wrist_quat=np.array([0, 0, 0, 1.0]),
+                                  landmarks=np.zeros((21, 3)), received_at=0.0)
+    image = RGBDFrame(np.zeros((48, 64, 3), dtype=np.uint8),
+                      np.full((48, 64), 1234, dtype=np.uint16),
+                      10.0, 100.0, 100.0, 1, 1, "hardware_clock", "hardware_clock")
+
+    class Camera:
+        def __init__(self, cfg):
+            self.metadata = {"model": "L515", "width": 64, "height": 48}
+
+        def start(self):
+            events.append("camera_start")
+
+        def get_latest(self):
+            events.append("image")
+            return image
+
+        def stop(self):
+            events.append("camera_stop")
+
+    hand = SimpleNamespace(
+        connect=lambda: events.append("hand_connect"),
+        disconnect=lambda: events.append("hand_disconnect"),
+        set_speed=lambda _: None,
+        get_joint_positions_raw=lambda **kwargs: np.zeros(20, dtype=np.int64),
+        set_joint_positions_raw=lambda _: events.append("action"),
+    )
+    retarget_calls = 0
+
+    def retarget(_):
+        nonlocal retarget_calls
+        retarget_calls += 1
+        if interrupt_recording and retarget_calls == 2:
+            raise RuntimeError("simulated control error")
+        return None, np.zeros(20, dtype=np.int64)
+
+    keys = iter(["r", "b", None, "s", "q"])
+
+    class Keyboard:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return next(keys)
+
+    monkeypatch.setattr(controller, "RealSenseCamera", Camera)
+    monkeypatch.setattr(controller, "Keyboard", Keyboard)
+    monkeypatch.setattr(controller, "_make_hand", lambda _: hand)
+    monkeypatch.setattr(controller, "_retargeter", lambda _: SimpleNamespace(
+        reset=lambda _: None, retarget=retarget))
+    monkeypatch.setattr(controller, "_quest_input", lambda _: SimpleNamespace(
+        stop=lambda: events.append("quest_stop")))
+    monkeypatch.setattr(controller, "_latest_frame", lambda *_: quest_frame)
+    if interrupt_recording:
+        with pytest.raises(RuntimeError, match="simulated control error"):
+            controller.run(config, "hand", str(tmp_path))
+    else:
+        controller.run(config, "hand", str(tmp_path))
+    path = next(tmp_path.glob("*/trajectory.npz"))
+    expected_samples = 1 if interrupt_recording else 2
+    with np.load(path) as data:
+        assert len(data["hand_action_raw"]) == expected_samples
+        if camera_enabled:
+            assert data["camera_frame_index"].tolist() == list(range(expected_samples))
+        else:
+            assert "camera_frame_index" not in data.files
+    metadata = json.loads((path.parent / "metadata.json").read_text())
+    assert metadata["sample_hz"] == 20
+    assert "hand_disconnect" in events and "quest_stop" in events
+    if camera_enabled:
+        assert events.index("camera_start") < events.index("hand_connect")
+        assert events.index("image") < events.index("action")
+        assert events.count("camera_stop") == 1
+        assert metadata["camera"]["frames"] == expected_samples
+    else:
+        assert not any(event.startswith("camera") for event in events)
+        assert not (path.parent / "camera").exists()

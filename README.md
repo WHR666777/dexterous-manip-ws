@@ -29,6 +29,14 @@ python3 -m pip install -e .
 
 若 LinkerHand SDK 未安装为 Python 包，将固定副本放在根目录 `linkerhand-python-sdk/`。本仓库不保存 sudo 密码，也不替操作者创建或激活 CAN 接口。
 
+默认配置启用 RealSense L515 的 RGB-D 录制，需要额外安装视觉依赖：
+
+```bash
+python3 -m pip install -e '.[vision]'
+```
+
+L515 的官方兼容表列出 SDK 2.50.0 已验证、2.54.2 支持但未验证，因此视觉依赖限制为 `pyrealsense2>=2.50,<2.55`；不要直接升级为不支持 L515 的新版本。[RealSense 兼容表](https://github.com/realsenseai/librealsense/releases)
+
 ## 现场必须填写
 
 编辑 `configs/quest3_nero_l20.yaml`：
@@ -37,6 +45,9 @@ python3 -m pip install -e .
 2. 标定 `calibration.R_base_quest`，再把 `calibration.calibrated` 改为 `true`。
 3. 确认 `quest.side` 与 `hand.type` 对应同一只手。
 4. 用下面的 `record-start-pose` 命令记录 Nero 的七轴起始姿态。
+5. 相机默认 `camera.model: L515`、640×480，RGB 和深度均采集，深度对齐到彩色。单相机 `camera.serial` 可留空，多相机应填序列号；只做无视觉控制时设 `camera.enabled: false`。
+
+640×480 是保存尺寸：L515 原生彩色使用 960×540、深度使用 640×480，先对齐，再共同中心裁剪/缩放至 640×480，内参也相应换算。这样保留中央 4:3 视野。L515 的原生彩色格式见 [官方规格表 3-7](https://dev.realsenseai.com/download/7691/)。
 
 在这些值未完成前，`run --control arm/both` 会拒绝继续，不会猜测 CAN 通道、安装方向或起始姿态。
 
@@ -162,6 +173,22 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control both -
 - `B`：开始一个 episode。
 - `S`：停止并保存当前 episode。
 - `Q`：停止发送；若正在录制则保存，然后断开。
+
+录制按原控制循环采样，`control_hz` 默认仍为 20。L515 的硬件深度流为 30 FPS，后台读取后由每个有效控制周期选取最近帧；图像采集和写盘不在控制线程等待。`B` 开始一个 episode，重复按 `B` 不会清空正在录制的数据；`S` 等待已排队图像写完并保存，随后仍可遥操作或再次按 `B`。暂停期间不新增轨迹/视觉样本。
+
+新 episode 的文件排布如下，旧录制文件不迁移：
+
+```text
+data/episodes/
+└── episode_<UTC>/
+    ├── trajectory.npz
+    ├── metadata.json
+    └── camera/
+        ├── color.mp4
+        └── depth.h5
+```
+
+每条轨迹通过 `camera_frame_index` 关联 RGB 视频和深度数据集 `depth` 中同一索引的帧；过期/缺失帧记录为 `camera_valid=false`、索引 -1。Depth 保留无损 uint16，乘元数据中的 `depth_scale_m` 得到米。关闭相机时省略 `camera/` 与视觉字段。具体字段、时间戳和内参见 [数据格式](docs/dataset_schema.md)。
 
 正常退出、Quest 超时、步长越界和程序异常都不会自动触发电子急停或 Nero disable。程序的职责是停止继续发送并断开；现场急停与故障处置仍由操作者执行。
 

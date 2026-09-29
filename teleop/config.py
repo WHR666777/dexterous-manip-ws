@@ -44,6 +44,30 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("hand.type and quest.side must select the same side.")
     if float(config.get("control_hz", 0)) <= 0:
         raise ValueError("control_hz must be positive.")
+    camera = config.setdefault("camera", {})
+    if not isinstance(camera, dict):
+        raise ValueError("camera must be a mapping.")
+    for key, value in {
+        "enabled": False, "model": "L515", "serial": "", "width": 640,
+        "height": 480, "fps": 30, "align_depth_to_color": True, "max_age_s": 0.25,
+    }.items():
+        camera.setdefault(key, value)
+    if not isinstance(camera["enabled"], bool):
+        raise ValueError("camera.enabled must be true or false.")
+    if camera["enabled"]:
+        if camera["model"] != "L515" or camera["fps"] != 30:
+            raise ValueError("The L515 RGB-D configuration requires model L515 and fps 30.")
+        if not isinstance(camera["serial"], str):
+            raise ValueError("camera.serial must be a quoted string.")
+        if camera["align_depth_to_color"] is not True:
+            raise ValueError("RGB-D recording requires camera.align_depth_to_color: true.")
+        for key in ("width", "height"):
+            value = camera[key]
+            if type(value) is not int or value <= 0 or value % 2:
+                raise ValueError(f"camera.{key} must be a positive even integer.")
+        camera["max_age_s"] = float(camera["max_age_s"])
+        if not np.isfinite(camera["max_age_s"]) or camera["max_age_s"] <= 0:
+            raise ValueError("camera.max_age_s must be finite and positive.")
     try:
         tcp_cube_side = float(config["safety"]["tcp_workspace_cube_side_m"])
     except (KeyError, TypeError, ValueError, OverflowError) as exc:

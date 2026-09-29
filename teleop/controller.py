@@ -23,6 +23,7 @@ from .coordinate_frames import (
 from .hand_retarget import L20Retargeter
 from .keyboard import Keyboard
 from .recording import EpisodeRecorder
+from .realsense_camera import RealSenseCamera
 from .quest_listener import QuestRelayClient
 from .target_gate import TargetGate
 from .wrist_tracker import WristTracker
@@ -387,6 +388,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     )
     hand_retargeter = _retargeter(config) if hand is not None else None
     quest_input = None
+    camera_config = config.get("camera", {})
+    camera = RealSenseCamera(camera_config) if camera_config.get("enabled", False) else None
     calibration = np.asarray(config["calibration"]["R_base_quest"], dtype=np.float64)
     tracking = config["tracking"]
     safety = config["safety"]
@@ -402,6 +405,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     recorder = EpisodeRecorder(
         record_dir or config["recording"]["output_dir"],
         {"config": config["_path"], "control": control, "quest_side": config["quest"]["side"]},
+        sample_hz=float(config["control_hz"]),
     )
 
     def reanchor(frame) -> None:
@@ -438,6 +442,14 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 "Persistent Quest listener is unavailable. Start `teleop.cli ... "
                 "quest-listener` before running teleoperation."
             )
+        if camera is not None:
+            camera.start()
+            recorder.metadata["camera"] = dict(camera.metadata)
+            print(
+                f"RealSense {camera.metadata['model']}: aligned RGB-D "
+                f"{camera_config['width']}x{camera_config['height']}; "
+                f"recording follows control_hz={config['control_hz']}."
+            )
         if arm is not None:
             arm.connect()
             arm.enable_normal_mode()
@@ -471,11 +483,14 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 if key == "q":
                     break
                 if key == "b":
-                    recorder.start()
-                    print("Recording started.")
+                    if recorder.active:
+                        print("Recording already active; press S to save it first.")
+                    else:
+                        recorder.start()
+                        print("Recording started.")
                 elif key == "s":
                     saved = recorder.stop_and_save()
-                    print(f"Recording saved: {saved}" if saved else "No active/non-empty recording.")
+                    print(f"Recording saved: {saved}" if saved else "No active recording.")
 
                 frame = _latest_frame(quest_input, config)
                 if frame is None:
@@ -492,6 +507,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     time.sleep(min(period, 0.02))
                     continue
 
+                # Snapshot the observation before IK/actions; never wait for a camera frame here.
+                camera_frame = camera.get_latest() if camera is not None and recorder.active else None
                 wrist_position, wrist_quaternion = anydex_wrist_to_base(
                     frame.wrist_position, frame.wrist_quat, calibration
                 )
@@ -544,6 +561,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 arm_tcp = arm.get_tcp_pose() if arm is not None else np.full(6, np.nan)
                 hand_raw = hand.get_joint_positions_raw(fresh=False) if hand is not None else np.full(20, -1)
                 recorder.append(
+                    camera_frame=camera_frame,
                     timestamp_monotonic=time.monotonic(),
                     quest_wrist=np.concatenate((frame.wrist_position, frame.wrist_quat)),
                     quest_landmarks=frame.landmarks,
@@ -568,6 +586,11 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 print(f"Active recording saved during shutdown: {saved}")
         except Exception as exc:
             print(f"Recording save failed during shutdown: {type(exc).__name__}: {exc}")
+        if camera is not None:
+            try:
+                camera.stop()
+            except Exception as exc:
+                print(f"Camera stop failed: {type(exc).__name__}: {exc}")
         if quest_input is not None:
             quest_input.stop()
         errors = _disconnect_devices(hand, arm)

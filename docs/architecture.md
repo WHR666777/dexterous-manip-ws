@@ -8,7 +8,8 @@
 - `robot_control.nero_ik`：基于固定 Nero URDF 的七轴局部 IK。它已存在且可复用，本次没有重新实现一套 IK。
 - `teleop.hand_retarget`：只包装根目录 `AnyDexRetarget`；输出 qpos 后调用其公开 `l20_qpos_to_can_slots` 和 `slew_l20_command`。
 - `teleop.controller`：拥有唯一控制循环；`both` 按 Nero 后 L20 顺序发送，记录各自发送时间，因此不宣称跨设备原子同步。
-- `teleop.recording`：保存一个 `.npz` 数据文件和同名 `.json` 元数据。
+- `teleop.realsense_camera`：后台读取 L515 的 RGB8/Z16，将深度对齐到彩色像素网格，发布带时间戳的完整帧快照；不参与机械臂/手控制。
+- `teleop.recording`：每个 episode 一个目录，数值轨迹保存在 `trajectory.npz`，元数据在 `metadata.json`；单个后台写入线程将 RGB 编码为 MP4、深度以 uint16 无损写入 HDF5。
 
 ## 状态转换
 
@@ -20,6 +21,16 @@ streaming --B--> streaming + recording
 recording --S/Q/exception--> save episode
 any --Q/Ctrl+C/exception--> stop sends → disconnect (no auto disable/e-stop)
 ```
+
+## RGB-D 采样与录制
+
+L515 以硬件支持的 30 FPS 采集；控制周期仍由现有 `control_hz` 决定（默认 20 Hz）。每个有效控制周期在 IK/动作发送前取一次最近 RGB-D，发送后将其与原有轨迹字段关联。相机采集和图像写盘都在后台，控制线程不等待下一相机帧或编码完成。`camera_frame_index` 指向同一组 RGB/Depth；原生帧号和时间戳保留，允许识别重复使用的相机帧。这里是按主机时间关联，不宣称相机与机器人硬件同步。
+
+L515 原生 RGB 使用 960×540，原生深度使用 640×480。深度先对齐到彩色网格，再将两幅图像共同中心裁剪至输出宽高比并缩放（默认先裁成 720×540，再缩至 640×480）。RGB 使用 area，深度使用 nearest-exact，避免混合距离值；内参按同一裁剪和像素中心映射换算。默认保留中央 4:3 视野，不能把原生彩色内参直接用于保存图像。
+
+按 `B` 创建独立 episode，重复 `B` 不清空数据；`S`/`Q`/异常收尾会排空写入队列、关闭图像文件，再保存轨迹和元数据。暂停期间仍采集相机，但不新增录制样本。相机快照过期/缺失时，保留轨迹并写入 `camera_valid=false`、索引 -1；后台采集异常会报错并走正常清理。图像写入队列固定最多 16 帧，写盘跟不上时报错收尾，不在控制线程无限等待或无界缓存。写入异常时元数据记录错误，未写完的图像引用标为无效。
+
+`camera.enabled: false` 时不加载相机/视频/HDF5 依赖，也不生成 `camera/`。`arm-reset`、`arm-enable`、Quest 检查和原有 arm/hand preflight 不启动相机；启用相机的 `run` 在连接并发送机械臂目标之前完成相机启动检查。
 
 锁定是有意的：数据恢复后不会自动沿旧锚点继续运动，必须由操作者观察现场并按 `R`。
 

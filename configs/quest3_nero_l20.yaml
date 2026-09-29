@@ -51,9 +51,20 @@ hand:
   type: right
   model: L20
   can_channel: can1
-  speed: [50, 50, 50, 50, 50]
+  speed: [130, 130, 130, 130, 130]
   max_raw_step: 10
   retarget_config: AnyDexRetarget/example/config/adaptive/quest3/quest3_linker_l20.yaml
+
+camera:
+  enabled: true
+  model: L515
+  serial: "" # 单相机可留空；多相机时填写 L515 序列号（字符串）。
+  # 保存尺寸。L515 原生 RGB 960x540、深度 640x480；对齐后共同中心裁剪/缩放。
+  width: 640
+  height: 480
+  fps: 30 # L515 硬件深度帧率；实际录制采样跟随 control_hz，不修改控制周期。
+  align_depth_to_color: true
+  max_age_s: 0.25
 
 recording:
   output_dir: data/episodes
