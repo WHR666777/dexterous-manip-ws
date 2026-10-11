@@ -31,6 +31,12 @@ data/episodes/
 | `hand_position_raw` | `(20,)` | L20 缓存反馈；含 11–14 保留槽 |
 | `arm_sent_at` | scalar | Nero 调用返回时的单调时钟 |
 | `hand_sent_at` | scalar | L20 调用返回时的单调时钟 |
+| `timing_ik_s` | scalar | `ik.solve()` 耗时，秒，不包含 seed 反馈读取 |
+| `timing_hand_retarget_s` | scalar | 手部 retarget（包含 raw 映射和 slew）耗时，秒 |
+| `timing_arm_send_s` | scalar | Nero `move_js()` 调用及发送时间戳记录耗时，秒 |
+| `timing_hand_send_s` | scalar | L20 raw 命令调用及发送时间戳记录耗时，秒 |
+| `timing_seed_feedback_s` | scalar | IK 前读取机械臂关节反馈的耗时，秒 |
+| `timing_feedback_s` | scalar | 发送后顺序读取机械臂位置、扭矩、TCP 和手部缓存反馈的总耗时，秒 |
 | `camera_frame_index` | scalar | 零起始的存储帧索引；RGB 视频与 Depth 共用；缺失为 -1 |
 | `camera_valid` | scalar | 当前行是否存在可引用的 RGB-D |
 | `camera_timestamp_monotonic` | scalar | 主机收到相机帧组时的单调时钟，秒；对齐处理之前记录 |
@@ -42,6 +48,8 @@ data/episodes/
 | `camera_depth_timestamp_domain` | scalar string | SDK 深度帧时钟域 |
 
 发送时间不代表设备真正执行时间；L20 SDK 也不提供可靠的反馈 generation。训练前应按字段掩码约定处理 NaN/-1，不要把 arm-only 或 hand-only 的占位值当观测。
+
+`timing_*_s` 是新增的可选诊断字段，旧 episode 不补写；使用 `perf_counter()` 测量主机端调用耗时，未启用的阶段为 0，不代表设备实际运动时间。终端无论是否录制，均按约 2 秒累计有效控制周期输出一次 `[control timing]`，退出时输出剩余统计。各项以毫秒显示 mean/P95/max；`record` 是轨迹追加/图像入队耗时（不包含后台编码写盘），`work` 是当前周期到追加完成的耗时（不含周期休眠），`cycle` 包含周期休眠。`active_hz` 按这些完整有效周期的耗时计算，排除暂停、重锚定和失败周期，也不包含汇总打印自身的耗时；`overruns` 统计 `work` 超过名义周期的次数。计时保留原动作顺序、反馈读取、异常处理和周期休眠逻辑。
 
 `camera_*` 字段仅在启用相机时存在。相机帧在计算/发送动作之前选择，机器人反馈仍在发送之后读取，原有字段语义不变。相机缺失或超过 `camera.max_age_s` 时，该行不写图像，索引/原生帧号为 -1、时间戳为 NaN、时钟域为空字符串。若设备重复提供同一原生帧，不伪造新设备帧号；存储仍按每条有效视觉样本追加一组图像。
 

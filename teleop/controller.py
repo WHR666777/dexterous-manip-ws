@@ -35,6 +35,50 @@ START_POSE_FEEDBACK_TIMEOUT_S = 3.0
 START_POSE_FEEDBACK_POLL_S = 0.05
 
 
+class _ControlTiming:
+    """Summarize completed control cycles without including pauses/re-anchoring."""
+
+    FIELDS = (
+        "timing_ik_s", "timing_hand_retarget_s", "timing_arm_send_s",
+        "timing_hand_send_s", "timing_seed_feedback_s", "timing_feedback_s",
+    )
+
+    def __init__(self, control_hz: float) -> None:
+        self.period = 1.0 / control_hz
+        self.rows: list[tuple[float, ...]] = []
+        self.elapsed = 0.0
+
+    def append(
+        self, stages: dict[str, float], record_s: float, work_s: float, cycle_s: float,
+    ) -> None:
+        self.rows.append(tuple(stages[key] for key in self.FIELDS) + (record_s, work_s, cycle_s))
+        self.elapsed += cycle_s
+        if self.elapsed >= 2.0:
+            self.report()
+
+    def report(self) -> None:
+        if not self.rows:
+            return
+        values = np.asarray(self.rows)
+        names = tuple(key.removeprefix("timing_").removesuffix("_s") for key in self.FIELDS)
+        names += ("record", "work", "cycle")
+        mean_ms = values.mean(axis=0) * 1000.0
+        p95_ms = np.percentile(values, 95, axis=0) * 1000.0
+        max_ms = values.max(axis=0) * 1000.0
+        stages = " ".join(
+            f"{name}={mean:.1f}/{p95:.1f}/{maximum:.1f}"
+            for name, mean, p95, maximum in zip(names, mean_ms, p95_ms, max_ms)
+        )
+        overruns = int(np.count_nonzero(values[:, -2] > self.period))
+        print(
+            f"[control timing] cycles={len(values)} active_hz={len(values) / self.elapsed:.2f} "
+            f"target_hz={1.0 / self.period:.1f} overruns={overruns}/{len(values)} "
+            f"ms(mean/p95/max): {stages}"
+        )
+        self.rows.clear()
+        self.elapsed = 0.0
+
+
 def _quest_input(config: dict[str, Any]):
     """Construct the configured Quest input, direct or persistent relay."""
     quest = config["quest"]
@@ -407,6 +451,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         {"config": config["_path"], "control": control, "quest_side": config["quest"]["side"]},
         sample_hz=float(config["control_hz"]),
     )
+    timing = _ControlTiming(float(config["control_hz"]))
 
     def reanchor(frame) -> None:
         nonlocal tracker, last_accepted_target, paused
@@ -479,6 +524,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         with Keyboard() as keyboard:
             while True:
                 loop_started = time.monotonic()
+                timing_started = time.perf_counter()
                 key = keyboard.read()
                 if key == "q":
                     break
@@ -507,6 +553,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     time.sleep(min(period, 0.02))
                     continue
 
+                stage_times = dict.fromkeys(_ControlTiming.FIELDS, 0.0)
                 # Snapshot the observation before IK/actions; never wait for a camera frame here.
                 camera_frame = camera.get_latest() if camera is not None and recorder.active else None
                 wrist_position, wrist_quaternion = anydex_wrist_to_base(
@@ -522,8 +569,12 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     target_position, target_quaternion = tracker.update(wrist_position, wrist_quaternion)
                     target_transform = position_quaternion_to_matrix(target_position, target_quaternion)
                     target_tcp_position = (target_transform @ flange_to_tcp)[:3, 3]
+                    stage_started = time.perf_counter()
                     seed = arm.get_joint_positions()
+                    stage_times["timing_seed_feedback_s"] = time.perf_counter() - stage_started
+                    stage_started = time.perf_counter()
                     solved = ik.solve(target_transform, seed)
+                    stage_times["timing_ik_s"] = time.perf_counter() - stage_started
                     if solved is None:
                         paused = True
                         reason = ik.last_diagnostics.get("code", "IK failed")
@@ -541,25 +592,34 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     arm_action = solved
                     last_accepted_target = target_transform.copy()
                 if hand is not None:
+                    stage_started = time.perf_counter()
                     _, hand_action = hand_retargeter.retarget(landmarks)
+                    stage_times["timing_hand_retarget_s"] = time.perf_counter() - stage_started
 
                 arm_sent_at = np.nan
                 hand_sent_at = np.nan
                 if arm is not None:
+                    stage_started = time.perf_counter()
                     arm.move_js(arm_action)
                     # arm.move_joints(
                     #     arm_action,
                     #     speed_percent=arm_config["follow_speed_percent"],
                     # )
                     arm_sent_at = time.monotonic()
+                    stage_times["timing_arm_send_s"] = time.perf_counter() - stage_started
                 if hand is not None:
+                    stage_started = time.perf_counter()
                     hand.set_joint_positions_raw(hand_action)
                     hand_sent_at = time.monotonic()
+                    stage_times["timing_hand_send_s"] = time.perf_counter() - stage_started
 
+                stage_started = time.perf_counter()
                 arm_joints = arm.get_joint_positions() if arm is not None else np.full(7, np.nan)
                 arm_torques = arm.get_joint_torques() if arm is not None else np.full(7, np.nan)
                 arm_tcp = arm.get_tcp_pose() if arm is not None else np.full(6, np.nan)
                 hand_raw = hand.get_joint_positions_raw(fresh=False) if hand is not None else np.full(20, -1)
+                stage_times["timing_feedback_s"] = time.perf_counter() - stage_started
+                stage_started = time.perf_counter()
                 recorder.append(
                     camera_frame=camera_frame,
                     timestamp_monotonic=time.monotonic(),
@@ -575,10 +635,14 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     hand_position_raw=hand_raw,
                     arm_sent_at=arm_sent_at,
                     hand_sent_at=hand_sent_at,
+                    **stage_times,
                 )
+                record_s = time.perf_counter() - stage_started
+                work_s = time.perf_counter() - timing_started
                 remaining = period - (time.monotonic() - loop_started)
                 if remaining > 0:
                     time.sleep(remaining)
+                timing.append(stage_times, record_s, work_s, time.perf_counter() - timing_started)
     finally:
         try:
             saved = recorder.stop_and_save()
@@ -596,4 +660,5 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         errors = _disconnect_devices(hand, arm)
         if errors:
             print("Disconnect errors: " + "; ".join(errors))
+        timing.report()
         print("Command streaming stopped; disconnect was attempted without automatic disable/e-stop.")

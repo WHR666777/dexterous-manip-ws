@@ -241,3 +241,130 @@ def test_run_records_camera_before_action_and_cleans_up(
     else:
         assert not any(event.startswith("camera") for event in events)
         assert not (path.parent / "camera").exists()
+
+
+@pytest.mark.parametrize("control", ["arm", "hand", "both"])
+@pytest.mark.parametrize("delay_scale", [1.0, 0.1])
+def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
+    monkeypatch, tmp_path, capsys, control, delay_scale,
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from teleop.config import load_config
+
+    config = load_config(Path(__file__).resolve().parents[1] / "configs/quest3_nero_l20.yaml")
+    config["camera"]["enabled"] = False
+    clock = [0.0]
+    loop_calls = []
+    current_calls = None
+    sleeps = []
+    delays = {
+        "arm_feedback": 0.002, "ik": 0.075, "retarget": 0.100,
+        "arm_send": 0.015, "hand_send": 0.016,
+        "arm_torque": 0.003, "arm_tcp": 0.004, "hand_feedback": 0.005,
+    }
+
+    def call(name, result=None):
+        if current_calls is not None:
+            current_calls.append(name)
+        clock[0] += delays.get(name, 0.0) * delay_scale
+        return result
+
+    def sleep(duration):
+        sleeps.append(duration)
+        clock[0] += duration
+
+    arm = SimpleNamespace(
+        connect=lambda: None, enable_normal_mode=lambda: None, is_enabled=lambda: True,
+        disconnect=lambda: None,
+        get_joint_positions=lambda: call("arm_feedback", np.zeros(7)),
+        get_joint_torques=lambda: call("arm_torque", np.zeros(7)),
+        get_tcp_pose=lambda: call("arm_tcp", np.zeros(6)),
+        get_flange_pose=lambda: np.zeros(6),
+        move_js=lambda _: call("arm_send"),
+    )
+    hand = SimpleNamespace(
+        connect=lambda: None, disconnect=lambda: None, set_speed=lambda _: None,
+        get_joint_positions_raw=lambda **_: call("hand_feedback", np.zeros(20, dtype=int)),
+        set_joint_positions_raw=lambda _: call("hand_send"),
+    )
+    ik = SimpleNamespace(
+        forward=lambda _: np.eye(4), solve=lambda *_: call("ik", np.zeros(7)),
+    )
+    retargeter = SimpleNamespace(
+        reset=lambda _: None,
+        retarget=lambda _: call("retarget", (None, np.full(20, 42, dtype=int))),
+    )
+    frame = SimpleNamespace(
+        wrist_position=np.zeros(3), wrist_quat=np.array([0, 0, 0, 1.0]),
+        landmarks=np.zeros((21, 3)), received_at=0.0,
+    )
+    # One unrecorded cycle and two recorded cycles, preceded by a long re-anchor.
+    keys = iter(["r", None, "b", None, "q"])
+
+    class Keyboard:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            nonlocal current_calls
+            key = next(keys)
+            current_calls = None
+            if key == "r":
+                clock[0] += 2.8
+            elif key in (None, "b"):
+                current_calls = []
+                loop_calls.append(current_calls)
+            return key
+
+    monkeypatch.setattr(controller.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(controller.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(controller.time, "sleep", sleep)
+    monkeypatch.setattr(controller, "Keyboard", Keyboard)
+    monkeypatch.setattr(controller, "_make_arm", lambda _: arm)
+    monkeypatch.setattr(controller, "_make_hand", lambda _: hand)
+    monkeypatch.setattr(controller, "NeroIK", lambda **_: ik)
+    monkeypatch.setattr(controller, "_move_arm_to_start_pose", lambda *_: None)
+    monkeypatch.setattr(controller, "_retargeter", lambda _: retargeter)
+    monkeypatch.setattr(controller, "_quest_input", lambda _: SimpleNamespace(stop=lambda: None))
+    monkeypatch.setattr(controller, "_latest_frame", lambda *_: frame)
+
+    controller.run(config, control, str(tmp_path))
+
+    has_arm = control in ("arm", "both")
+    has_hand = control in ("hand", "both")
+    expected_order = (["arm_feedback", "ik"] if has_arm else [])
+    expected_order += (["retarget"] if has_hand else [])
+    expected_order += (["arm_send"] if has_arm else [])
+    expected_order += (["hand_send"] if has_hand else [])
+    expected_order += (["arm_feedback", "arm_torque", "arm_tcp"] if has_arm else [])
+    expected_order += (["hand_feedback"] if has_hand else [])
+    assert loop_calls == [expected_order] * 3
+
+    expected = {
+        "timing_ik_s": 0.075 * has_arm * delay_scale,
+        "timing_hand_retarget_s": 0.100 * has_hand * delay_scale,
+        "timing_arm_send_s": 0.015 * has_arm * delay_scale,
+        "timing_hand_send_s": 0.016 * has_hand * delay_scale,
+        "timing_seed_feedback_s": 0.002 * has_arm * delay_scale,
+        "timing_feedback_s": (0.009 * has_arm + 0.005 * has_hand) * delay_scale,
+    }
+    with np.load(next(tmp_path.glob("*/trajectory.npz"))) as data:
+        for key, duration in expected.items():
+            np.testing.assert_allclose(data[key], [duration] * 2, atol=1e-12)
+        if has_hand:
+            np.testing.assert_array_equal(data["hand_action_raw"], np.full((2, 20), 42))
+    work_s = sum(expected.values())
+    if work_s < 0.05:
+        np.testing.assert_allclose(sleeps, [0.05 - work_s] * 3, atol=1e-12)
+    else:
+        assert sleeps == []
+    output = capsys.readouterr().out
+    assert "[control timing] cycles=3" in output
+    assert f"active_hz={1.0 / max(work_s, 0.05):.2f}" in output
+    assert f"overruns={3 if work_s > 0.05 else 0}/3" in output
+    assert "ms(mean/p95/max):" in output

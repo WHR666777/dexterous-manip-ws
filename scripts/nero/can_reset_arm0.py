@@ -22,7 +22,7 @@ def setup_arm_can(channel: str):
     robot.clear_joint_error()
     time.sleep(0.01)
     robot.reset()
-    time.sleep(1)
+    time.sleep(0.01)
     
     while not robot.enable():
         robot.set_normal_mode()
