@@ -8,6 +8,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
+import pinocchio as pin
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
@@ -94,6 +95,22 @@ class NeroIK:
         self.limits = np.asarray(limits)
         if not np.isfinite(self.limits).all() or np.any(self.limits[:, 0] >= self.limits[:, 1]):
             raise ValueError('非法关节限位')
+        # 只加载运动学模型，不加载 mesh，也不连接硬件。保持七轴数组的原有顺序。
+        self._model = pin.buildModelFromUrdf(str(self.urdf_path))
+        if self._model.nq != 7 or self._model.nv != 7:
+            raise ValueError('IK 要求固定基座的七轴 Nero 模型')
+        for index, name in enumerate(self.joint_names):
+            joint_id = self._model.getJointId(name)
+            joint = self._model.joints[joint_id]
+            if (joint.nq != 1 or joint.nv != 1
+                    or joint.idx_q != index or joint.idx_v != index):
+                raise ValueError(f'{name}: Pinocchio 关节顺序与七轴接口不一致')
+        self._data = self._model.createData()
+        self._flange_frame = self._model.getFrameId(self.flange_link)
+        base_frame = self._model.getFrameId(self.base_link)
+        pin.framesForwardKinematics(self._model, self._data, np.zeros(7))
+        # URDF 可以在 base_link 前带固定 world 变换；接口始终返回 T_base_flange。
+        self._base_from_world = self._data.oMf[base_frame].inverse()
         self.last_diagnostics = {}
 
     def in_limits(self, q):
@@ -116,12 +133,20 @@ class NeroIK:
         q = np.asarray(q, dtype=float)
         if q.shape != (7,) or not np.isfinite(q).all():
             raise ValueError('FK 要求有限的七轴 rad 数组')
-        T = np.eye(4)
-        for origin, axis, angle in zip(self.origins, self.axes, q):
-            rotation = np.eye(4)
-            rotation[:3, :3] = Rotation.from_rotvec(axis * angle).as_matrix()
-            T = T @ origin @ rotation
-        return T
+        pin.forwardKinematics(self._model, self._data, q)
+        flange = pin.updateFramePlacement(self._model, self._data, self._flange_frame)
+        return (self._base_from_world * flange).homogeneous.copy()
+
+    def _forward_and_jacobian(self, q):
+        """返回 base→flange 和 flange 原点在 base 中的线速度/角速度 Jacobian。"""
+        pin.computeJointJacobians(self._model, self._data, q)
+        flange = pin.updateFramePlacement(self._model, self._data, self._flange_frame)
+        jacobian = pin.getFrameJacobian(
+            self._model, self._data, self._flange_frame, pin.LOCAL_WORLD_ALIGNED
+        )
+        rotation = self._base_from_world.rotation
+        jacobian = np.vstack((rotation @ jacobian[:3], rotation @ jacobian[3:]))
+        return (self._base_from_world * flange).homogeneous.copy(), jacobian
 
     def solve(self, target_pose, q_seed):
         """从单个 seed 求连续局部解，失败返回 None。
@@ -153,6 +178,7 @@ class NeroIK:
 
         progress = {
             'residual_evaluations': 0,
+            'jacobian_evaluations': 0,
             'best_score': (
                 (p0 / MAX_FK_POSITION_ERROR_M) ** 2
                 + (r0 / np.deg2rad(MAX_FK_ROTATION_ERROR_DEG)) ** 2
@@ -185,10 +211,26 @@ class NeroIK:
                 )
             return np.r_[position, rotation, REGULARIZATION_WEIGHT * wrap_angle(candidate - seed)]
 
+        def jacobian(candidate):
+            if time.monotonic() - started > MAX_SOLVE_SECONDS:
+                raise TimeoutError('IK 时间预算耗尽')
+            actual, frame_jacobian = self._forward_and_jacobian(candidate)
+            error_rotation = target[:3, :3] @ actual[:3, :3].T
+            # 原残差是世界轴表达的 log(R_target R_actual^T)，不是 SE(3) log。
+            # d log(E exp(-omega)) = -Jlog3(E) omega；只提供其解析导数。
+            rotation_jacobian = -pin.Jlog3(error_rotation) @ frame_jacobian[3:]
+            progress['jacobian_evaluations'] += 1
+            return np.vstack((
+                frame_jacobian[:3] / MAX_FK_POSITION_ERROR_M,
+                rotation_jacobian / np.deg2rad(MAX_FK_ROTATION_ERROR_DEG),
+                REGULARIZATION_WEIGHT * np.eye(7),
+            ))
+
         def record_progress():
             best_q = progress['best_q']
             diag.update(
                 residual_evaluations=progress['residual_evaluations'],
+                jacobian_evaluations=progress['jacobian_evaluations'],
                 best_intermediate={
                     'fk_position_error_mm': progress['best_position_error_m'] * 1000,
                     'fk_rotation_error_deg': np.rad2deg(
@@ -230,6 +272,7 @@ class NeroIK:
             result = least_squares(
                 residual,
                 seed,
+                jac=jacobian,
                 bounds=(self.limits[:, 0], self.limits[:, 1]),
                 max_nfev=MAX_NFEV,
             )
