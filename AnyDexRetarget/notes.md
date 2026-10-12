@@ -16,9 +16,6 @@ python input/pico4_daemon.py
 python teleop_real.py --input pico4 --robot linker_l20 --hand right \
   --l20-transport can --l20-can-channel can0 \
   --l20-can-speed 100 --l20-can-command-hz 50 \
-  --l20-can-max-step 5 --l20-can-max-velocity 200 \
-  --l20-can-max-acceleration 1600 \
-  --l20-can-deadband 1 \
-  --l20-can-input-timeout 0.5
+  --l20-can-max-step 5 
 ```
 

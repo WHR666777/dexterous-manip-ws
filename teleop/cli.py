@@ -1,4 +1,4 @@
-"""Command-line entry point for Quest 3 -> Nero + L20 teleoperation."""
+"""Command-line entry point for Pico 4 / Quest 3 -> Nero + L20 teleoperation."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from .quest_listener import serve as serve_quest_listener
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/quest3_nero_l20.yaml")
+    parser.add_argument("--config", default="configs/pico4_nero_l20.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("input-check", help="Quest + AnyDex only; never opens CAN")
+    subparsers.add_parser("input-check", help="VR + AnyDex only; never opens CAN")
     subparsers.add_parser(
         "quest-listener",
         help="persistently receive HTS on the Quest TCP port and relay frames locally",
@@ -54,6 +54,9 @@ def main() -> None:
         input_check(config)
         return
     if args.command == "quest-listener":
+        if config["input_device"] != "quest3":
+            raise SystemExit("quest-listener requires --config configs/quest3_nero_l20.yaml; "
+                             "Pico 4 uses AnyDexRetarget/example/input/pico4_daemon.py.")
         serve_quest_listener(config)
         return
     if args.command == "record-start-pose":

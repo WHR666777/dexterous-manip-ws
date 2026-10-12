@@ -1,4 +1,4 @@
-"""AnyDex Quest coordinates and Nero-base pose conversions."""
+"""AnyDex RH wrist coordinates and Nero-base pose conversions."""
 
 from __future__ import annotations
 

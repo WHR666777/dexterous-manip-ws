@@ -1,4 +1,4 @@
-"""Single-arm Quest 3 teleoperation orchestration."""
+"""Single-arm VR teleoperation orchestration."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from .coordinate_frames import (
     pose6_to_matrix,
     position_quaternion_to_matrix,
 )
+from .config import calibration_rotation, input_config
 from .hand_retarget import L20Retargeter
 from .keyboard import Keyboard
 from .recording import EpisodeRecorder
@@ -102,8 +103,28 @@ def _quest_input(config: dict[str, Any]):
     )
 
 
+def _input_device(config: dict[str, Any]):
+    """Select the AnyDex input; both expose the same complete-frame interface."""
+    if config.get("input_device", "quest3") == "quest3":
+        return _quest_input(config)
+    project_root = Path(__file__).resolve().parents[1]
+    example_root = project_root / "AnyDexRetarget" / "example"
+    if str(example_root) not in sys.path:
+        sys.path.insert(0, str(example_root))
+    from input.pico4 import Pico4
+
+    source = input_config(config)
+    return Pico4(
+        mode=source.get("input_mode", "direct"),
+        relay_host=source.get("relay_host", "127.0.0.1"),
+        relay_port=source.get("relay_port", 63902),
+        port=source["port"],
+        broadcast_port=source["broadcast_port"],
+    )
+
+
 def _latest_frame(quest_input, config: dict[str, Any]):
-    quest = config["quest"]
+    quest = input_config(config)
     frame = quest_input.get_hand_frame(quest["side"])
     if frame is None:
         return None
@@ -116,20 +137,22 @@ def _latest_frame(quest_input, config: dict[str, Any]):
 
 def _retargeter(config: dict[str, Any]) -> L20Retargeter:
     hand = config["hand"]
-    return L20Retargeter(hand["retarget_config"], config["quest"]["side"], hand["max_raw_step"])
+    return L20Retargeter(hand["retarget_config"], input_config(config)["side"], hand["max_raw_step"])
 
 
 def input_check(config: dict[str, Any]) -> None:
-    """Validate the Quest stream and AnyDex result without opening CAN."""
+    """Validate the configured VR stream and AnyDex result without opening CAN."""
     retargeter = _retargeter(config)
-    quest_input = _quest_input(config)
-    if config["quest"].get("input_mode") == "relay":
+    quest_input = _input_device(config)
+    source = input_config(config)
+    device_name = config.get("input_device", "quest3")
+    if source.get("input_mode") == "relay":
         print(
-            "Reading Quest frames from persistent local relay "
-            f"{config['quest']['relay_host']}:{config['quest']['relay_port']} (Ctrl+C to stop)"
+            f"Reading {device_name} frames from persistent local relay "
+            f"{source['relay_host']}:{source['relay_port']} (Ctrl+C to stop)"
         )
     else:
-        print(f"Listening for Quest TCP on {config['quest']['listen_host']}:{config['quest']['port']} (Ctrl+C to stop)")
+        print(f"Listening for {device_name} TCP on port {source['port']} (Ctrl+C to stop)")
     seen_at = 0.0
     try:
         while True:
@@ -434,7 +457,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     quest_input = None
     camera_config = config.get("camera", {})
     camera = RealSenseCamera(camera_config) if camera_config.get("enabled", False) else None
-    calibration = np.asarray(config["calibration"]["R_base_quest"], dtype=np.float64)
+    calibration = calibration_rotation(config)
+    device_name = config.get("input_device", "quest3")
     tracking = config["tracking"]
     safety = config["safety"]
     gate = TargetGate(
@@ -448,7 +472,9 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     paused = True
     recorder = EpisodeRecorder(
         record_dir or config["recording"]["output_dir"],
-        {"config": config["_path"], "control": control, "quest_side": config["quest"]["side"]},
+        {"config": config["_path"], "control": control,
+         "input_device": device_name, "input_side": input_config(config)["side"],
+         "quest_side": input_config(config)["side"]},
         sample_hz=float(config["control_hz"]),
     )
     timing = _ControlTiming(float(config["control_hz"]))
@@ -481,11 +507,17 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
 
     try:
         arm_config = config["arm"]
-        quest_input = _quest_input(config)
+        quest_input = _input_device(config)
         if isinstance(quest_input, QuestRelayClient) and not quest_input.is_available():
             raise RuntimeError(
                 "Persistent Quest listener is unavailable. Start `teleop.cli ... "
                 "quest-listener` before running teleoperation."
+            )
+        if (device_name == "pico4" and input_config(config).get("input_mode") == "relay"
+                and not quest_input.is_available()):
+            raise RuntimeError(
+                "Pico 4 relay is unavailable. Start "
+                "`python3 AnyDexRetarget/example/input/pico4_daemon.py` before teleoperation."
             )
         if camera is not None:
             camera.start()
@@ -519,7 +551,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
             hand.set_speed(config["hand"]["speed"])
         period = 1.0 / float(config["control_hz"])
         if arm is not None:
-            print("Start pose ready. Hold a comfortable Quest pose, then press R to anchor.")
+            print(f"Start pose ready. Hold a comfortable {device_name} pose, then press R to anchor.")
         print("Keys: R=re-anchor, B=begin recording, S=save recording, Q=quit")
         with Keyboard() as keyboard:
             while True:
@@ -542,8 +574,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 if frame is None:
                     if not paused:
                         paused = True
-                        gate.pause("Quest frame timeout")
-                        print("PAUSED: Quest frame timeout; stale targets are not sent. Press R after recovery.")
+                        gate.pause(f"{device_name} frame timeout")
+                        print(f"PAUSED: {device_name} frame timeout; stale targets are not sent. Press R after recovery.")
                     time.sleep(min(period, 0.02))
                     continue
                 if key == "r":

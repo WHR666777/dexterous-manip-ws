@@ -26,4 +26,4 @@ def setup_arm_can(channel: str):
     print("CAN mode enabled for " + channel)
 
 setup_arm_can("can0")
-setup_arm_can("can1")
+# setup_arm_can("can1")

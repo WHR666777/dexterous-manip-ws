@@ -28,9 +28,11 @@ import socket
 import struct
 import threading
 import time
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,23 @@ JOINT_21_INDICES = [
     22, 23, 24, 25,
 ]
 
+# PXR hand poses use native XR axes (x right, y up, z back), unlike HTS's
+# Unity poses. Only the arm wrist is mapped to x forward, y left, z up.
+# Finger landmarks retain the existing Pico coordinates used by its YAML.
+_PICO_TO_RH = np.array([[0., 0., -1.], [-1., 0., 0.], [0., 1., 0.]])
+
+
+@dataclass
+class Pico4HandFrame:
+    """One tracking message: RH wrist plus existing wrist-relative Pico points."""
+
+    side: str
+    wrist_position: np.ndarray
+    wrist_quat: np.ndarray
+    landmarks: np.ndarray
+    received_at: float
+    pair_skew: float = 0.0
+
 
 # ── JSON parsing ─────────────────────────────────────────────────────────────
 
@@ -89,7 +108,7 @@ def _parse_hand_joints(hand_j: dict) -> Optional[np.ndarray]:
     is_active = hand_j.get('isActive', 0)
     try:
         is_active = int(float(str(is_active)))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
     if is_active != 1:
         return None
@@ -114,22 +133,30 @@ def _parse_hand_joints(hand_j: dict) -> Optional[np.ndarray]:
     return result
 
 
-def _parse_tracking_json(payload: bytes) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+def _decode_tracking_json(payload: bytes) -> Optional[dict]:
     try:
         outer = json.loads(payload.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None, None
+        return None
 
     if isinstance(outer, dict) and 'value' in outer and isinstance(outer['value'], str):
         inner_str = outer['value'].replace('\\', '')
         try:
             data = json.loads(inner_str)
         except json.JSONDecodeError:
-            return None, None
+            return None
     else:
         data = outer
 
     if not isinstance(data, dict):
+        return None
+
+    return data
+
+
+def _parse_tracking_json(payload: bytes) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    data = _decode_tracking_json(payload)
+    if data is None:
         return None, None
 
     hand_section = data.get('Hand', {})
@@ -139,6 +166,43 @@ def _parse_tracking_json(payload: bytes) -> tuple[Optional[np.ndarray], Optional
     left = _parse_hand_joints(hand_section.get('leftHand', {}))
     right = _parse_hand_joints(hand_section.get('rightHand', {}))
     return left, right
+
+
+def _parse_hand_frame(hand_j: dict, side: str, received_at: float) -> Optional[Pico4HandFrame]:
+    """Reject incomplete/invalid poses instead of using zero-filled arm input."""
+    if _parse_hand_joints(hand_j) is None:
+        return None
+    joints = hand_j['HandJointLocations']
+    positions = []
+    wrist_pose = None
+    try:
+        for index in JOINT_21_INDICES:
+            joint = joints[index]
+            values = np.asarray([float(part) for part in joint['p'].split(',')])
+            if values.size < 3 or not np.all(np.isfinite(values)):
+                return None
+            # When supplied, PXR locationStatus must include PositionValid;
+            # the wrist also needs OrientationValid.
+            required = 3 if index == 1 else 2
+            if 's' in joint and int(joint['s']) & required != required:
+                return None
+            positions.append(values[:3])
+            if index == 1:
+                if values.size != 7 or np.linalg.norm(values[3:]) < 1e-8:
+                    return None
+                wrist_pose = values
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+        return None
+    positions = np.asarray(positions, dtype=np.float32)
+    landmarks = positions - positions[0].copy()
+    wrist_rotation = Rotation.from_quat(wrist_pose[3:]).as_matrix()
+    return Pico4HandFrame(
+        side=side,
+        wrist_position=_PICO_TO_RH @ wrist_pose[:3],
+        wrist_quat=Rotation.from_matrix(_PICO_TO_RH @ wrist_rotation @ _PICO_TO_RH.T).as_quat(),
+        landmarks=landmarks,
+        received_at=received_at,
+    )
 
 
 # ── Relay mode frame parser ───────────────────────────────────────────────────
@@ -156,10 +220,12 @@ class _RelayFrameParser:
         while len(self._buf) >= 8:
             id_len = struct.unpack_from('<I', self._buf, 0)[0]
             # sanity: device_id should be a short ASCII string
-            if id_len > 256 or len(self._buf) < 4 + id_len + 4:
+            if id_len > 256:
                 # corrupt, try shifting
                 del self._buf[0]
                 continue
+            if len(self._buf) < 4 + id_len + 4:
+                return None
             json_len = struct.unpack_from('<I', self._buf, 4 + id_len)[0]
             if json_len > 10_000_000:
                 del self._buf[0]
@@ -269,11 +335,16 @@ class Pico4:
     ) -> None:
         self._mode = mode.lower()
         self._stop = threading.Event()
+        self._connected = threading.Event()
         self._lock = threading.Lock()
 
         self._left_hand: Optional[np.ndarray] = None
         self._right_hand: Optional[np.ndarray] = None
         self._last_update: float = 0.0
+        self._left_update: float = 0.0
+        self._right_update: float = 0.0
+        self._hand_frames = {'left': None, 'right': None}
+        self._source_timestamps = {}
 
         if self._mode == 'relay':
             self._relay_host = relay_host
@@ -291,11 +362,61 @@ class Pico4:
     # ── public API ────────────────────────────────────────────────────────
 
     def get_fingers_data(self) -> dict:
+        return self.get_fingers_sample()[0]
+
+    def get_fingers_sample(self, hand_side: Optional[str] = None) -> tuple[dict, float]:
+        if hand_side not in (None, 'left', 'right'):
+            raise ValueError("hand_side must be 'left', 'right', or None")
         empty = np.zeros((21, 3), dtype=np.float32)
         with self._lock:
             left = self._left_hand.copy() if self._left_hand is not None else empty.copy()
             right = self._right_hand.copy() if self._right_hand is not None else empty.copy()
-        return {'left_fingers': left, 'right_fingers': right}
+            timestamp = self._last_update if hand_side is None else getattr(self, f'_{hand_side}_update')
+        return {'left_fingers': left, 'right_fingers': right}, timestamp
+
+    def get_hand_frame(self, side: str) -> Optional[Pico4HandFrame]:
+        side = side.lower()
+        if side not in ('left', 'right'):
+            raise ValueError("side must be 'left' or 'right'")
+        with self._lock:
+            frame = self._hand_frames[side]
+            if frame is None:
+                return None
+            return replace(frame, wrist_position=frame.wrist_position.copy(),
+                           wrist_quat=frame.wrist_quat.copy(), landmarks=frame.landmarks.copy())
+
+    def is_available(self, timeout_s: float = 0.15) -> bool:
+        """Check the relay connection without requiring headset tracking yet."""
+        return self._connected.wait(timeout_s)
+
+    def _update_tracking(self, payload: bytes) -> None:
+        data = _decode_tracking_json(payload)
+        hands = data.get('Hand', {}) if data is not None else {}
+        if not isinstance(hands, dict):
+            hands = {}
+        received_at = time.monotonic()
+        with self._lock:
+            for side in ('left', 'right'):
+                hand = hands.get(f'{side}Hand', {})
+                landmarks = _parse_hand_joints(hand)
+                frame = _parse_hand_frame(hand, side, received_at)
+                if frame is None:
+                    self._hand_frames[side] = None
+                source_timestamp = hand.get('timeStampNs') if isinstance(hand, dict) else None
+                if (source_timestamp is not None
+                        and self._source_timestamps.get(side) == source_timestamp):
+                    continue  # Repeated source samples must not refresh the timeout.
+                self._source_timestamps[side] = source_timestamp
+                if landmarks is not None:
+                    setattr(self, f'_{side}_hand', landmarks)
+                    setattr(self, f'_{side}_update', received_at)
+                    self._last_update = received_at
+                self._hand_frames[side] = frame
+
+    def _clear_hand_frames(self) -> None:
+        with self._lock:
+            self._hand_frames = {'left': None, 'right': None}
+            self._source_timestamps.clear()
 
     def stop(self) -> None:
         self._stop.set()
@@ -312,11 +433,14 @@ class Pico4:
                 sock.settimeout(5.0)
                 sock.connect((self._relay_host, self._relay_port))
                 sock.settimeout(1.0)
+                self._connected.set()
                 logger.info('Pico4 connected to relay %s:%d', self._relay_host, self._relay_port)
                 self._relay_loop(sock)
             except (ConnectionRefusedError, OSError) as e:
                 logger.warning('Pico4 relay connect failed: %s, retry in %.1fs', e, _RELAY_RECONNECT_S)
             finally:
+                self._connected.clear()
+                self._clear_hand_frames()
                 try:
                     sock.close()
                 except Exception:
@@ -340,14 +464,7 @@ class Pico4:
                 payload = parser.try_parse()
                 if payload is None:
                     break
-                left, right = _parse_tracking_json(payload)
-                with self._lock:
-                    if left is not None:
-                        self._left_hand = left
-                    if right is not None:
-                        self._right_hand = right
-                    if left is not None or right is not None:
-                        self._last_update = time.monotonic()
+                self._update_tracking(payload)
         logger.info('Pico4 relay connection closed')
 
     # ── direct mode ───────────────────────────────────────────────────────
@@ -408,15 +525,9 @@ class Pico4:
                                         _CMD_BATTERY, _CMD_SENSOR):
                         last_hb = time.monotonic()
                     if frame['cmd'] == _CMD_DEVICE_STATE_JSON:
-                        left, right = _parse_tracking_json(frame['payload'])
-                        with self._lock:
-                            if left is not None:
-                                self._left_hand = left
-                            if right is not None:
-                                self._right_hand = right
-                            if left is not None or right is not None:
-                                self._last_update = time.monotonic()
+                        self._update_tracking(frame['payload'])
         finally:
+            self._clear_hand_frames()
             conn.close()
             logger.info('Pico4 direct: client disconnected')
 

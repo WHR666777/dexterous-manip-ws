@@ -1,2 +1,2 @@
-"""Quest 3 -> Nero + Linker L20 teleoperation pipeline."""
+"""Pico 4 / Quest 3 -> Nero + Linker L20 teleoperation pipeline."""
 

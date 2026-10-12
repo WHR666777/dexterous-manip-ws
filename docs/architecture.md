@@ -5,7 +5,7 @@
 - `AnyDexRetarget/example/input/quest3.py`：唯一 Quest TCP listener、CSV parser 和 Unity 左手系到右手系转换；保留已验证的 AnyDex 输入路径，并额外公开线程安全的完整手帧快照。
 - `teleop.coordinate_frames`：不重复转换 Quest 坐标，只把现场 `R_base_quest` 应用于 AnyDex 已转换的右手系腕姿。
 - `teleop.wrist_tracker`：从参考 `vr_teleop` 迁移的相对锚定。第一次帧锁定 Quest 原点，平移残差使用 `alpha*current + (1-alpha)*previous`，旋转使用当前相对初始腕姿。
-- `robot_control.nero_ik`：基于固定 Nero URDF 的七轴局部 IK。它已存在且可复用，本次没有重新实现一套 IK。
+- `robot_control.nero_ik`：基于固定 Nero URDF 的七轴局部 IK。Pinocchio 计算 FK 和解析 Jacobian，SciPy `least_squares` 保留原有目标函数、关节限位、连续性检查、误差验收与超时回退。模型只加载一次，不加载 mesh 或连接硬件；[离线轨迹对比](ik_benchmark.md)记录验证方法与结果。
 - `teleop.hand_retarget`：只包装根目录 `AnyDexRetarget`；输出 qpos 后调用其公开 `l20_qpos_to_can_slots` 和 `slew_l20_command`。
 - `teleop.controller`：拥有唯一控制循环；`both` 按 Nero 后 L20 顺序发送，记录各自发送时间，因此不宣称跨设备原子同步。
 - `teleop.realsense_camera`：后台读取 L515 的 RGB8/Z16，将深度对齐到彩色像素网格，发布带时间戳的完整帧快照；不参与机械臂/手控制。

@@ -14,13 +14,15 @@ data/episodes/
 
 `trajectory.npz` 按有效控制周期堆叠数值数组。`metadata.json` 保存配置路径、控制模式、手侧、名义采样频率、样本数、字段 shape，以及相机实际型号、序列号、内参、深度单位和图像文件路径。`B` 开始，`S` 保存；`Q`/正常异常收尾保存仍在进行的 episode。重复 `B` 不丢弃当前记录；空 episode 的 `samples` 为 0。
 
+新录制的 metadata 增加 `input_device`（`pico4` / `quest3`）和 `input_side`，并继续保存 `quest_side` 供现有回放检查手侧。NPZ 的 `quest_*` 字段名继续兼容原格式；实际来源由 `input_device` 区分，旧 episode 没有该字段时按原 Quest 语义读取。
+
 ## NPZ 字段
 
 | 字段 | 单样本 shape | 含义 |
 | --- | --- | --- |
 | `timestamp_monotonic` | scalar | PC 单调时钟，秒 |
-| `quest_wrist` | `(7,)` | AnyDex Quest plugin 转换后的 RH `xyz + xyzw` |
-| `quest_landmarks` | `(21,3)` | AnyDex Quest plugin 输出的 world landmarks |
+| `quest_wrist` | `(7,)` | AnyDex 输入适配后、现场标定前的 RH `xyz + xyzw`，Pico/Quest 均为 x前/y左/z上 |
+| `quest_landmarks` | `(21,3)` | 传入重定向的输入点：Quest 为 RH world landmarks，Pico 为原 Pico 坐标中相对腕部的点；单位 m |
 | `quest_received_at` | scalar | 完整帧形成时的单调时钟 |
 | `target_base_flange` | `(4,4)` | Nero base 到目标 flange；hand-only 时为 NaN |
 | `arm_action` | `(7,)` | 发送的 Nero joint target，rad；hand-only 为 NaN |

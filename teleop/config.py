@@ -12,6 +12,15 @@ import yaml
 PLACEHOLDER = "CHANGE_ME"
 
 
+def input_config(config: dict[str, Any]) -> dict[str, Any]:
+    return config["pico4" if config.get("input_device", "quest3") == "pico4" else "quest"]
+
+
+def calibration_rotation(config: dict[str, Any]) -> np.ndarray:
+    key = "R_base_pico4" if config.get("input_device", "quest3") == "pico4" else "R_base_quest"
+    return np.asarray(config["calibration"].get(key), dtype=float)
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path).expanduser().resolve()
     with config_path.open("r", encoding="utf-8") as stream:
@@ -19,29 +28,41 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("Configuration root must be a mapping.")
 
-    required = ("quest", "calibration", "tracking", "safety", "arm", "hand", "recording")
+    device = config.setdefault("input_device", "quest3")
+    if device not in ("quest3", "pico4"):
+        raise ValueError("input_device must be 'quest3' or 'pico4'.")
+    section = "pico4" if device == "pico4" else "quest"
+    required = (section, "calibration", "tracking", "safety", "arm", "hand", "recording")
     missing = [name for name in required if not isinstance(config.get(name), dict)]
     if missing:
         raise ValueError(f"Missing configuration sections: {', '.join(missing)}")
 
-    quest = config["quest"]
-    if quest.get("transport") != "tcp":
-        raise ValueError("Quest transport is fixed to 'tcp' for this project.")
-    if quest.get("input_mode", "direct") not in ("direct", "relay"):
-        raise ValueError("quest.input_mode must be 'direct' or 'relay'.")
-    if quest.get("input_mode") == "relay":
-        if quest.get("relay_host") not in ("127.0.0.1", "localhost"):
-            raise ValueError("quest.relay_host must be localhost-only.")
+    source = input_config(config)
+    if source.get("transport") != "tcp":
+        raise ValueError(f"{section}.transport must be 'tcp'.")
+    if source.get("input_mode", "direct") not in ("direct", "relay"):
+        raise ValueError(f"{section}.input_mode must be 'direct' or 'relay'.")
+    if source.get("input_mode") == "relay":
+        if source.get("relay_host") not in ("127.0.0.1", "localhost"):
+            raise ValueError(f"{section}.relay_host must be localhost-only.")
         try:
-            relay_port = int(quest["relay_port"])
+            relay_port = int(source["relay_port"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("quest.relay_port must be a TCP port number.") from exc
+            raise ValueError(f"{section}.relay_port must be a TCP port number.") from exc
         if not 1 <= relay_port <= 65535:
-            raise ValueError("quest.relay_port must be a TCP port number.")
-    if quest.get("side") not in ("left", "right"):
-        raise ValueError("quest.side must be 'left' or 'right'.")
-    if config["hand"].get("type") != quest.get("side"):
-        raise ValueError("hand.type and quest.side must select the same side.")
+            raise ValueError(f"{section}.relay_port must be a TCP port number.")
+    if device == "pico4":
+        for key in ("port", "broadcast_port"):
+            try:
+                port = int(source[key])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"pico4.{key} must be a port number.") from exc
+            if not 1 <= port <= 65535:
+                raise ValueError(f"pico4.{key} must be a port number.")
+    if source.get("side") not in ("left", "right"):
+        raise ValueError(f"{section}.side must be 'left' or 'right'.")
+    if config["hand"].get("type") != source.get("side"):
+        raise ValueError(f"hand.type and {section}.side must select the same side.")
     if float(config.get("control_hz", 0)) <= 0:
         raise ValueError("control_hz must be positive.")
     camera = config.setdefault("camera", {})
@@ -79,14 +100,14 @@ def load_config(path: str | Path) -> dict[str, Any]:
             "safety.tcp_workspace_cube_side_m must be a finite positive number."
         )
 
-    rotation = np.asarray(config["calibration"].get("R_base_quest"), dtype=float)
+    rotation = calibration_rotation(config)
     if (
         rotation.shape != (3, 3)
         or not np.all(np.isfinite(rotation))
         or not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-3)
         or not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-3)
     ):
-        raise ValueError("calibration.R_base_quest must be a finite rotation matrix.")
+        raise ValueError(f"calibration.R_base_{'pico4' if device == 'pico4' else 'quest'} must be a finite rotation matrix.")
 
     project_root = Path(__file__).resolve().parents[1]
     retarget_path = Path(config["hand"]["retarget_config"])
@@ -121,7 +142,8 @@ def require_site_configuration(
         and control in ("arm", "both")
         and not bool(config["calibration"].get("calibrated"))
     ):
-        unresolved.append("calibration.calibrated/R_base_quest")
+        rotation_key = "R_base_pico4" if config.get("input_device", "quest3") == "pico4" else "R_base_quest"
+        unresolved.append(f"calibration.calibrated/{rotation_key}")
     if (
         require_start_pose
         and control in ("arm", "both")

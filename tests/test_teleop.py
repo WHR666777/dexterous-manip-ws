@@ -245,15 +245,17 @@ def test_run_records_camera_before_action_and_cleans_up(
 
 @pytest.mark.parametrize("control", ["arm", "hand", "both"])
 @pytest.mark.parametrize("delay_scale", [1.0, 0.1])
+@pytest.mark.parametrize("input_device", ["quest3", "pico4"])
 def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
-    monkeypatch, tmp_path, capsys, control, delay_scale,
+    monkeypatch, tmp_path, capsys, control, delay_scale, input_device,
 ):
+    import json
     from pathlib import Path
     from types import SimpleNamespace
 
     from teleop.config import load_config
 
-    config = load_config(Path(__file__).resolve().parents[1] / "configs/quest3_nero_l20.yaml")
+    config = load_config(Path(__file__).resolve().parents[1] / f"configs/{input_device}_nero_l20.yaml")
     config["camera"]["enabled"] = False
     clock = [0.0]
     loop_calls = []
@@ -330,7 +332,8 @@ def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
     monkeypatch.setattr(controller, "NeroIK", lambda **_: ik)
     monkeypatch.setattr(controller, "_move_arm_to_start_pose", lambda *_: None)
     monkeypatch.setattr(controller, "_retargeter", lambda _: retargeter)
-    monkeypatch.setattr(controller, "_quest_input", lambda _: SimpleNamespace(stop=lambda: None))
+    monkeypatch.setattr(controller, "_input_device", lambda _: SimpleNamespace(
+        stop=lambda: None, is_available=lambda: True))
     monkeypatch.setattr(controller, "_latest_frame", lambda *_: frame)
 
     controller.run(config, control, str(tmp_path))
@@ -358,6 +361,9 @@ def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
             np.testing.assert_allclose(data[key], [duration] * 2, atol=1e-12)
         if has_hand:
             np.testing.assert_array_equal(data["hand_action_raw"], np.full((2, 20), 42))
+    metadata = json.loads(next(tmp_path.glob("*/metadata.json")).read_text())
+    assert metadata["input_device"] == input_device
+    assert metadata["input_side"] == metadata["quest_side"] == "right"
     work_s = sum(expected.values())
     if work_s < 0.05:
         np.testing.assert_allclose(sleeps, [0.05 - work_s] * 3, atol=1e-12)

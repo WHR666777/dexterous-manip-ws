@@ -1,8 +1,29 @@
-# Quest 3 → Nero + LinkerHand L20 遥操作
+# Pico 4 / Quest 3 → Nero + LinkerHand L20 遥操作
 
-本仓库当前只解决一个明确目标：用一只 Quest 3 手同时控制一台 AgileX Nero 七轴机械臂和一只 LinkerHand L20，并记录后续 OP 训练所需的数据。当前实现是**单臂 + 单手**；双臂 + 双手留作两套单臂控制器的后续组合，不在当前范围内。
+本仓库当前只解决一个明确目标：用 Pico 4 或 Quest 3 的一只手同时控制一台 AgileX Nero 七轴机械臂和一只 LinkerHand L20，并记录后续 OP 训练所需的数据。当前实现是**单臂 + 单手**；双臂 + 双手留作两套单臂控制器的后续组合，不在当前范围内。
 
-`AnyDexRetarget/` 是唯一有效的 Quest 输入和手部重定向实现。原 `vr_teleop` 只作为腕部相对锚定和平滑方案的参考，所需跟踪逻辑已经迁入 `teleop/`，不再作为运行依赖。
+`AnyDexRetarget/` 是唯一有效的 VR 输入和手部重定向实现。原 `vr_teleop` 只作为腕部相对锚定和平滑方案的参考，所需跟踪逻辑已经迁入 `teleop/`，不再作为运行依赖。
+
+## Pico 4 输入（当前默认）
+
+完整启动步骤见 [notes-zyd.md](notes-zyd.md)。头显打开 robo、勾选手部追踪并 reconnect；USB 连接时执行 `adb reverse tcp:63901 tcp:63901`。先在一个终端保持运行原 AnyDex 转发：
+
+```bash
+python3 AnyDexRetarget/example/input/pico4_daemon.py
+```
+
+在另一个终端检查输入，再运行联合遥操：
+
+```bash
+python3 -m teleop.cli --config configs/pico4_nero_l20.yaml input-check
+python3 -m teleop.cli --config configs/pico4_nero_l20.yaml run --control both --execute --record-dir data/episodes
+```
+
+Pico 使用 TCP 63901 → 常驻 daemon → localhost 63902，复用 AnyDex 的 26→21 关节映射和 Pico/L20 adaptive 配置。腕部和手指来自同一条 JSON；腕部位置/旋转转换为 RH x前、y左、z上，手指保留原 Pico 重定向坐标。PXR 原生腕姿格式和坐标依据 [XRoboToolkit 发送实现](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/blob/main/Assets/Scripts/TrackingData.cs) 与 [PXR SDK 关节读取实现](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/blob/main/PICO%20Unity%20Integration%20SDK/Runtime/Scripts/Features/PXR_HandTracking.cs)。
+
+新配置保留原机械臂/手的 CAN、控制频率、相对锚定、平滑、IK、运动限制、相机与 R/B/S/Q 流程。`calibration.R_base_pico4` 以原 Quest 矩阵为初值，现场确认方向后将 `calibration.calibrated` 改为 `true` 才能运行 `arm/both`。`input-check` 和 `hand` 模式不要求腕部到机械臂的标定。无需运行 `quest-listener`；需要直连调试时，将 `pico4.input_mode` 改为 `direct` 并停止 daemon。
+
+以下保留原 Quest 配置和操作说明；使用 Pico 执行同一硬件命令时，把配置路径换为 `configs/pico4_nero_l20.yaml`，手侧字段使用 `pico4.side`，标定矩阵使用 `R_base_pico4`。
 
 ## 数据流
 
