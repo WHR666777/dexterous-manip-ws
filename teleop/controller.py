@@ -21,7 +21,8 @@ from .coordinate_frames import (
     position_quaternion_to_matrix,
 )
 from .config import calibration_rotation, input_config
-from .hand_retarget import L20Retargeter
+from .hand_feedback import HandFeedbackPoller
+from .hand_retarget import HAND_TIMING_FIELDS, L20Retargeter
 from .keyboard import Keyboard
 from .recording import EpisodeRecorder
 from .realsense_camera import RealSenseCamera
@@ -42,20 +43,29 @@ class _ControlTiming:
     FIELDS = (
         "timing_ik_s", "timing_hand_retarget_s", "timing_arm_send_s",
         "timing_hand_send_s", "timing_seed_feedback_s", "timing_feedback_s",
+        "timing_hand_send_wait_s",
     )
 
     def __init__(self, control_hz: float) -> None:
         self.period = 1.0 / control_hz
         self.rows: list[tuple[float, ...]] = []
+        self.hand_rows: list[tuple[float, ...]] = []
         self.elapsed = 0.0
 
     def append(
         self, stages: dict[str, float], record_s: float, work_s: float, cycle_s: float,
-    ) -> None:
+        hand_diagnostics: dict[str, float] | None = None,
+    ) -> bool:
         self.rows.append(tuple(stages[key] for key in self.FIELDS) + (record_s, work_s, cycle_s))
+        if hand_diagnostics and hand_diagnostics.get('hand_retarget_numevals', -1) >= 0:
+            self.hand_rows.append(tuple(hand_diagnostics.get(key, np.nan)
+                                        for key in HAND_TIMING_FIELDS)
+                                  + (hand_diagnostics['hand_retarget_numevals'],))
         self.elapsed += cycle_s
         if self.elapsed >= 2.0:
             self.report()
+            return True
+        return False
 
     def report(self) -> None:
         if not self.rows:
@@ -76,7 +86,21 @@ class _ControlTiming:
             f"target_hz={1.0 / self.period:.1f} overruns={overruns}/{len(values)} "
             f"ms(mean/p95/max): {stages}"
         )
+        if self.hand_rows:
+            hand_values = np.asarray(self.hand_rows)
+            evals = hand_values[:, -1]
+            details = []
+            for column, key in zip(hand_values[:, :-1].T, HAND_TIMING_FIELDS):
+                ms = column[np.isfinite(column)] * 1000
+                if len(ms):
+                    name = key.removeprefix('timing_hand_').removesuffix('_s')
+                    details.append(f'{name}={ms.mean():.1f}/{np.percentile(ms, 95):.1f}/{ms.max():.1f}')
+            print(f'[hand retarget] cycles={len(evals)} '
+                  f'numevals(mean/p95/max)={evals.mean():.1f}/'
+                  f'{np.percentile(evals, 95):.1f}/{evals.max():.0f} '
+                  f'ms(mean/p95/max): {" ".join(details)}')
         self.rows.clear()
+        self.hand_rows.clear()
         self.elapsed = 0.0
 
 
@@ -454,6 +478,10 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         else None
     )
     hand_retargeter = _retargeter(config) if hand is not None else None
+    hand_feedback = (HandFeedbackPoller(
+        hand, poll_hz=config['hand'].get('feedback_poll_hz', 20.0),
+        max_age_s=config['hand'].get('feedback_max_age_s', .25),
+    ) if hand is not None else None)
     quest_input = None
     camera_config = config.get("camera", {})
     camera = RealSenseCamera(camera_config) if camera_config.get("enabled", False) else None
@@ -474,7 +502,11 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         record_dir or config["recording"]["output_dir"],
         {"config": config["_path"], "control": control,
          "input_device": device_name, "input_side": input_config(config)["side"],
-         "quest_side": input_config(config)["side"]},
+         "quest_side": input_config(config)["side"],
+         "hand_feedback": ({'poll_hz': hand_feedback.poll_hz,
+                            'max_age_s': hand_feedback.max_age_s,
+                            'timestamps': 'host query calls; no hardware generation'}
+                           if hand_feedback is not None else None)},
         sample_hz=float(config["control_hz"]),
     )
     timing = _ControlTiming(float(config["control_hz"]))
@@ -501,7 +533,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
             gate.reanchor(flange)
             last_accepted_target = flange.copy()
         if hand is not None:
-            hand_retargeter.reset(hand.get_joint_positions_raw(fresh=True))
+            hand_retargeter.reset(hand_feedback.get_latest().positions_raw)
         paused = False
         print("Re-anchored; command streaming resumed.")
 
@@ -549,6 +581,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         if hand is not None:
             hand.connect()
             hand.set_speed(config["hand"]["speed"])
+            hand_feedback.start()
         period = 1.0 / float(config["control_hz"])
         if arm is not None:
             print(f"Start pose ready. Hold a comfortable {device_name} pose, then press R to anchor.")
@@ -586,6 +619,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     continue
 
                 stage_times = dict.fromkeys(_ControlTiming.FIELDS, 0.0)
+                hand_diagnostics = dict.fromkeys(HAND_TIMING_FIELDS, np.nan)
+                hand_diagnostics['hand_retarget_numevals'] = -1
                 # Snapshot the observation before IK/actions; never wait for a camera frame here.
                 camera_frame = camera.get_latest() if camera is not None and recorder.active else None
                 wrist_position, wrist_quaternion = anydex_wrist_to_base(
@@ -627,6 +662,9 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     stage_started = time.perf_counter()
                     _, hand_action = hand_retargeter.retarget(landmarks)
                     stage_times["timing_hand_retarget_s"] = time.perf_counter() - stage_started
+                    diagnostics = getattr(hand_retargeter, 'last_diagnostics', {})
+                    hand_diagnostics.update({key: diagnostics[key] for key in hand_diagnostics
+                                             if key in diagnostics})
 
                 arm_sent_at = np.nan
                 hand_sent_at = np.nan
@@ -644,12 +682,17 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     hand.set_joint_positions_raw(hand_action)
                     hand_sent_at = time.monotonic()
                     stage_times["timing_hand_send_s"] = time.perf_counter() - stage_started
+                    stage_times['timing_hand_send_wait_s'] = getattr(
+                        hand, 'last_position_send_wait_s', 0.0
+                    )
 
                 stage_started = time.perf_counter()
                 arm_joints = arm.get_joint_positions() if arm is not None else np.full(7, np.nan)
                 arm_torques = arm.get_joint_torques() if arm is not None else np.full(7, np.nan)
                 arm_tcp = arm.get_tcp_pose() if arm is not None else np.full(6, np.nan)
-                hand_raw = hand.get_joint_positions_raw(fresh=False) if hand is not None else np.full(20, -1)
+                feedback = hand_feedback.get_latest() if hand_feedback is not None else None
+                hand_raw = feedback.positions_raw if feedback is not None else np.full(20, -1)
+                hand_read_at = time.monotonic() if feedback is not None else np.nan
                 stage_times["timing_feedback_s"] = time.perf_counter() - stage_started
                 stage_started = time.perf_counter()
                 recorder.append(
@@ -667,6 +710,13 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     hand_position_raw=hand_raw,
                     arm_sent_at=arm_sent_at,
                     hand_sent_at=hand_sent_at,
+                    hand_feedback_query_started_at=(feedback.query_started_at if feedback else np.nan),
+                    hand_feedback_query_finished_at=(feedback.query_finished_at if feedback else np.nan),
+                    hand_feedback_query_sequence=(feedback.query_sequence if feedback else -1),
+                    hand_feedback_snapshot_read_at=hand_read_at,
+                    hand_feedback_query_age_s=(hand_read_at - feedback.query_finished_at
+                                               if feedback else np.nan),
+                    **hand_diagnostics,
                     **stage_times,
                 )
                 record_s = time.perf_counter() - stage_started
@@ -674,8 +724,19 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 remaining = period - (time.monotonic() - loop_started)
                 if remaining > 0:
                     time.sleep(remaining)
-                timing.append(stage_times, record_s, work_s, time.perf_counter() - timing_started)
+                if timing.append(stage_times, record_s, work_s,
+                                 time.perf_counter() - timing_started, hand_diagnostics):
+                    if hand_feedback is not None:
+                        hand_feedback.report()
     finally:
+        feedback_stopped = True
+        if hand_feedback is not None:
+            try:
+                hand_feedback.stop()
+            except Exception as exc:
+                feedback_stopped = False
+                print(f'Hand feedback stop failed: {type(exc).__name__}: {exc}; '
+                      'hand disconnect deferred until its query exits.')
         try:
             saved = recorder.stop_and_save()
             if saved:
@@ -689,8 +750,10 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 print(f"Camera stop failed: {type(exc).__name__}: {exc}")
         if quest_input is not None:
             quest_input.stop()
-        errors = _disconnect_devices(hand, arm)
+        errors = _disconnect_devices(hand if feedback_stopped else None, arm)
         if errors:
             print("Disconnect errors: " + "; ".join(errors))
         timing.report()
+        if hand_feedback is not None:
+            hand_feedback.report()
         print("Command streaming stopped; disconnect was attempted without automatic disable/e-stop.")

@@ -5,6 +5,30 @@ from teleop.coordinate_frames import anydex_wrist_to_base
 from teleop import controller
 from teleop.target_gate import TargetGate
 from teleop.wrist_tracker import WristTracker
+from teleop.hand_feedback import HandFeedbackSnapshot
+from teleop.hand_retarget import HAND_TIMING_FIELDS
+
+
+class FakeHandFeedbackPoller:
+    """Deterministic snapshot service; worker lifecycle is tested separately."""
+    def __init__(self, hand, poll_hz, max_age_s):
+        self.hand, self.poll_hz, self.max_age_s = hand, poll_hz, max_age_s
+        self.sequence = 0
+
+    def start(self):
+        pass
+
+    def get_latest(self):
+        self.sequence += 1
+        positions = self.hand.get_joint_positions_raw(fresh=False)
+        now = controller.time.monotonic()
+        return HandFeedbackSnapshot(positions, now - .02, now - .003, self.sequence)
+
+    def stop(self):
+        pass
+
+    def report(self):
+        pass
 
 
 def test_anydex_wrist_receives_only_site_calibration():
@@ -210,6 +234,7 @@ def test_run_records_camera_before_action_and_cleans_up(
             return next(keys)
 
     monkeypatch.setattr(controller, "RealSenseCamera", Camera)
+    monkeypatch.setattr(controller, 'HandFeedbackPoller', FakeHandFeedbackPoller)
     monkeypatch.setattr(controller, "Keyboard", Keyboard)
     monkeypatch.setattr(controller, "_make_hand", lambda _: hand)
     monkeypatch.setattr(controller, "_retargeter", lambda _: SimpleNamespace(
@@ -297,6 +322,8 @@ def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
     retargeter = SimpleNamespace(
         reset=lambda _: None,
         retarget=lambda _: call("retarget", (None, np.full(20, 42, dtype=int))),
+        last_diagnostics={**dict.fromkeys(HAND_TIMING_FIELDS, .001),
+                          'hand_retarget_numevals': 17},
     )
     frame = SimpleNamespace(
         wrist_position=np.zeros(3), wrist_quat=np.array([0, 0, 0, 1.0]),
@@ -327,6 +354,7 @@ def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
     monkeypatch.setattr(controller.time, "perf_counter", lambda: clock[0])
     monkeypatch.setattr(controller.time, "sleep", sleep)
     monkeypatch.setattr(controller, "Keyboard", Keyboard)
+    monkeypatch.setattr(controller, 'HandFeedbackPoller', FakeHandFeedbackPoller)
     monkeypatch.setattr(controller, "_make_arm", lambda _: arm)
     monkeypatch.setattr(controller, "_make_hand", lambda _: hand)
     monkeypatch.setattr(controller, "NeroIK", lambda **_: ik)
@@ -361,6 +389,17 @@ def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
             np.testing.assert_allclose(data[key], [duration] * 2, atol=1e-12)
         if has_hand:
             np.testing.assert_array_equal(data["hand_action_raw"], np.full((2, 20), 42))
+            np.testing.assert_array_equal(data['hand_retarget_numevals'], [17, 17])
+            for key in HAND_TIMING_FIELDS:
+                np.testing.assert_allclose(data[key], [.001, .001])
+            np.testing.assert_allclose(data['hand_feedback_query_age_s'], [.003, .003])
+            np.testing.assert_allclose(
+                data['hand_feedback_snapshot_read_at'] - data['hand_feedback_query_finished_at'],
+                data['hand_feedback_query_age_s'],
+            )
+        else:
+            np.testing.assert_array_equal(data['hand_retarget_numevals'], [-1, -1])
+            assert np.isnan(data['hand_feedback_query_finished_at']).all()
     metadata = json.loads(next(tmp_path.glob("*/metadata.json")).read_text())
     assert metadata["input_device"] == input_device
     assert metadata["input_side"] == metadata["quest_side"] == "right"
@@ -374,3 +413,5 @@ def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
     assert f"active_hz={1.0 / max(work_s, 0.05):.2f}" in output
     assert f"overruns={3 if work_s > 0.05 else 0}/3" in output
     assert "ms(mean/p95/max):" in output
+    if has_hand:
+        assert '[hand retarget] cycles=3 numevals(mean/p95/max)=17.0/17.0/17' in output

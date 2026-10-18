@@ -65,6 +65,14 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"hand.type and {section}.side must select the same side.")
     if float(config.get("control_hz", 0)) <= 0:
         raise ValueError("control_hz must be positive.")
+    for key, default in {'feedback_poll_hz': 20.0, 'feedback_max_age_s': .25}.items():
+        try:
+            value = float(config['hand'].setdefault(key, default))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f'hand.{key} must be finite and positive.') from exc
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f'hand.{key} must be finite and positive.')
+        config['hand'][key] = value
     camera = config.setdefault("camera", {})
     if not isinstance(camera, dict):
         raise ValueError("camera must be a mapping.")

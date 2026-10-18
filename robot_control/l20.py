@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
@@ -143,6 +145,10 @@ class LinkerHandL20:
         self._cleanup_api: Optional[Any] = None
         self._cleanup_bus_shutdown_complete = False
         self._cleanup_thread_shutdown_complete = False
+        # Preserve five-finger command groups while background queries run.
+        # Cached reads never take this lock or issue CAN requests.
+        self._position_io_lock = Lock()
+        self.last_position_send_wait_s = 0.0
 
     @staticmethod
     def _validate_join_timeout(value: Any) -> float:
@@ -465,7 +471,10 @@ class LinkerHandL20:
         SDK 可能吞掉低层 ``can.CanError``，此时本方法也可能正常返回。
         """
         raw = self._validate_raw_values(positions, _L20_POSITION_SHAPE, "position")
-        self._require_connected().finger_move(pose=raw.tolist())
+        started = time.perf_counter()
+        with self._position_io_lock:
+            self.last_position_send_wait_s = time.perf_counter() - started
+            self._require_connected().finger_move(pose=raw.tolist())
 
     def set_joint_positions_normalized(self, action: Any) -> None:
         """将归一化 20 槽位目标半向上转换后发送。
@@ -499,21 +508,27 @@ class LinkerHandL20:
         if np.any(values < -1.0) or np.any(values > 1.0):
             raise ValueError("L20 normalized position values must be in [-1, 1].")
         raw = np.floor((values + 1.0) * 127.5 + 0.5).astype(np.int64)
-        self._require_connected().finger_move(pose=raw.tolist())
+        started = time.perf_counter()
+        with self._position_io_lock:
+            self.last_position_send_wait_s = time.perf_counter() - started
+            self._require_connected().finger_move(pose=raw.tolist())
 
     def _get_joint_positions_raw(self, fresh: bool) -> np.ndarray:
         api = self._require_connected()
-        feedback = api.get_state() if fresh else api.get_state_for_pub()
-        if not fresh and feedback is None:
+        if fresh:
+            with self._position_io_lock:
+                feedback = api.get_state()
+        else:
+            # SDK 3.1.1 get_state_for_pub() still requests all five fingers and
+            # sleeps ~17 ms. Read only the G20 receive caches instead.
             try:
                 low_level = api.hand
                 cached_by_finger = [
-                    low_level.x41,
-                    low_level.x42,
-                    low_level.x43,
-                    low_level.x44,
-                    low_level.x45,
+                    list(getattr(low_level, name))
+                    for name in ('x41', 'x42', 'x43', 'x44', 'x45')
                 ]
+                for values in cached_by_finger:
+                    self._array_from_feedback(values, (6,), 'finger position', raw=True)
                 feedback = low_level.joint_state_to_cmd_state(cached_by_finger)
             except Exception as exc:
                 raise RuntimeError(
@@ -529,8 +544,8 @@ class LinkerHandL20:
         Parameters
         ----------
         fresh : bool, default=True
-            ``True`` 调用官方 ``get_state()`` 尝试请求状态；``False`` 调用
-            ``get_state_for_pub()`` 直接读取 SDK 缓存。``True`` 不代表新反馈代次。
+            ``True`` 调用官方 ``get_state()`` 尝试请求状态；``False`` 直接读取
+            G20 的五指接收缓存，不调用 ``get_state_for_pub()``。``True`` 不代表新反馈代次。
 
         Returns
         -------
@@ -569,9 +584,9 @@ class LinkerHandL20:
 
         Notes
         -----
-        先调用 ``LinkerHandApi.get_state_for_pub()``；固定 SDK 3.1.1 的 G20
-        实现遗漏返回值，得到 ``None`` 时读取其 ``x41``--``x45`` 缓存并调用
-        SDK 自己的 ``joint_state_to_cmd_state()`` 映射，不请求额外 CAN 更新。
+        读取 G20 的 ``x41``--``x45`` 缓存并调用 SDK 自己的
+        ``joint_state_to_cmd_state()`` 映射。不调用会隐式查询的
+        ``get_state_for_pub()``，不请求 CAN 或等待响应。
         """
         return self._get_joint_positions_raw(False)
 

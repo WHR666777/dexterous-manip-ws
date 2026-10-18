@@ -28,19 +28,36 @@ def test_invalid_rgbd_configuration_is_rejected(tmp_path, key, value):
         load_config(path)
 
 
-def test_pico_configuration_only_changes_input_and_device_calibration():
+def test_pico_and_quest_share_control_defaults():
     root = Path(__file__).resolve().parents[1]
     quest = load_config(root / "configs/quest3_nero_l20.yaml")
     pico = load_config(root / "configs/pico4_nero_l20.yaml")
-    for section in ("arm", "tracking", "safety", "camera", "recording"):
+    for section in ("arm", "tracking", "safety", "recording"):
         assert pico[section] == quest[section]
+    assert {k: v for k, v in pico['camera'].items() if k != 'enabled'} == {
+        k: v for k, v in quest['camera'].items() if k != 'enabled'
+    }
     assert pico["control_hz"] == quest["control_hz"]
     assert pico["hand"]["retarget_config"].endswith("pico4/pico4_linker_l20.yaml")
     for key in quest["hand"]:
         if key != "retarget_config":
             assert pico["hand"][key] == quest["hand"][key]
+    pico['calibration']['calibrated'] = False
     with pytest.raises(RuntimeError, match="R_base_pico4"):
         require_site_configuration(pico, control="both")
+
+
+@pytest.mark.parametrize('key,value', [
+    ('feedback_poll_hz', 0), ('feedback_poll_hz', float('nan')),
+    ('feedback_max_age_s', -1), ('feedback_max_age_s', float('inf')),
+])
+def test_invalid_hand_feedback_settings(tmp_path, key, value):
+    config = load_config(Path(__file__).resolve().parents[1] / 'configs/pico4_nero_l20.yaml')
+    config['hand'][key] = value
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match=f'hand.{key}'):
+        load_config(path)
 
 
 @pytest.mark.parametrize("section,key,value", [

@@ -216,19 +216,51 @@ def test_fresh_and_cached_positions_are_explicit_copies():
     assert hand.get_active_joint_indices() == L20_ACTIVE_POSITION_INDICES
 
 
-def test_g20_cached_position_recovers_from_sdk_missing_return_without_request():
-    """直接相信 G20 的 None 返回会让缓存观测永久不可用。"""
+def test_g20_cached_position_never_calls_sdk_query_or_pub_method():
     hand, api = connected_hand()
     api.cache_returns_none = True
 
     result = hand.get_cached_joint_positions_raw()
 
     assert result.tolist() == list(range(20))
-    assert api.cache_read_calls == 1
+    assert api.cache_read_calls == 0
     assert api.state_request_calls == 0
     assert api.hand.cached_mapping_calls == [[
         [0] * 6, [1] * 6, [2] * 6, [3] * 6, [4] * 6,
     ]]
+
+
+def test_cached_read_rejects_missing_finger_before_sdk_mapping():
+    hand, api = connected_hand()
+    api.hand.x43 = []
+    with pytest.raises(RuntimeError, match='position cache'):
+        hand.get_joint_positions_raw(fresh=False)
+    assert api.state_request_calls == api.cache_read_calls == 0
+    assert api.hand.cached_mapping_calls == []
+
+
+def test_cached_read_does_not_wait_for_running_query():
+    from threading import Event, Thread
+
+    hand, api = connected_hand()
+    entered, release = Event(), Event()
+
+    def query():
+        entered.set()
+        assert release.wait(1.)
+        return list(api.positions)
+
+    api.get_state = query
+    worker = Thread(target=lambda: hand.get_joint_positions_raw(fresh=True))
+    worker.start()
+    try:
+        assert entered.wait(1.)
+        np.testing.assert_array_equal(hand.get_joint_positions_raw(fresh=False), api.positions)
+        assert worker.is_alive()
+        assert api.cache_read_calls == 0
+    finally:
+        release.set()
+        worker.join(1.)
 
 
 def test_fresh_true_selects_request_path_without_claiming_a_new_generation():

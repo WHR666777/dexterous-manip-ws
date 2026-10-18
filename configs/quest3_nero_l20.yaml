@@ -53,6 +53,8 @@ hand:
   can_channel: can1
   speed: [160, 160, 160, 160, 160]
   max_raw_step: 10
+  feedback_poll_hz: 20
+  feedback_max_age_s: 0.25
   retarget_config: AnyDexRetarget/example/config/adaptive/quest3/quest3_linker_l20.yaml
 
 camera:
