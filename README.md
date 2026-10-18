@@ -16,7 +16,7 @@ python3 AnyDexRetarget/example/input/pico4_daemon.py
 
 ```bash
 python3 -m teleop.cli --config configs/pico4_nero_l20.yaml input-check
-python3 -m teleop.cli --config configs/pico4_nero_l20.yaml run --control both --execute --record-dir data/episodes
+python3 -m teleop.cli --config configs/pico4_nero_l20.yaml run --control both --execute --record-dir data/lerobot/nero_l20_act
 ```
 
 Pico 使用 TCP 63901 → 常驻 daemon → localhost 63902，复用 AnyDex 的 26→21 关节映射和 Pico/L20 adaptive 配置。腕部和手指来自同一条 JSON；腕部位置/旋转转换为 RH x前、y左、z上，手指保留原 Pico 重定向坐标。PXR 原生腕姿格式和坐标依据 [XRoboToolkit 发送实现](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/blob/main/Assets/Scripts/TrackingData.cs) 与 [PXR SDK 关节读取实现](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/blob/main/PICO%20Unity%20Integration%20SDK/Runtime/Scripts/Features/PXR_HandTracking.cs)。
@@ -185,7 +185,7 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-reset --execute
 # 先手，再臂，最后联合验证
 python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control hand --execute
 python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control arm --execute
-python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control both --execute --record-dir data/episodes
+python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control both --execute --record-dir data/lerobot/nero_l20_act
 ```
 
 运行键：
@@ -197,21 +197,26 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control both -
 
 录制按原控制循环采样，`control_hz` 默认仍为 20。L515 的硬件深度流为 30 FPS，后台读取后由每个有效控制周期选取最近帧；图像采集和写盘不在控制线程等待。`B` 开始一个 episode，重复按 `B` 不会清空正在录制的数据；`S` 等待已排队图像写完并保存，随后仍可遥操作或再次按 `B`。暂停期间不新增轨迹/视觉样本。
 
-运行时每约 2 秒有效控制时间输出一次 `[control timing]`（退出时也输出剩余统计），显示 IK、手部 retarget、两设备发送、seed/发送后反馈读取、轨迹追加和周期耗时的平均值/P95/最大值（ms），以及有效周期频率和超过名义周期的次数。无需开始录制即可观察；开始录制后，各阶段耗时同时存入 `trajectory.npz` 的 `timing_*_s` 字段，单位为秒。暂停和重锚定不混入有效周期统计，计时不改变控制调用顺序或限位逻辑；字段说明见 [数据格式](docs/dataset_schema.md)。
+运行时每约 2 秒有效控制时间输出一次 `[control timing]`（退出时也输出剩余统计），显示 IK、手部 retarget、两设备发送、seed/发送后反馈读取、轨迹追加和周期耗时的平均值/P95/最大值（ms），以及有效周期频率和超过名义周期的次数。无需开始录制即可观察；开始录制后，各阶段耗时同时存入 `diagnostics/episode-XXXXXX.npz` 的 `timing_*_s` 字段，单位为秒。暂停和重锚定不混入有效周期统计，计时不改变控制调用顺序或限位逻辑；字段说明见 [数据格式](docs/dataset_schema.md)。
 
-新 episode 的文件排布如下，旧录制文件不迁移：
+联合录制现在直接保存为 **LeRobot v3.0（LeRobot 0.4.4）**，供原版 ACT 使用：
 
 ```text
-data/episodes/
-└── episode_<UTC>/
-    ├── trajectory.npz
-    ├── metadata.json
-    └── camera/
-        ├── color.mp4
-        └── depth.h5
+data/lerobot/nero_l20_act/
+├── data/                       # 官方 Parquet：23 维状态、23 维目标
+├── videos/observation.images.front/  # 640×480 RGB，H.264
+├── meta/                       # 官方索引、任务、统计信息
+├── depth/episode-000000.h5      # 对齐 Z16 深度，uint16 无损
+└── diagnostics/episode-000000.{npz,json}  # 原始诊断、时钟、内参
 ```
 
-每条轨迹通过 `camera_frame_index` 关联 RGB 视频和深度数据集 `depth` 中同一索引的帧；过期/缺失帧记录为 `camera_valid=false`、索引 -1。Depth 保留无损 uint16，乘元数据中的 `depth_scale_m` 得到米。关闭相机时省略 `camera/` 与视觉字段。具体字段、时间戳和内参见 [数据格式](docs/dataset_schema.md)。
+采集继续使用原来的遥操作环境；按 `S` 时自动调用配置中的 `act` Python，使用官方 API 写入并重新加载检查。同一目录可以追加多个 episode，也可以退出后继续追加。RGB 在控制期间后台暂存为 PNG，只在保存时编码一次。保存后不需要手动转换。
+
+`observation.state` 是发送前反馈（NERO 7 维 rad＋L20 16 维 SDK raw）；`action` 是本轮最终下发目标。L20 仅取零起始索引 `0–10、15–19`，其余四个保留槽不参与训练。深度通过 episode 和 `frame_index` 对应 RGB，乘元数据中的 `depth_scale_m` 得到米；本次 ACT 只使用 RGB。
+
+两个配置已开启 L515。正式联合采集需要 `--control both`、完整 RGB-D 和有效关节反馈；缺帧或保存失败时保留临时源文件并报错，不生成填零的训练样本。暂存目录为输出目录旁的 `.nero_l20_act-staging/`。单独调试 `arm` 或 `hand` 的录制仍保存原诊断格式，写到输出目录旁的 `nero_l20_act_diagnostics/`，不混入联合训练集。旧 `data/episodes` 不转换、不修改；原 `replay_episode.py` 仍用于旧格式，不支持新 LeRobot 数据集。
+
+采集前把 `recording.lerobot.task` 改为本次任务描述；`repo_id` 是本地标识，不会触发上传。详细格式、离线 ACT 检查和训练命令见 [数据格式](docs/dataset_schema.md)。
 
 正常退出、Quest 超时、步长越界和程序异常都不会自动触发电子急停或 Nero disable。程序的职责是停止继续发送并断开；现场急停与故障处置仍由操作者执行。
 

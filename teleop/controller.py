@@ -498,8 +498,14 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
     tracker: WristTracker | None = None
     last_accepted_target: np.ndarray | None = None
     paused = True
+    record_root = Path(record_dir or config["recording"]["output_dir"])
+    lerobot_recording = config["recording"].get("lerobot")
+    if control != "both" and lerobot_recording is not None:
+        # Partial-device debug captures remain diagnostics, never joint ACT data.
+        record_root = record_root.parent / f"{record_root.name}_diagnostics"
+        lerobot_recording = None
     recorder = EpisodeRecorder(
-        record_dir or config["recording"]["output_dir"],
+        record_root,
         {"config": config["_path"], "control": control,
          "input_device": device_name, "input_side": input_config(config)["side"],
          "quest_side": input_config(config)["side"],
@@ -508,6 +514,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                             'timestamps': 'host query calls; no hardware generation'}
                            if hand_feedback is not None else None)},
         sample_hz=float(config["control_hz"]),
+        lerobot=lerobot_recording,
     )
     timing = _ControlTiming(float(config["control_hz"]))
 
@@ -622,7 +629,12 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 hand_diagnostics = dict.fromkeys(HAND_TIMING_FIELDS, np.nan)
                 hand_diagnostics['hand_retarget_numevals'] = -1
                 # Snapshot the observation before IK/actions; never wait for a camera frame here.
+                observation_timestamp = time.monotonic()
                 camera_frame = camera.get_latest() if camera is not None and recorder.active else None
+                observation_hand = (hand_feedback.get_latest()
+                                    if hand_feedback is not None and recorder.active
+                                    and lerobot_recording is not None else None)
+                observation_arm_joints = np.full(7, np.nan)
                 wrist_position, wrist_quaternion = anydex_wrist_to_base(
                     frame.wrist_position, frame.wrist_quat, calibration
                 )
@@ -638,6 +650,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     target_tcp_position = (target_transform @ flange_to_tcp)[:3, 3]
                     stage_started = time.perf_counter()
                     seed = arm.get_joint_positions()
+                    observation_arm_joints = seed.copy()
                     stage_times["timing_seed_feedback_s"] = time.perf_counter() - stage_started
                     stage_started = time.perf_counter()
                     solved = ik.solve(target_transform, seed)
@@ -698,6 +711,16 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 recorder.append(
                     camera_frame=camera_frame,
                     timestamp_monotonic=time.monotonic(),
+                    observation_timestamp_monotonic=observation_timestamp,
+                    observation_arm_joint_position=observation_arm_joints,
+                    observation_hand_position_raw=(observation_hand.positions_raw
+                                                   if observation_hand is not None else np.full(20, -1)),
+                    observation_hand_feedback_query_started_at=(
+                        observation_hand.query_started_at if observation_hand is not None else np.nan),
+                    observation_hand_feedback_query_finished_at=(
+                        observation_hand.query_finished_at if observation_hand is not None else np.nan),
+                    observation_hand_feedback_query_sequence=(
+                        observation_hand.query_sequence if observation_hand is not None else -1),
                     quest_wrist=np.concatenate((frame.wrist_position, frame.wrist_quat)),
                     quest_landmarks=frame.landmarks,
                     quest_received_at=frame.received_at,

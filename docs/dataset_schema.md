@@ -1,66 +1,111 @@
-# OP episode 数据格式
+# NERO＋L20 LeRobot 数据格式
 
-新录制的每个 episode 使用独立目录（`schema_version: 2`）；已有的 `.npz + .json` 文件不迁移：
+正式联合示教使用固定的 LeRobot 0.4.4 官方 API，生成 **LeRobotDataset v3.0**。旧 `data/episodes` 不迁移、不修改。遥操作仍在原环境运行，仅保存阶段调用 `act`；无需安装或调整两套环境的依赖。
 
-```text
-data/episodes/
-└── episode_<开始录制的UTC>/
-    ├── trajectory.npz
-    ├── metadata.json
-    └── camera/              # camera.enabled=true 时存在
-        ├── color.mp4
-        └── depth.h5
+## 配置与采集
+
+Pico、Quest 配置均已开启 L515，输出空间对齐的 640×480 RGB-D。相机仍为 30 FPS，录制跟随原 `control_hz: 20` 的有效周期。
+
+```yaml
+recording:
+  output_dir: data/lerobot/nero_l20_act
+  lerobot:
+    python: /home/lab404/anaconda3/envs/act/bin/python
+    repo_id: local/nero_l20_act
+    task: "NERO and L20 manipulation demonstration"
 ```
 
-`trajectory.npz` 按有效控制周期堆叠数值数组。`metadata.json` 保存配置路径、控制模式、手侧、名义采样频率、样本数、字段 shape，以及相机实际型号、序列号、内参、深度单位和图像文件路径。`B` 开始，`S` 保存；`Q`/正常异常收尾保存仍在进行的 episode。重复 `B` 不丢弃当前记录；空 episode 的 `samples` 为 0。
+采集前把 `task` 改为实际任务描述。`repo_id` 是本地标识，不会上传。同一目录支持连续记录和跨进程追加；版本、频率、机器人类型、通道顺序或手侧不一致时拒绝追加。
 
-新录制的 metadata 增加 `input_device`（`pico4` / `quest3`）和 `input_side`，并继续保存 `quest_side` 供现有回放检查手侧。NPZ 的 `quest_*` 字段名继续兼容原格式；实际来源由 `input_device` 区分，旧 episode 没有该字段时按原 Quest 语义读取。
+在项目根目录、原遥操作环境运行：
 
-## NPZ 字段
+```bash
+python3 -m teleop.cli --config configs/pico4_nero_l20.yaml run --control both --execute
+```
 
-| 字段 | 单样本 shape | 含义 |
+R 重锚定、B 开始、S 保存、Q 保存并退出保持原操作。重复 B 不清空数据；暂停时不增加样本；空录制不生成正式 episode。S 等待后台暂存完成，再调用 act 的官方写入器，完成并重新加载验证后返回。
+
+单设备 `--control arm/hand` 的诊断录制继续使用旧格式，位置为输出目录旁的 `nero_l20_act_diagnostics/`，不混入联合训练集。没有 `recording.lerobot` 的旧配置也保留原诊断录制接口。
+
+## 官方训练接口
+
+| 字段 | dtype／单样本 shape | 含义 |
 | --- | --- | --- |
-| `timestamp_monotonic` | scalar | PC 单调时钟，秒 |
-| `quest_wrist` | `(7,)` | AnyDex 输入适配后、现场标定前的 RH `xyz + xyzw`，Pico/Quest 均为 x前/y左/z上 |
-| `quest_landmarks` | `(21,3)` | 传入重定向的输入点：Quest 为 RH world landmarks，Pico 为原 Pico 坐标中相对腕部的点；单位 m |
-| `quest_received_at` | scalar | 完整帧形成时的单调时钟 |
-| `target_base_flange` | `(4,4)` | Nero base 到目标 flange；hand-only 时为 NaN |
-| `arm_action` | `(7,)` | 发送的 Nero joint target，rad；hand-only 为 NaN |
-| `hand_action_raw` | `(20,)` | 发送的 L20 raw target；arm-only 为 -1 |
-| `arm_joint_position` | `(7,)` | Nero 反馈，rad |
-| `arm_joint_torque` | `(7,)` | Nero 反馈，N·m |
-| `arm_tcp_pose` | `(6,)` | `[m,m,m,rad,rad,rad]` |
-| `hand_position_raw` | `(20,)` | L20 缓存反馈；含 11–14 保留槽 |
-| `arm_sent_at` | scalar | Nero 调用返回时的单调时钟 |
-| `hand_sent_at` | scalar | L20 调用返回时的单调时钟 |
-| `timing_ik_s` | scalar | `ik.solve()` 耗时，秒，不包含 seed 反馈读取 |
-| `timing_hand_retarget_s` | scalar | 手部 retarget（包含 raw 映射和 slew）耗时，秒 |
-| `timing_arm_send_s` | scalar | Nero `move_js()` 调用及发送时间戳记录耗时，秒 |
-| `timing_hand_send_s` | scalar | L20 raw 命令调用及发送时间戳记录耗时，秒 |
-| `timing_seed_feedback_s` | scalar | IK 前读取机械臂关节反馈的耗时，秒 |
-| `timing_feedback_s` | scalar | 发送后顺序读取机械臂位置、扭矩、TCP 和手部缓存反馈的总耗时，秒 |
-| `camera_frame_index` | scalar | 零起始的存储帧索引；RGB 视频与 Depth 共用；缺失为 -1 |
-| `camera_valid` | scalar | 当前行是否存在可引用的 RGB-D |
-| `camera_timestamp_monotonic` | scalar | 主机收到相机帧组时的单调时钟，秒；对齐处理之前记录 |
-| `camera_color_timestamp_ms` | scalar | SDK 彩色帧时间戳，毫秒 |
-| `camera_depth_timestamp_ms` | scalar | SDK 深度帧时间戳，毫秒 |
-| `camera_color_frame_number` | scalar | 相机原生彩色帧号 |
-| `camera_depth_frame_number` | scalar | 相机原生深度帧号 |
-| `camera_color_timestamp_domain` | scalar string | SDK 彩色帧时钟域 |
-| `camera_depth_timestamp_domain` | scalar string | SDK 深度帧时钟域 |
+| `observation.state` | float32 `(23,)` | 发送前实际反馈：NERO 7＋L20 16 |
+| `action` | float32 `(23,)` | 本轮传入发送函数的位置目标：NERO 7＋L20 16 |
+| `observation.images.front` | video `(480,640,3)` | RGB，H.264；加载后为 `(3,480,640)` float32 |
 
-发送时间不代表设备真正执行时间；L20 SDK 也不提供可靠的反馈 generation。训练前应按字段掩码约定处理 NaN/-1，不要把 arm-only 或 hand-only 的占位值当观测。
+前七维为 `nero.joint1` 至 `nero.joint7`，单位 rad。后十六维按现有 `L20_ACTIVE_POSITION_INDICES`，即零起始 SDK 索引 `0–10、15–19`；排除保留槽 `11–14`。L20 保持 `0–255`，保存时不归一化；ACT 使用官方数据集统计归一化。状态和动作在 `meta/info.json` 中使用相同的 names 顺序。
 
-`timing_*_s` 是新增的可选诊断字段，旧 episode 不补写；使用 `perf_counter()` 测量主机端调用耗时，未启用的阶段为 0，不代表设备实际运动时间。终端无论是否录制，均按约 2 秒累计有效控制周期输出一次 `[control timing]`，退出时输出剩余统计。各项以毫秒显示 mean/P95/max；`record` 是轨迹追加/图像入队耗时（不包含后台编码写盘），`work` 是当前周期到追加完成的耗时（不含周期休眠），`cycle` 包含周期休眠。`active_hz` 按这些完整有效周期的耗时计算，排除暂停、重锚定和失败周期，也不包含汇总打印自身的耗时；`overruns` 统计 `work` 超过名义周期的次数。计时保留原动作顺序、反馈读取、异常处理和周期休眠逻辑。
+NERO 状态复用本周期 IK 前已读取的 seed；L20 状态取发送前已有后台反馈缓存，不新增硬件查询。原发送后 `arm_joint_position`、`hand_position_raw` 继续作为诊断，不能替代发送前状态。动作来自原重定向、限制和 slew 之后的目标。发送调用时间不代表实际执行时刻或执行成功证明。
 
-`camera_*` 字段仅在启用相机时存在。相机帧在计算/发送动作之前选择，机器人反馈仍在发送之后读取，原有字段语义不变。相机缺失或超过 `camera.max_age_s` 时，该行不写图像，索引/原生帧号为 -1、时间戳为 NaN、时钟域为空字符串。若设备重复提供同一原生帧，不伪造新设备帧号；存储仍按每条有效视觉样本追加一组图像。
+索引、任务、边界和统计由官方生成。`timestamp = frame_index / fps` 是名义采样索引时间，不是真实曝光或执行时间；真实时钟另存于诊断，没有重采样或改变控制频率。未来动作块和 `action_is_pad` 由加载器按 episode 边界生成。
 
-## 图像格式和时间对应
+## 文件结构与深度对应
 
-- `camera/color.mp4`：mp4v 有损彩色视频，默认 640×480，保存名义帧率等于 `control_hz`。相机封装提供 RGB8，送入 OpenCV 编码前转换为 BGR；使用 OpenCV 解码时返回 BGR，训练需要 RGB 时应转换。
-- `camera/depth.h5`：数据集 `depth`，shape 为 `(K, H, W)`，dtype 为 `uint16`，逐帧 chunk、LZF 无损压缩。深度已对齐到彩色相机网格，米数为 `depth_raw * metadata["camera"]["depth_scale_m"]`，原始 0 表示无有效深度。
-- `K` 为实际保存的 RGB-D 帧组数，可能小于轨迹行数 `N`。第 `i` 行先检查 `camera_valid[i]`，再用 `k = camera_frame_index[i]` 读取视频第 `k` 帧和 `depth[k]`。禁止将 -1 当作最后一帧读取。
+```text
+data/lerobot/nero_l20_act/
+├── data/chunk-000/file-000.parquet
+├── videos/observation.images.front/chunk-000/file-000.mp4
+├── meta/
+│   ├── info.json
+│   ├── stats.json
+│   ├── tasks.parquet
+│   ├── episodes/chunk-000/file-000.parquet
+│   └── recording.json
+├── depth/episode-000000.h5
+└── diagnostics/
+    ├── episode-000000.npz
+    └── episode-000000.json
+```
 
-MP4 的播放时间不作为真实采集时间：暂停、循环超时、缺失帧会造成不等时间间隔，训练应使用 NPZ 时间戳。L515 原生 30 FPS，录制取帧跟随既有控制循环，默认目标 20 Hz；不保证控制循环始终达到名义频率。SDK 时间戳保留其时钟域，不直接与 PC 单调时钟相减。RGB-D 对齐是空间对齐，不等于与机器人曝光/执行时刻硬同步。
+官方负责分片；不要假定一个 MP4/Parquet 文件只有一个 episode。
 
-相机原生 RGB 为 960×540，深度为 640×480；深度先对齐到彩色，随后共同中心裁剪、缩放成配置的保存尺寸（默认 640×480）。彩色使用 area，深度使用 nearest-exact，不对距离值做线性插值。相机元数据包含适用于输出图像的 `color_intrinsics`、`aligned_depth_intrinsics`，以及 `native_color_intrinsics`、`native_depth_intrinsics`、`color_crop_xywh`、`resize`、`depth_scale_m` 和 `depth_aligned_to: color`。各组内参包含 fx/fy/ppx/ppy、畸变模型和系数；裁剪缩放使用像素中心映射 `(p - crop_origin + 0.5) * scale - 0.5` 换算主点，焦距乘以 scale。仓库没有相机相对机械臂的外参，不能据此直接把深度点云转换到 Nero base；需要三维机器人坐标时再做现场标定。
+`depth/episode-E.h5` 的数据集 `depth` 为 `(N,480,640)` uint16、逐帧 LZF 无损压缩。episode E 的 `frame_index=i` 对应 `depth[i]`，与该训练样本的 RGB 对齐。深度原值乘诊断 JSON 的 `camera.depth_scale_m` 得到米；0 表示无效深度，65535 等原值完整保留。深度不属于本次 ACT 输入，不走 RGB 有损编码。
+
+诊断 JSON 保留型号、序列号、输出及原生内参、裁剪、缩放和深度单位。相机实现沿用原方案：原生 RGB 960×540、深度 640×480，先对齐至彩色，再共同中心裁剪/缩放；RGB 用 area，深度用 nearest-exact。空间对齐不等于机器人与相机硬件同步。
+
+诊断 NPZ 保留原有腕姿、landmarks、目标变换、力矩、TCP、完整 20 槽动作/反馈、`timing_*_s` 和 `camera_*` 字段；新增：
+
+| 字段 | 含义 |
+| --- | --- |
+| `observation_timestamp_monotonic` | 开始选择本轮观测的主机单调时钟 |
+| `observation_arm_joint_position` | IK seed 独立副本，7 维 rad |
+| `observation_hand_position_raw` | 发送前手部缓存快照，20 槽 |
+| `observation_hand_feedback_query_started_at/finished_at/sequence` | 上述快照的后台查询时间及序号 |
+
+JSON 的 `actual_hz` 和 `sample_interval_s` 按真实观测时间计算，能识别控制变慢和停顿。查询序号不是硬件反馈 generation。原生相机帧号可以重复，不伪造帧号。
+
+## 保存失败
+
+联合录制暂存在输出目录旁的 `.nero_l20_act-staging/episode_<UTC>/`，包含 RGB PNG、深度 HDF5、数值轨迹及元数据。RGB 只在官方保存阶段编码一次。
+
+缺图、非法关节值、队列满或写盘失败时不填零、不删行冒充完整 episode。保留暂存源和 `export.log`；成功并重新加载验证后清理暂存。若官方写入中断，根目录保留 `.recording-in-progress.json`，后续追加会拒绝继续；应先按标记的源目录检查或恢复，不能直接删除标记后盲目重试。
+
+## 离线 ACT 检查与训练
+
+在 act 环境、项目根目录执行，沿用交接文档的系统 libffi 修复：
+
+```bash
+conda activate act
+export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libffi.so.7${LD_PRELOAD:+:$LD_PRELOAD}"
+python scripts/check_lerobot_act.py data/lerobot/nero_l20_act
+```
+
+该检查只读取本地数据，不连接机器人、不下载权重；用实际 640×480 RGB、23 维状态和 60 步动作块，检查前向、反向、梯度和 `(1,60,23)` 输出。可加 `--device cpu/cuda`。
+
+最小训练命令（按资源调整训练参数）：
+
+```bash
+lerobot-train \
+  --dataset.repo_id=local/nero_l20_act \
+  --dataset.root="$PWD/data/lerobot/nero_l20_act" \
+  --policy.type=act \
+  --policy.chunk_size=60 \
+  --policy.n_action_steps=20 \
+  --policy.pretrained_backbone_weights=null \
+  --policy.push_to_hub=false \
+  --output_dir=outputs/nero_l20_act
+```
+
+旧 `scripts/replay_episode.py` 仍只支持旧诊断格式；本次未增加新格式实机回放或 ACT 实机推理。

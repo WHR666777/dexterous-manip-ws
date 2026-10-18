@@ -17,6 +17,16 @@ def test_old_configuration_keeps_camera_optional(tmp_path):
     assert load_config(path)["camera"]["enabled"] is False
 
 
+@pytest.mark.parametrize("key,value", [("task", ""), ("python", ""), ("repo_id", "no_namespace")])
+def test_invalid_lerobot_settings(tmp_path, key, value):
+    config = load_config(Path(__file__).resolve().parents[1] / "configs/pico4_nero_l20.yaml")
+    config["recording"]["lerobot"][key] = value
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="recording.lerobot"):
+        load_config(path)
+
+
 @pytest.mark.parametrize("key,value", [("fps", 20), ("align_depth_to_color", False),
                                       ("serial", 1234), ("max_age_s", float("nan"))])
 def test_invalid_rgbd_configuration_is_rejected(tmp_path, key, value):
@@ -33,14 +43,17 @@ def test_pico_and_quest_share_control_defaults():
     quest = load_config(root / "configs/quest3_nero_l20.yaml")
     pico = load_config(root / "configs/pico4_nero_l20.yaml")
     for section in ("arm", "tracking", "safety", "recording"):
-        assert pico[section] == quest[section]
+        # Site CAN interface names intentionally differ between the two setups.
+        assert {k: v for k, v in pico[section].items() if k != "can_channel"} == {
+            k: v for k, v in quest[section].items() if k != "can_channel"
+        }
     assert {k: v for k, v in pico['camera'].items() if k != 'enabled'} == {
         k: v for k, v in quest['camera'].items() if k != 'enabled'
     }
     assert pico["control_hz"] == quest["control_hz"]
     assert pico["hand"]["retarget_config"].endswith("pico4/pico4_linker_l20.yaml")
     for key in quest["hand"]:
-        if key != "retarget_config":
+        if key not in ("retarget_config", "can_channel"):
             assert pico["hand"][key] == quest["hand"][key]
     pico['calibration']['calibrated'] = False
     with pytest.raises(RuntimeError, match="R_base_pico4"):

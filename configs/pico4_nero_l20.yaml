@@ -58,7 +58,7 @@ hand:
   retarget_config: AnyDexRetarget/example/config/adaptive/pico4/pico4_linker_l20.yaml
 
 camera:
-  enabled: false
+  enabled: true
   model: L515
   serial: ""
   width: 640
@@ -68,4 +68,8 @@ camera:
   max_age_s: 0.25
 
 recording:
-  output_dir: data/episodes
+  output_dir: data/lerobot/nero_l20_act
+  lerobot:
+    python: /home/lab404/anaconda3/envs/act/bin/python
+    repo_id: local/nero_l20_act
+    task: "NERO and L20 manipulation demonstration"

@@ -65,6 +65,19 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"hand.type and {section}.side must select the same side.")
     if float(config.get("control_hz", 0)) <= 0:
         raise ValueError("control_hz must be positive.")
+    recording = config["recording"]
+    lerobot = recording.get("lerobot")
+    if lerobot is not None:
+        if not isinstance(lerobot, dict):
+            raise ValueError("recording.lerobot must be a mapping.")
+        for key in ("python", "repo_id", "task"):
+            if not isinstance(lerobot.get(key), str) or not lerobot[key].strip():
+                raise ValueError(f"recording.lerobot.{key} must be a nonempty string.")
+        if len(lerobot["repo_id"].split("/")) != 2 or not all(lerobot["repo_id"].split("/")):
+            raise ValueError("recording.lerobot.repo_id must have the form namespace/name.")
+        hz = float(config["control_hz"])
+        if not np.isfinite(hz) or hz != int(hz):
+            raise ValueError("LeRobot recording requires a positive integer control_hz.")
     for key, default in {'feedback_poll_hz': 20.0, 'feedback_max_age_s': .25}.items():
         try:
             value = float(config['hand'].setdefault(key, default))
