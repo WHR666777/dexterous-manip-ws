@@ -4,31 +4,68 @@
 
 在没有其他控制程序运行时，用系统工具确认 Nero 与 L20 各自对应的 SocketCAN 通道和 bitrate。将结果写入 `configs/quest3_nero_l20.yaml`，不要依赖设备插入顺序猜测。先分别运行 `preflight --control arm` 和 `preflight --control hand`，再运行 `both`。
 
-## 2. 坐标方向标定
 
-Quest 原始 Unity 坐标由 AnyDex 的 `example/input/quest3.py` 转换到右手系。集成控制不会再次执行该转换。`R_base_quest` 只描述 AnyDex 右手系到 Nero base 方向的旋转：
+## 5. RGB-D 相机外参与拈布虚拟 TCP 联合标定
 
-```text
-p_base = R_base_quest · p_anydex_rh
-R_base_wrist = R_base_quest · R_anydex_rh_wrist
+入口为 `scripts/calibrate_tcp_camera.py`，分为采集、人工点选、离线求解三步。使用现有 teleop 环境及 `vision` 依赖（OpenCV、RealSense）。采集沿用原来的使能、起始姿态、工作区与 IK 检查；先启动 Pico daemon，确保没有其他设备控制程序占用机械臂或相机。
+
+### 坐标定义
+
+- `base` 是 Nero URDF 的 `base_link`，`flange` 是 `link7`，`camera` 是对齐 RGB-D 使用的彩色相机光学坐标系。
+- TCP 原点是固定闭合手型下的拇指、食指接触点。默认固定 replay CSV 的最后一帧，其余三指张开；可通过 `--hand-frame` 指定其他帧，编号从 0 开始。整个采集期间 P/O 不会改变手型。
+- 参考 roll、pitch 读取 `arm.wrist_only_roll_pitch_deg`。假设 Nero base 的 +Z 实际竖直向上，在参考姿态下定义 TCP +Z 向下、+X 沿法兰 +Z 的水平投影、+Y = +Z × +X。参考 yaw 取 0 即可，算出的法兰到 TCP 固定旋转不受参考 yaw 影响。
+- **TCP 固定在手上。** 采集时允许腕部倾斜，TCP 的轴随手转动；不会在每张图片中重新把 TCP Z 轴设成向下。倾斜采样不改变之后使用的 replay 抓姿。
+
+### 采集
+
+```bash
+python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-01 \
+  --config configs/pico4_nero_l20.yaml --execute
 ```
 
-现场至少用三个不共线的小方向动作确认正负方向。将正交、行列式为 `+1` 的 3×3 矩阵写入 YAML 后，才把 `calibrated` 改为 `true`。
+输入现有的 `EXECUTE` 确认后，机械臂会先到配置中的起始姿态，手指设为所选 replay 帧。与 `wrist-only` 不同，标定模式允许通过 Pico 控制完整腕部旋转，包括 roll、pitch。
 
-绝对平移不需要测量：按 `R` 时，当前 Quest 腕位置与当前七轴反馈经 URDF/FK 得到的 Nero flange 被相对锚定。旋转也以按 `R` 时的腕姿作为零残差；SDK flange 保留给 preflight 做独立一致性检查，不作为 IK 锚点。
+1. 按 `R` 锚定，通过 Pico 改变位置和倾斜角度。
+2. 保持姿态不动，按 `C` 停止发送后续运动目标。程序等待七轴实际反馈在 0.4 s 内保持稳定（范围 0.002 rad），然后保存一组 RGB-D、实际关节反馈、URDF/FK 和时间信息。停止发送不是急停；最后目标可能仍在执行，所以必须等待反馈稳定。
+3. 采样成功或失败后都保持暂停。按 `R` 重新锚定，再移动到下一姿态；失败也可保持不动再按 `C`。
+4. 建议采集 15～25 组，覆盖不同位置、高度、yaw，并加入绕不同方向的 roll/pitch 倾斜。只改变位置和 yaw 无法唯一分离相机平移与 TCP 偏移。至少需要 6 组，求解器还会检查可观测性。
+5. 按 `Q` 退出。相机、基座和手的安装关系在整个采集中保持不变；数据目录必须是新目录。
 
-## 3. URDF/FK 一致性
+这里只关联静止姿态下的图像和关节反馈，记录的是主机接收/查询时间，不声称硬件同步。
 
-`preflight --control arm` 用当前关节反馈做 FK，并与 SDK flange 反馈比较。默认阈值为 10 mm / 5°。超出时优先检查 URDF 版本、关节顺序/符号、flange 定义和 SDK 姿态欧拉约定；不要放宽阈值掩盖模型不一致。
+### 人工点选
 
-## 4. 分级运动验证
+```bash
+python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-01 --scale 2
+```
 
-1. 运行 `input-check`，只动手和腕，确认 TCP 持续、side 正确、L20 raw 数值随手指合理变化。
-2. 分别执行两项 preflight，确认反馈稳定且无其他控制者。
-3. 将 Nero 放到确认过的起点，用 `record-start-pose` 保存七轴 rad；检查 YAML 顺序是 `joint1`–`joint7`。
-4. 仅运行 `--control hand`，使用最慢、最小范围动作检查 20 槽映射。
-5. 在 Nero 已通过 `arm-enable --execute` 或现场流程使能，并有人监护、急停可达时，仅运行 `--control arm`；确认它先低速到达记录姿态，随后保持暂停，按 `R` 后再做毫米级位移和很小旋转。
-6. 确认 1 cm / 5° 目标步门、10° 遥操作关节变化限制、TCP 立方体边界和 Quest 超时锁定均符合预期；首次检查立方体时逐轴缓慢靠近边界，并确认越界目标未发送。
-7. 最后才运行 `--control both`，先不录制，再按 `B/S` 录短 episode 并离线检查字段。
+每张 RGB 图上左键选择**同一个物理接触点**。Enter/N 保存并下一张，S 跳过，A 返回上一张，D 删除当前标注，Q/Esc 退出；已经确认的标注保存在 `annotations.json`，可再次打开修改。
 
-初次实机验证期间不要提高 20 Hz、步长或 L20 raw slew；这些值只有在记录到现场证据后才能调整。
+程序使用所点像素的对齐深度和保存的相机内参反投影，不用邻近像素填补无效深度。点选处深度为零时不能确认。接触点必须可见；若像素深度来自前侧手指表面或背景，就不能当作被遮挡接触点的位置。
+
+### 求解与结果
+
+```bash
+python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-01
+```
+
+联合最小化三维位置误差：
+
+```text
+R_base_camera * point_camera_i + t_base_camera
+    = R_base_flange_i * tcp_offset_flange + t_base_flange_i
+```
+
+相机外参 6 个自由度与 TCP 原点在法兰中的 3 个坐标由数据求解；法兰到 TCP 的旋转由参考姿态和坐标定义计算。求解不会自动删除样本，会输出各样本残差、RMS、最大误差和几何条件数。姿态退化或拟合 RMS 超过默认 5 mm 时拒绝生成新结果；`--max-rms-mm` 可显式设置拟合阈值。已有结果不会被失败的求解覆盖。拟合残差不代表独立的实机定位精度。
+
+结果默认写入会话目录的 `calibration.yaml`，也可用 `--output` 指定路径，包含：
+
+- `base_from_camera` / `camera_from_base`：相机与 Nero base 的变换及逆变换。
+- `flange_from_tcp` / `tcp_from_flange`：TCP 与法兰的完整固定变换及逆变换。
+- 闭合手型 raw 值、参考 roll/pitch、样本名称和拟合误差。
+
+`a_from_b` 表示将 B 坐标转换到 A 坐标，平移单位是米。标定程序不改写运行配置；agent 配置通过 `calibration.file` 引用结果 YAML、通过 `calibration.arm` 指定对应机械臂。路径相对于配置文件所在目录，也支持绝对路径。
+
+当前 `configs/cloth_agent.yaml` 引用 `pinch-01/calibration_candidate.yaml` 的右臂候选结果。启动时自动读取 `base_from_camera`、`flange_from_tcp`、`hand_pose_raw` 和 `reference_roll_pitch_deg`，计算任务坐标系中的相机外参、TCP 参考朝向和工作区边界。重新标定后只需改 `calibration.file` 并启动新任务，不必复制矩阵；执行中的任务不会热更新标定。CAN 通道、官方张开预设、规划限值仍由运行配置提供。当前任务坐标系取该 Nero base，另一条臂的基座关系仍需独立确定。
+
+相机三维关键点标记为 `frame: camera` 时会自动转入任务坐标系，也可通过 `geometry("camera_to_task", points=...)` 或 `geometry("pixel_to_task", pixel=..., depth_m=..., intrinsics=...)` 显式转换。

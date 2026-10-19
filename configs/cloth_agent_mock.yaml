@@ -1,0 +1,56 @@
+# Synthetic two-arm configuration for demo/tests; never connects devices.
+backend: mock
+control_hz: 20
+output_dir: data/agent_runs
+folds: 2
+motion:
+  joint_tolerance_rad: 0.02
+  completion_timeout_s: 30.0
+  max_ik_step_rad: 0.3345329252
+  joint_step_rad: 0.08
+  position_step_m: 0.005
+  rotation_step_rad: 0.034906585
+mock:
+  initial_joints: [0.2, -0.3, 0.15, 1.0, -0.1, 0.2, -0.4]
+  velocity_limits: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+  acceleration_limits: [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
+  workspace: [[-2, -2, -2], [2, 2, 2]]
+observations:
+  # Optional RGB-D episode directory (existing trajectory.npz/metadata.json format).
+  recorded_episode: null
+  # Optional externally published JSON: {timestamp_monotonic, frame: task, points: {id: [x,y,z]}}.
+  keypoints_file: null
+  keypoints_max_age_s: 0.25
+  task_from_camera: null
+camera:
+  enabled: false
+  model: L515
+  serial: ''
+  width: 640
+  height: 480
+  fps: 30
+  max_age_s: 0.25
+arms:
+  left:
+    can_channel: null
+    hand_can_channel: null
+    task_from_base: null
+    flange_from_tcp: null
+    velocity_limits: null
+    acceleration_limits: null
+    workspace: null
+    hand_poses: {open: null, closed: null}
+  right:
+    can_channel: null
+    hand_can_channel: null
+    task_from_base: null
+    flange_from_tcp: null
+    velocity_limits: null
+    acceleration_limits: null
+    workspace: null
+    hand_poses: {open: null, closed: null}
+codex:
+  executable: codex
+  model: null
+  extra_args: []
+  request_timeout_s: 300

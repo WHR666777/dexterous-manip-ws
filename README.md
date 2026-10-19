@@ -237,6 +237,19 @@ python3 -m teleop.cli --config configs/pico4_nero_l20.yaml \
 
 输入超时、IK 失败或工作区越界时，两设备按原规则暂停，手指重播同时取消。按 `R` 恢复时保持最后一次发送的手指目标，需要再次按 `P` 才重播，或按 `O` 回到初始姿态。`B/S/Q` 仍用于录制、保存和退出；录制的手部 action 为本模式实际发送的目标。省略 `--hand-mode wrist-only` 时仍使用原来的完整手部跟踪。
 
+## RGB-D 与拈布 TCP 联合标定
+
+保持 replay 闭合手型，通过 Pico 改变位置和完整腕部姿态，按 `C` 保存静止后的 RGB-D 与 Nero FK；退出采集后人工点选接触点，再联合求解相机外参与 TCP 偏移：
+
+```bash
+python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-01 \
+  --config configs/pico4_nero_l20.yaml --execute
+python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-01 --scale 2
+python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-01
+```
+
+默认固定 replay 最后一帧，可用 `--hand-frame` 选择。采集用 `R` 锚定/恢复、`C` 暂停并等待反馈稳定后采样、`Q` 退出；必须包含不同 roll/pitch 倾斜，不能只改变位置和 yaw。结果写入会话目录的 `calibration.yaml`，包含 `base_from_camera` 和完整的 `flange_from_tcp`。坐标约定、点选要求及结果使用见 [标定说明](docs/calibration.md#5-rgb-d-相机外参与拈布虚拟-tcp-联合标定)。
+
 ## 轨迹重放与视频查看
 
 让 Nero 重现录制的实际关节轨迹，并同步显示当时的 RGB-D（替换为实际 episode 目录）：
@@ -294,7 +307,17 @@ python3 examples/l20_example.py --can-channel can1 --hand-type right
 python3 -m pip install -e '.[agent]'
 ```
 
-默认 `configs/cloth_agent.yaml` 使用假设备。运行两个阶段和一次注入异常的演示：
+默认任务配置 `configs/cloth_agent.yaml` 已填写当前右臂的实机参数：`can_arm_a` / `can_hand_a`、L515 序列号和官方张开手型；相机外参、虚拟 TCP、闭合手型和参考朝向在启动时从标定文件读取。任务坐标系为该 Nero base。另一条臂尚未标定，当前只配置右臂。
+
+重新标定后只需替换下面的文件路径。相对路径以配置文件所在目录为基准，也支持绝对路径；新任务启动时读取，不在执行途中热更新：
+
+```yaml
+calibration:
+  file: ../data/calibration/pinch-01/calibration_candidate.yaml
+  arm: right
+```
+
+`demo` 自动使用独立的 `configs/cloth_agent_mock.yaml`。运行两个阶段和一次注入异常的演示：
 
 ```bash
 # 确定性驱动：不调用模型、不连接 CAN 或相机
@@ -309,8 +332,8 @@ python3 -m cloth_agent.cli demo --with-codex
 启动自定义任务，或运行已有的普通 Python 子任务脚本：
 
 ```bash
-python3 -m cloth_agent.cli run --task "将平铺的矩形抹布折叠两次" --folds 2
-python3 -m cloth_agent.cli script my_subtask.py --params my_params.json
+python3 -m cloth_agent.cli run --task "将平铺的矩形抹布折叠两次" --folds 2 --execute
+python3 -m cloth_agent.cli script my_subtask.py --params my_params.json --execute
 ```
 
 `run` 驱动 Codex；`script` 直接启动现有程序，并在其请求恢复时从终端接收 JSON 回复。脚本可以导入以下接口：
@@ -324,11 +347,13 @@ python3 -m cloth_agent.cli script my_subtask.py --params my_params.json
 - `request_agent(reason, observation=None)`：暂停保持后发送反馈，在原 Python 进程中等待恢复参数。回复必须包含 `action: continue/abort`，其余字段由程序既有恢复分支约定。
 - `wait_next_observation(period_s=.05)`、`report_result(status="completed", **result)` 和 `geometry(operation, **values)`：监督循环、结果报告及几何计算辅助工具。
 
+`geometry("camera_to_task", points=...)` 使用已配置的相机外参转换相机三维点；`geometry("pixel_to_task", pixel=[u, v], depth_m=z, intrinsics=...)` 先反投影再转换到任务坐标系。深度和内参必须来自所点选的同一份 RGB-D 观测，深度单位为米。原有 `pixel_to_point` 仍返回相机坐标。观测中包含 `images.task_from_camera` 和该臂的 `reference_tcp_rotation`；后者是 replay 抓姿对应的 TCP 参考朝向，可绕任务竖直轴调整 yaw。
+
 运动句柄提供 `status()`、`done()`、`wait()` 和 `pause_and_hold(reason)`。`done()` 表示运动已停止运行，包括正常完成、暂停和失败；通过 `wait()` 确认结果，暂停与失败分别抛出 `MotionInterrupted`、`MotionFailed`。这些异常可直接从工具模块导入。后台执行器持续运行，脚本等待或读取观测不会停止轨迹推进；调用暂停保持后原轨迹不再推进，已有恢复分支需要从实际状态规划新的轨迹。
 
 每个任务的源码、初始参数、轨迹、RGB-D 快照、`events.jsonl`、子进程输出和结果保存在 `data/agent_runs/`。真实 Codex 运行还保存 `thread.json`。同一任务中的活动程序不能替换；程序未处理的异常或未等待运动便退出会触发暂停收尾并结束该任务，不能提交改写后的程序继续尝试。
 
-关键点模块暂未开发。`observations.keypoints_file` 可接收上游原子更新的 JSON，坐标系为 `task`、单位米，时间戳采用同一主机的单调时钟；缺失或过期返回 `null`：
+关键点模块暂未开发。`observations.keypoints_file` 可接收上游原子更新的 JSON，坐标系为 `task` 或 `camera`、单位米，时间戳采用同一主机的单调时钟；`camera` 三维点会使用 `task_from_camera` 自动转换，已经是 `task` 的点保持原值。缺失或过期返回 `null`：
 
 ```json
 {"timestamp_monotonic": 12345.0, "frame": "task", "points": {"corner": [0.1, 0.2, 0.3]}}
@@ -336,7 +361,7 @@ python3 -m cloth_agent.cli script my_subtask.py --params my_params.json
 
 `observations.recorded_episode` 可指定现有 `data/episodes/episode_...` 格式的 RGB-D 记录用于假设备测试，需安装视觉依赖；录制输入不用于实机运动。默认假设备图像明确标为 `synthetic`，没有伪造布料关键点。
 
-手型、TCP 和安装外参等实际参数仍留空。配置改为 `backend: hardware` 后，参数未填全会在连接设备前拒绝运行；实机入口还要求 `--execute` 和原有 `EXECUTE` 确认。当前暂停保持策略、抓布及折布效果尚未进行实机验证。
+当前实机配置引用 `pinch-01/calibration_candidate.yaml` 的候选标定（拟合 RMS 7.142 mm）。关节规划速度/加速度软件上限为 0.2 rad/s、0.4 rad/s²；`workspace.start_pose_file` 和 `workspace.cube_side_m` 定义工作区，启动时按起始关节姿态 FK 和所读 TCP 自动计算 0.9 m 立方体边界，同一任务中保持固定。实机入口仍要求 `--execute` 和原有 `EXECUTE` 确认。关键点输入、实际定位精度、暂停保持及抓布/折布效果仍待现场验证；离线测试不连接设备。需要纯软件任务时显式使用 `--config configs/cloth_agent_mock.yaml`。
 
 ## 目录
 

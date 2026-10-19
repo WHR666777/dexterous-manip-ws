@@ -87,6 +87,8 @@ class HardwareBackend:
                 hand = LinkerHandL20(hand_type=name, can_channel=settings["hand_can_channel"])
                 self.hands[name] = hand
                 hand.connect()
+                if settings.get("hand_speed") is not None:
+                    hand.set_speed(settings["hand_speed"])
         except BaseException:
             self.close()
             raise

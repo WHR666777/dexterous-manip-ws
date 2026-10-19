@@ -6,13 +6,13 @@ import argparse
 import json
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG, load_config, validate_hardware_config
+from .config import DEFAULT_CONFIG, MOCK_CONFIG, load_config, validate_hardware_config
 from .runtime import Runtime
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Code-as-policy cloth agent and script tools")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path, help="Defaults to cloth_agent.yaml; demo uses cloth_agent_mock.yaml")
     parser.add_argument("--output-dir", type=Path, help="Exact directory for this task's artifacts")
     subcommands = parser.add_subparsers(dest="command", required=True)
     demo = subcommands.add_parser("demo", help="Two mock stages and one injected recovery")
@@ -26,7 +26,7 @@ def main(argv=None):
     script.add_argument("--params", type=Path)
     script.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
-    config = load_config(args.config)
+    config = load_config(args.config or (MOCK_CONFIG if args.command == "demo" else DEFAULT_CONFIG))
     if args.command == "demo" and config["backend"] != "mock":
         parser.error("demo requires backend: mock")
     allow_hardware = False

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from cloth_agent.backends import MockBackend
-from cloth_agent.config import load_config
+from cloth_agent.config import MOCK_CONFIG, load_config
 from cloth_agent.demo import RECOVERY_PROGRAM, run_demo
 from cloth_agent.executor import MotionFailed, MotionInterrupted
 from cloth_agent.runtime import Runtime
@@ -14,7 +14,7 @@ from cloth_agent.runtime import Runtime
 
 @pytest.fixture
 def runtime(tmp_path):
-    config = load_config()
+    config = load_config(MOCK_CONFIG)
     config["control_hz"] = 100
     config["motion"]["completion_timeout_s"] = .15
     with Runtime(config, tmp_path / "run") as value:
@@ -162,7 +162,7 @@ def test_blank_hand_pose_is_not_silently_replaced_by_a_preset(runtime):
 
 
 def test_hardware_gate_happens_before_device_creation(tmp_path):
-    config = deepcopy(load_config())
+    config = deepcopy(load_config(MOCK_CONFIG))
     config["backend"] = "hardware"
     with pytest.raises(ValueError, match="startup gate"):
         Runtime(config, tmp_path / "hardware")

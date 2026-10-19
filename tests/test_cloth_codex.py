@@ -3,7 +3,7 @@ import json
 import sys
 
 from cloth_agent.codex import CodexAppServer, tool_specs
-from cloth_agent.config import load_config
+from cloth_agent.config import MOCK_CONFIG, load_config
 from cloth_agent.runtime import Runtime
 
 
@@ -45,7 +45,7 @@ send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
 for line in sys.stdin:
     pass
 ''')
-    config = deepcopy(load_config())
+    config = deepcopy(load_config(MOCK_CONFIG))
     config["codex"].update(executable=sys.executable, extra_args=[str(peer)], request_timeout_s=5)
     with Runtime(config, tmp_path / "run") as runtime:
         result = CodexAppServer(runtime, progress=lambda *_: None).run("protocol test")
@@ -54,7 +54,7 @@ for line in sys.stdin:
 
 
 def test_geometry_results_do_not_require_an_image_envelope(tmp_path):
-    with Runtime(load_config(), tmp_path / "run") as runtime:
+    with Runtime(load_config(MOCK_CONFIG), tmp_path / "run") as runtime:
         client = CodexAppServer(runtime)
         result = client._dispatch("cloth_geometry", {"operation": "offset",
                                    "values": {"point": [0, 0, 0], "offset": [1, 2, 3]}})

@@ -14,7 +14,7 @@ import numpy as np
 
 from robot_control.nero_ik import NeroIK
 from .config import effective_arm
-from .geometry import transform
+from .geometry import transform, transform_points
 
 
 class KeypointProvider(Protocol):
@@ -24,9 +24,11 @@ class KeypointProvider(Protocol):
 class FileKeypointProvider:
     """Consume an upstream atomic JSON publication; does not detect or track."""
 
-    def __init__(self, path, max_age_s=.25):
+    def __init__(self, path, max_age_s=.25, task_from_camera=None):
         self.path = Path(path) if path else None
         self.max_age_s = max_age_s
+        self.task_from_camera = (transform(task_from_camera)
+                                 if task_from_camera is not None else None)
 
     def latest(self):
         if self.path is None or not self.path.exists():
@@ -35,12 +37,20 @@ class FileKeypointProvider:
         age = time.monotonic() - float(value["timestamp_monotonic"])
         if not np.isfinite(age) or age < 0 or age > self.max_age_s:
             return None
-        if value["frame"] != "task":
-            raise ValueError("Keypoints must be expressed in the task frame.")
+        if value["frame"] not in ("task", "camera"):
+            raise ValueError("Keypoints must be expressed in the task frame or camera frame.")
         for point in value["points"].values():
             xyz = np.asarray(point, dtype=float)
             if xyz.shape != (3,) or not np.isfinite(xyz).all():
                 raise ValueError("Invalid external keypoint coordinates.")
+        if value["frame"] == "camera":
+            if self.task_from_camera is None:
+                raise ValueError("Camera keypoints require task_from_camera calibration for the task frame.")
+            value["points"] = {
+                name: transform_points(self.task_from_camera, point).tolist()
+                for name, point in value["points"].items()
+            }
+            value["frame"] = "task"
         return value
 
 
@@ -67,7 +77,8 @@ class Observations:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.keypoints = keypoints or FileKeypointProvider(
             config["observations"]["keypoints_file"],
-            config["observations"]["keypoints_max_age_s"])
+            config["observations"]["keypoints_max_age_s"],
+            config["observations"].get("task_from_camera"))
         self._lock = Lock()
         self._fk = {name: NeroIK() for name in config["arms"]}
         self.camera = None
@@ -159,7 +170,8 @@ class Observations:
         np.save(depth_path, depth, allow_pickle=False)
         self._frame_key = key
         self._image_info = {"available": True, "source": key[0], "rgb_path": str(color_path),
-                            "depth_path": str(depth_path), "metadata": metadata}
+                            "depth_path": str(depth_path), "metadata": metadata,
+                            "task_from_camera": self.config["observations"].get("task_from_camera")}
         return self._image_info.copy()
 
     def snapshot(self, include_images=True):
@@ -177,6 +189,8 @@ class Observations:
                     hand, hand_error = None, str(exc)
                 arms[arm] = {"joints": q.tolist(), "tcp": tcp.tolist(),
                              "hand_raw": hand, "hand_error": hand_error}
+                if settings.get("reference_tcp_rotation") is not None:
+                    arms[arm]["reference_tcp_rotation"] = settings["reference_tcp_rotation"]
             return {"timestamp_monotonic": time.monotonic(), "backend": self.config["backend"],
                     "arms": arms, "keypoints": self.keypoints.latest(),
                     "images": self._images() if include_images else None}

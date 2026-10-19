@@ -131,6 +131,11 @@ class Runtime:
                 raise RuntimeError("A recovery reply is still pending.")
         return self.executor.start(self._plans[plan_id])
 
+    def geometry(self, operation, **values):
+        if operation in ("camera_to_task", "pixel_to_task"):
+            values["task_from_camera"] = self.config["observations"].get("task_from_camera")
+        return calculate(operation, **values)
+
     def set_hand_pose(self, arm, pose):
         if self.task_status != "running":
             raise RuntimeError("Task has ended.")
@@ -378,7 +383,7 @@ class Runtime:
             "set_hand_pose": self.set_hand_pose,
             "request_agent": self.request_agent,
             "report_result": self.report_result,
-            "calculate": calculate,
+            "calculate": self.geometry,
         }
         if method not in methods:
             raise ValueError(f"Unknown script tool: {method}")

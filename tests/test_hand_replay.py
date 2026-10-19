@@ -66,7 +66,7 @@ def wrist_run(monkeypatch, tmp_path):
     config["camera"]["enabled"] = False
     config["recording"].pop("lerobot")
     clock, cycle = [0.0], [0]
-    events = SimpleNamespace(hand=[], arm=[], targets=[], rows=[], opened=[])
+    events = SimpleNamespace(hand=[], arm=[], targets=[], rows=[], opened=[], captures=[])
     last_hand = np.zeros(20, dtype=int)
     failure = [None]
     base_flange = np.eye(4)
@@ -137,7 +137,7 @@ def wrist_run(monkeypatch, tmp_path):
     monkeypatch.setattr(controller.time, "perf_counter", lambda: clock[0])
     monkeypatch.setattr(controller.time, "sleep", lambda dt: clock.__setitem__(0, clock[0] + dt))
 
-    def run(keys, fault=None):
+    def run(keys, fault=None, calibration=False, capture_failure=False):
         failure[0] = fault
         key_iter = iter(keys)
 
@@ -151,7 +151,29 @@ def wrist_run(monkeypatch, tmp_path):
                 return next(key_iter)
 
         monkeypatch.setattr(controller, "Keyboard", Keyboard)
-        controller.run(config, "both", str(tmp_path), hand_mode="wrist-only")
+        options = {"hand_mode": "wrist-only"}
+        if calibration:
+            from teleop import tcp_calibration
+
+            config["camera"]["enabled"] = True
+            monkeypatch.setattr(controller, "RealSenseCamera", lambda _: SimpleNamespace(
+                start=lambda: None, stop=lambda: None, metadata={"model": "L515"}))
+
+            class Session:
+                def __init__(self, directory, cfg, pose, index, metadata):
+                    np.testing.assert_array_equal(pose, HandReplay(CLIP).actions[-1])
+                    assert index == 19
+
+                def capture(self, *_):
+                    events.captures.append(cycle[0])
+                    assert cycle[0] not in events.arm
+                    if capture_failure:
+                        raise TimeoutError("Still moving")
+                    return tmp_path / "sample.npz"
+
+            monkeypatch.setattr(tcp_calibration, "CalibrationSession", Session)
+            options = {"hand_mode": "calibration", "calibration_dir": str(tmp_path / "session")}
+        controller.run(config, "both", str(tmp_path), **options)
         return events
 
     return run
@@ -188,3 +210,16 @@ def test_pause_cancels_replay_and_reanchor_preserves_last_finger_pose(wrist_run,
     assert set(by_cycle) == {0, 2, 3, 7, 8, 9}
     np.testing.assert_array_equal(by_cycle[7], by_cycle[3])
     np.testing.assert_array_equal(by_cycle[8], HandReplay(CLIP).actions[0])
+
+
+@pytest.mark.parametrize("capture_failure", [False, True])
+def test_calibration_freezes_fingers_allows_tilts_and_stays_paused_after_capture(wrist_run, capture_failure):
+    events = wrist_run(["r", None, "p", "o", "c", None, "r", None, "q"],
+                       calibration=True, capture_failure=capture_failure)
+    assert events.arm == [2, 3, 4, 8]
+    assert events.captures == [5]
+    for _, target in events.hand:
+        np.testing.assert_array_equal(target, HandReplay(CLIP).actions[-1])
+    rpy = Rotation.from_matrix(np.array(events.targets)[:, :3, :3]).as_euler("xyz")
+    assert np.linalg.norm(rpy[2, :2] - rpy[0, :2]) > 1e-4
+    assert "fixed_roll_pitch_deg" not in events.recorder.metadata

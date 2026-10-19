@@ -14,9 +14,6 @@ import json
 import subprocess
 import time
 
-from .geometry import calculate
-
-
 INSTRUCTIONS = """You are the single manipulation agent for this application.
 Complete one task within this thread. First inspect cloth_observe and make a
 short stage list. Before each stage, compute geometry and nominal joint plans,
@@ -52,8 +49,15 @@ the waiting program expects. Only one arm may move at a time. The other arm
 retains its pose and grasp. Wait for subtask completion before the next script.
 Use cloth_wait_event to receive completion, failure, and recovery requests.
 
-Keypoint extraction, pinch hand poses and physical calibration are pending.
-Never invent them, or interpret mock images/joints as proof of physical cloth
+Use only arms listed in cloth_observe. Use a configured reference_tcp_rotation
+as the nominal pinch orientation; yaw adjustments rotate it about task +Z.
+Geometry operations camera_to_task(points=...) and pixel_to_task(pixel=...,
+depth_m=..., intrinsics=...) use the configured camera calibration and return
+task-frame coordinates. Use the depth and intrinsics from the SAME RGB-D image
+you selected; never substitute a newer frame. pixel_to_point returns camera
+coordinates, not task coordinates. Depth values passed here are in metres.
+Keypoint extraction remains external. Use provided calibration and hand presets;
+never invent missing inputs or interpret mock images/joints as proof of physical cloth
 grasping or folding. If the requested physical task lacks required inputs,
 use cloth_abort_task with the specific missing inputs. Planning failure is
 feedback for waypoint changes, not proof of global unreachability.
@@ -73,7 +77,7 @@ def tool_specs():
     tools = [
         ("cloth_observe", "Get current device, RGB-D and optional keypoint observations.",
          _schema({"include_images": {"type": "boolean"}})),
-        ("cloth_geometry", "Compute a transform, TCP-to-flange pose, distance, offset or pinhole projection.",
+        ("cloth_geometry", "Compute transforms, TCP-to-flange poses, distances or projections. camera_to_task(points) and pixel_to_task(pixel,depth_m,intrinsics) use configured camera extrinsics.",
          _schema({"operation": string, "values": obj}, ["operation", "values"])),
         ("cloth_plan_motion", "Plan from current feedback. Supply TCP waypoints OR target_joints. Returns a plan ID or failure diagnostics.",
          _schema({"arm": {"type": "string", "enum": ["left", "right"]},
@@ -196,7 +200,7 @@ class CodexAppServer:
             "cloth_finish_task": self.runtime.finish_task,
         }
         if name == "cloth_geometry":
-            return calculate(args["operation"], **args["values"])
+            return self.runtime.geometry(args["operation"], **args["values"])
         if name not in calls:
             raise ValueError(f"Unknown application tool: {name}")
         self.runtime.emit({"type": "agent_tool_called", "tool": name})

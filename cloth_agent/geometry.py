@@ -59,6 +59,15 @@ def calculate(operation: str, **values):
     if operation == "offset":
         return (np.asarray(values["point"], dtype=float)
                 + np.asarray(values["offset"], dtype=float)).tolist()
+    if operation in ("camera_to_task", "pixel_to_task"):
+        if values.get("task_from_camera") is None:
+            raise ValueError("Camera-to-task calibration has not been configured.")
+        if operation == "camera_to_task":
+            points = values["points"]
+        else:
+            points = calculate("pixel_to_point", pixel=values["pixel"],
+                               depth_m=values["depth_m"], intrinsics=values["intrinsics"])
+        return transform_points(values["task_from_camera"], points).tolist()
     if operation == "pixel_to_point":
         u, v = values["pixel"]
         z, intr = float(values["depth_m"]), values["intrinsics"]

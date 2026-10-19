@@ -4,8 +4,8 @@ import time
 import numpy as np
 import pytest
 
-from cloth_agent.config import load_config
-from cloth_agent.geometry import calculate
+from cloth_agent.config import MOCK_CONFIG, load_config
+from cloth_agent.geometry import calculate, transform, transform_points
 from cloth_agent.observations import FileKeypointProvider
 from cloth_agent.runtime import Runtime
 
@@ -26,6 +26,46 @@ def test_external_keypoints_are_optional_and_expire(tmp_path):
     path.write_text(json.dumps(frame))
     with pytest.raises(ValueError, match="task frame"):
         provider.latest()
+
+
+def test_camera_keypoints_are_transformed_once_and_task_keypoints_are_preserved(tmp_path):
+    matrix = transform([.3, -.2, .1, .1, -.2, 1.])
+    path = tmp_path / "points.json"
+    provider = FileKeypointProvider(path, task_from_camera=matrix)
+    point = [.1, .2, .7]
+    frame = {"timestamp_monotonic": time.monotonic(), "frame": "camera", "points": {"corner": point}}
+    path.write_text(json.dumps(frame))
+    result = provider.latest()
+    assert result["frame"] == "task"
+    np.testing.assert_allclose(result["points"]["corner"], transform_points(matrix, point))
+    assert provider.latest() == result  # Repeated reads never transform twice.
+    frame["frame"] = "task"
+    path.write_text(json.dumps(frame))
+    assert provider.latest()["points"]["corner"] == point
+
+
+def test_configured_extrinsics_reach_codex_and_script_geometry_tools(tmp_path):
+    from cloth_agent.codex import CodexAppServer
+
+    config = load_config(MOCK_CONFIG)
+    matrix = transform([.3, -.2, .1, .1, -.2, 1.])
+    config["observations"]["task_from_camera"] = matrix.tolist()
+    intrinsics = {"fx": 100., "fy": 100., "ppx": 0., "ppy": 0.}
+    with Runtime(config, tmp_path / "run") as runtime:
+        client = CodexAppServer(runtime)
+        values = {"pixel": [10, 20], "depth_m": .8, "intrinsics": intrinsics}
+        expected = transform_points(matrix, [.08, .16, .8])
+        # An argument cannot silently replace the runtime's calibrated transform.
+        values["task_from_camera"] = np.eye(4).tolist()
+        np.testing.assert_allclose(client._dispatch("cloth_geometry", {
+            "operation": "pixel_to_task", "values": values}), expected)
+        np.testing.assert_allclose(runtime._script_call("calculate", {
+            "operation": "pixel_to_task", **values}), expected)
+        np.testing.assert_allclose(runtime.geometry("camera_to_task", points=[.08, .16, .8]), expected)
+        assert runtime.observe()["images"]["task_from_camera"] == matrix.tolist()
+        runtime.config["observations"]["task_from_camera"] = None
+        with pytest.raises(ValueError, match="calibration"):
+            runtime.geometry("pixel_to_task", **values)
 
 
 def test_projection_uses_current_rgb_distortion_model():
@@ -63,7 +103,7 @@ def make_recording(tmp_path, valid=True):
 @pytest.mark.parametrize("valid", [True, False])
 def test_existing_rgbd_episode_format_and_invalid_frame_handling(tmp_path, valid):
     episode = make_recording(tmp_path, valid)
-    config = load_config()
+    config = load_config(MOCK_CONFIG)
     config["observations"]["recorded_episode"] = str(episode)
     with Runtime(config, tmp_path / "run") as runtime:
         observation = runtime.observe()
@@ -76,7 +116,7 @@ def test_existing_rgbd_episode_format_and_invalid_frame_handling(tmp_path, valid
 
 
 def test_mock_snapshot_is_explicitly_synthetic_and_has_no_invented_keypoints(tmp_path):
-    with Runtime(load_config(), tmp_path / "mock") as runtime:
+    with Runtime(load_config(MOCK_CONFIG), tmp_path / "mock") as runtime:
         first = runtime.observe()
         second = runtime.observe()
         assert first["backend"] == "mock"

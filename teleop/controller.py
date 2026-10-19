@@ -506,10 +506,14 @@ def reset_arm(config: dict[str, Any]) -> None:
 
 def run(
     config: dict[str, Any], control: str, record_dir: str | None,
-    *, hand_mode: str = "tracking",
+    *, hand_mode: str = "tracking", calibration_dir: str | None = None,
+    calibration_hand_frame: int = -1,
 ) -> None:
-    if hand_mode not in ("tracking", "wrist-only"):
+    if hand_mode not in ("tracking", "wrist-only", "calibration"):
         raise ValueError(f"Unknown hand mode: {hand_mode}")
+    if hand_mode == "calibration" and (control != "both" or calibration_dir is None
+                                       or not config.get("camera", {}).get("enabled")):
+        raise ValueError("Calibration needs both devices, enabled RGB-D and a new calibration directory.")
     if hand_mode == "wrist-only" and control == "arm":
         raise ValueError("wrist-only mode needs --control both (or hand for finger testing).")
     fixed_roll_pitch = None
@@ -519,7 +523,16 @@ def run(
             raise ValueError("arm.wrist_only_roll_pitch_deg must contain finite roll/pitch degrees.")
         fixed_roll_pitch = np.deg2rad(roll_pitch_deg)
     hand_replay = (HandReplay(config["hand"]["replay_clip_file"])
-                   if hand_mode == "wrist-only" else None)
+                   if hand_mode in ("wrist-only", "calibration") else None)
+    calibration_hand_pose = None
+    calibration_session = None
+    if hand_mode == "calibration":
+        if not -len(hand_replay.actions) <= calibration_hand_frame < len(hand_replay.actions):
+            raise ValueError("Calibration hand frame is outside the replay clip.")
+        calibration_hand_frame %= len(hand_replay.actions)
+        calibration_hand_pose = hand_replay.actions[calibration_hand_frame].copy()
+        if Path(calibration_dir).expanduser().exists():
+            raise ValueError("Calibration directory already exists; select a new session directory.")
     arm = _make_arm(config) if control in ("arm", "both") else None
     hand = _make_hand(config) if control in ("hand", "both") else None
     ik = (
@@ -624,6 +637,12 @@ def run(
                 f"{camera_config['width']}x{camera_config['height']}; "
                 f"recording follows control_hz={config['control_hz']}."
             )
+        if hand_mode == "calibration":
+            from .tcp_calibration import CalibrationSession
+
+            calibration_session = CalibrationSession(
+                calibration_dir, config, calibration_hand_pose, calibration_hand_frame, camera.metadata,
+            )
         if arm is not None:
             arm.connect()
             arm.enable_normal_mode()
@@ -649,11 +668,15 @@ def run(
             hand.set_speed(config["hand"]["speed"])
             if hand_replay is not None:
                 hand.open_hand()
-                hand.set_thumb_index_positions_raw(hand_replay.target(time.monotonic()))
-                print(
-                    "Wrist-only mode: thumb/index at clip start; other fingers open. "
-                    f"Clip: {hand_replay.clip_file} ({hand_replay.duration:.2f} s)."
+                hand.set_thumb_index_positions_raw(
+                    calibration_hand_pose if calibration_hand_pose is not None
+                    else hand_replay.target(time.monotonic())
                 )
+                print(f"Finger clip: {hand_replay.clip_file} ({hand_replay.duration:.2f} s).")
+                if calibration_session is not None:
+                    print(f"Calibration: fingers fixed at frame {calibration_hand_frame}; full wrist rotation enabled.")
+                else:
+                    print("Wrist-only mode: thumb/index at clip start; other fingers open.")
             hand_feedback.start()
         period = 1.0 / float(config["control_hz"])
         if arm is not None:
@@ -664,8 +687,12 @@ def run(
                 f"{np.round(np.rad2deg(fixed_roll_pitch), 3).tolist()} deg; yaw follows VR. "
                 "After R, tilt targets approach the reference by at most 1 deg per cycle."
             )
-        print("Keys: R=re-anchor, B=begin recording, S=save recording, Q=quit")
-        if hand_replay is not None:
+        if calibration_session is not None:
+            print("Keys: R=re-anchor/resume, C=pause and save stationary RGB-D/FK, Q=quit.")
+            print("Capture 15-25 positions with independent roll/pitch tilts; keep the contact point visible.")
+        else:
+            print("Keys: R=re-anchor, B=begin recording, S=save recording, Q=quit")
+        if hand_mode == "wrist-only":
             print("Finger keys after R: P=replay from start, O=cancel replay and return to start.")
         with Keyboard() as keyboard:
             while True:
@@ -674,13 +701,22 @@ def run(
                 key = keyboard.read()
                 if key == "q":
                     break
-                if key == "b":
+                if key == "c" and calibration_session is not None:
+                    paused = True
+                    print("Capture paused target streaming; keep still while feedback settles.")
+                    try:
+                        saved = calibration_session.capture(arm, ik, camera, hand_feedback)
+                        print(f"Saved {saved}. Press R to re-anchor before changing pose.")
+                    except (ValueError, RuntimeError, TimeoutError) as exc:
+                        print(f"Sample not saved: {exc}. Remain paused; C=retry, R=resume.")
+                    continue
+                if key == "b" and calibration_session is None:
                     if recorder.active:
                         print("Recording already active; press S to save it first.")
                     else:
                         recorder.start()
                         print("Recording started.")
-                elif key == "s":
+                elif key == "s" and calibration_session is None:
                     saved = recorder.stop_and_save()
                     print(f"Recording saved: {saved}" if saved else "No active recording.")
 
@@ -698,7 +734,7 @@ def run(
                     reanchor(frame)
                     continue
                 if paused:
-                    if hand_replay is not None and key in ("p", "o"):
+                    if hand_mode == "wrist-only" and key in ("p", "o"):
                         print("PAUSED: press R with valid wrist tracking before using P/O.")
                     time.sleep(min(period, 0.02))
                     continue
@@ -756,13 +792,16 @@ def run(
                 if hand is not None:
                     stage_started = time.perf_counter()
                     if hand_replay is not None:
-                        if key == "p":
+                        if calibration_hand_pose is not None:
+                            hand_action = calibration_hand_pose.copy()
+                        elif key == "p":
                             hand_replay.start(time.monotonic())
                             print("Finger replay started from clip start.")
                         elif key == "o":
                             hand_replay.reset()
                             print("Finger replay cancelled; returning to clip start.")
-                        hand_action = hand_replay.target(time.monotonic())
+                        if calibration_hand_pose is None:
+                            hand_action = hand_replay.target(time.monotonic())
                     else:
                         _, hand_action = hand_retargeter.retarget(landmarks)
                     stage_times["timing_hand_retarget_s"] = time.perf_counter() - stage_started
