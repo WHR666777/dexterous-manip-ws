@@ -22,6 +22,7 @@ from .coordinate_frames import (
 )
 from .config import calibration_rotation, input_config
 from .hand_feedback import HandFeedbackPoller
+from .hand_replay import HandReplay
 from .hand_retarget import HAND_TIMING_FIELDS, L20Retargeter
 from .keyboard import Keyboard
 from .recording import EpisodeRecorder
@@ -35,6 +36,8 @@ NERO_JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 8))
 START_MOVE_MAX_JOINT_DELTA_RAD = float(2.0 * np.pi)
 START_POSE_FEEDBACK_TIMEOUT_S = 3.0
 START_POSE_FEEDBACK_POLL_S = 0.05
+STARTUP_POSE_FEEDBACK_TIMEOUT_S = 3.0
+STARTUP_POSE_FEEDBACK_POLL_S = 0.05
 
 
 class _ControlTiming:
@@ -239,6 +242,38 @@ def _read_complete_arm_joint_positions(arm: NeroArm) -> np.ndarray:
                 "Nero 未在 3.0 s 内收到完整的七轴关节反馈。"
             ) from last_error
         time.sleep(START_POSE_FEEDBACK_POLL_S)
+
+
+def _read_complete_arm_startup_poses(arm: NeroArm) -> tuple[np.ndarray, np.ndarray]:
+    """Wait for SDK flange/TCP feedback before establishing the TCP workspace."""
+    deadline = time.monotonic() + STARTUP_POSE_FEEDBACK_TIMEOUT_S
+    waiting = False
+    while True:
+        stage = "flange"
+        try:
+            flange = arm.get_flange_pose()
+            stage = "TCP"
+            tcp = arm.get_tcp_pose()
+            return flange, tcp
+        except RuntimeError as exc:
+            if str(exc) not in (
+                "Nero SDK feedback is unavailable: None",
+                "Nero SDK pose feedback is incomplete.",
+            ):
+                raise
+            if not waiting:
+                print(
+                    "Waiting for complete Nero flange/TCP feedback "
+                    f"(up to {STARTUP_POSE_FEEDBACK_TIMEOUT_S:.1f} s)."
+                )
+                waiting = True
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Nero flange/TCP feedback did not become available within "
+                    f"{STARTUP_POSE_FEEDBACK_TIMEOUT_S:.1f} s; "
+                    f"waiting for {stage}: {exc}"
+                ) from exc
+        time.sleep(STARTUP_POSE_FEEDBACK_POLL_S)
 
 
 def _print_ik_failure_diagnostics(
@@ -469,7 +504,22 @@ def reset_arm(config: dict[str, Any]) -> None:
         print("Nero disconnect attempted after disable/reset; no motion target was sent.")
 
 
-def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
+def run(
+    config: dict[str, Any], control: str, record_dir: str | None,
+    *, hand_mode: str = "tracking",
+) -> None:
+    if hand_mode not in ("tracking", "wrist-only"):
+        raise ValueError(f"Unknown hand mode: {hand_mode}")
+    if hand_mode == "wrist-only" and control == "arm":
+        raise ValueError("wrist-only mode needs --control both (or hand for finger testing).")
+    fixed_roll_pitch = None
+    if hand_mode == "wrist-only" and control == "both":
+        roll_pitch_deg = np.asarray(config["arm"].get("wrist_only_roll_pitch_deg"), dtype=float)
+        if roll_pitch_deg.shape != (2,) or not np.isfinite(roll_pitch_deg).all():
+            raise ValueError("arm.wrist_only_roll_pitch_deg must contain finite roll/pitch degrees.")
+        fixed_roll_pitch = np.deg2rad(roll_pitch_deg)
+    hand_replay = (HandReplay(config["hand"]["replay_clip_file"])
+                   if hand_mode == "wrist-only" else None)
     arm = _make_arm(config) if control in ("arm", "both") else None
     hand = _make_hand(config) if control in ("hand", "both") else None
     ik = (
@@ -477,7 +527,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         if arm is not None
         else None
     )
-    hand_retargeter = _retargeter(config) if hand is not None else None
+    hand_retargeter = _retargeter(config) if hand is not None and hand_replay is None else None
     hand_feedback = (HandFeedbackPoller(
         hand, poll_hz=config['hand'].get('feedback_poll_hz', 20.0),
         max_age_s=config['hand'].get('feedback_max_age_s', .25),
@@ -506,7 +556,7 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         lerobot_recording = None
     recorder = EpisodeRecorder(
         record_root,
-        {"config": config["_path"], "control": control,
+        {"config": config["_path"], "control": control, "hand_mode": hand_mode,
          "input_device": device_name, "input_side": input_config(config)["side"],
          "quest_side": input_config(config)["side"],
          "hand_feedback": ({'poll_hz': hand_feedback.poll_hz,
@@ -517,6 +567,10 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         lerobot=lerobot_recording,
     )
     timing = _ControlTiming(float(config["control_hz"]))
+    if hand_replay is not None:
+        recorder.metadata["hand_replay_clip_file"] = str(hand_replay.clip_file)
+    if fixed_roll_pitch is not None:
+        recorder.metadata["fixed_roll_pitch_deg"] = np.rad2deg(fixed_roll_pitch).tolist()
 
     def reanchor(frame) -> None:
         nonlocal tracker, last_accepted_target, paused
@@ -535,12 +589,16 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                 negate_rot_xy=tracking["negate_rot_xy"],
                 position_deadband=tracking["position_deadband_m"],
                 rotation_deadband_deg=tracking["rotation_deadband_deg"],
+                fixed_roll_pitch=fixed_roll_pitch,
+                roll_pitch_step_deg=min(1.0, float(safety["max_rotation_step_deg"]) / 2.0),
             )
             tracker.update(wrist_position, wrist_quaternion)
             gate.reanchor(flange)
             last_accepted_target = flange.copy()
-        if hand is not None:
+        if hand_retargeter is not None:
             hand_retargeter.reset(hand_feedback.get_latest().positions_raw)
+        if hand_replay is not None:
+            hand_replay.stop()
         paused = False
         print("Re-anchored; command streaming resumed.")
 
@@ -572,10 +630,11 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
             if not arm.is_enabled():
                 raise RuntimeError("Nero is not enabled. Enable it using the approved site procedure before run.")
             _move_arm_to_start_pose(arm, config)
+            startup_flange_pose, startup_tcp_pose = _read_complete_arm_startup_poses(arm)
             start_joints = arm.get_joint_positions()
             model_start_flange = ik.forward(start_joints)
-            sdk_start_flange = pose6_to_matrix(arm.get_flange_pose())
-            sdk_start_tcp = pose6_to_matrix(arm.get_tcp_pose())
+            sdk_start_flange = pose6_to_matrix(startup_flange_pose)
+            sdk_start_tcp = pose6_to_matrix(startup_tcp_pose)
             flange_to_tcp = np.linalg.inv(sdk_start_flange) @ sdk_start_tcp
             model_start_tcp = model_start_flange @ flange_to_tcp
             gate.set_tcp_workspace_center(model_start_tcp[:3, 3])
@@ -588,11 +647,26 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
         if hand is not None:
             hand.connect()
             hand.set_speed(config["hand"]["speed"])
+            if hand_replay is not None:
+                hand.open_hand()
+                hand.set_thumb_index_positions_raw(hand_replay.target(time.monotonic()))
+                print(
+                    "Wrist-only mode: thumb/index at clip start; other fingers open. "
+                    f"Clip: {hand_replay.clip_file} ({hand_replay.duration:.2f} s)."
+                )
             hand_feedback.start()
         period = 1.0 / float(config["control_hz"])
         if arm is not None:
             print(f"Start pose ready. Hold a comfortable {device_name} pose, then press R to anchor.")
+        if fixed_roll_pitch is not None:
+            print(
+                "Wrist-only orientation: base-frame roll/pitch locked to "
+                f"{np.round(np.rad2deg(fixed_roll_pitch), 3).tolist()} deg; yaw follows VR. "
+                "After R, tilt targets approach the reference by at most 1 deg per cycle."
+            )
         print("Keys: R=re-anchor, B=begin recording, S=save recording, Q=quit")
+        if hand_replay is not None:
+            print("Finger keys after R: P=replay from start, O=cancel replay and return to start.")
         with Keyboard() as keyboard:
             while True:
                 loop_started = time.monotonic()
@@ -612,6 +686,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
 
                 frame = _latest_frame(quest_input, config)
                 if frame is None:
+                    if hand_replay is not None:
+                        hand_replay.stop()
                     if not paused:
                         paused = True
                         gate.pause(f"{device_name} frame timeout")
@@ -622,6 +698,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     reanchor(frame)
                     continue
                 if paused:
+                    if hand_replay is not None and key in ("p", "o"):
+                        print("PAUSED: press R with valid wrist tracking before using P/O.")
                     time.sleep(min(period, 0.02))
                     continue
 
@@ -657,6 +735,8 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     stage_times["timing_ik_s"] = time.perf_counter() - stage_started
                     if solved is None:
                         paused = True
+                        if hand_replay is not None:
+                            hand_replay.stop()
                         reason = ik.last_diagnostics.get("code", "IK failed")
                         print(f"PAUSED: {reason}; press R to re-anchor.")
                         if last_accepted_target is None:
@@ -667,13 +747,24 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                         continue
                     if not gate.accept(target_transform, target_tcp_position):
                         paused = True
+                        if hand_replay is not None:
+                            hand_replay.stop()
                         print(f"PAUSED: {gate.reason}; press R to re-anchor.")
                         continue
                     arm_action = solved
                     last_accepted_target = target_transform.copy()
                 if hand is not None:
                     stage_started = time.perf_counter()
-                    _, hand_action = hand_retargeter.retarget(landmarks)
+                    if hand_replay is not None:
+                        if key == "p":
+                            hand_replay.start(time.monotonic())
+                            print("Finger replay started from clip start.")
+                        elif key == "o":
+                            hand_replay.reset()
+                            print("Finger replay cancelled; returning to clip start.")
+                        hand_action = hand_replay.target(time.monotonic())
+                    else:
+                        _, hand_action = hand_retargeter.retarget(landmarks)
                     stage_times["timing_hand_retarget_s"] = time.perf_counter() - stage_started
                     diagnostics = getattr(hand_retargeter, 'last_diagnostics', {})
                     hand_diagnostics.update({key: diagnostics[key] for key in hand_diagnostics
@@ -692,7 +783,10 @@ def run(config: dict[str, Any], control: str, record_dir: str | None) -> None:
                     stage_times["timing_arm_send_s"] = time.perf_counter() - stage_started
                 if hand is not None:
                     stage_started = time.perf_counter()
-                    hand.set_joint_positions_raw(hand_action)
+                    if hand_replay is not None:
+                        hand.set_thumb_index_positions_raw(hand_action)
+                    else:
+                        hand.set_joint_positions_raw(hand_action)
                     hand_sent_at = time.monotonic()
                     stage_times["timing_hand_send_s"] = time.perf_counter() - stage_started
                     stage_times['timing_hand_send_wait_s'] = getattr(

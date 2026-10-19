@@ -138,6 +138,11 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"AnyDex retarget config does not exist: {retarget_path}")
     config["hand"]["retarget_config"] = str(retarget_path.resolve())
 
+    replay_path = Path(config["hand"].get("replay_clip_file", "configs/l20_thumb_index_3_4s.csv"))
+    if not replay_path.is_absolute():
+        replay_path = project_root / replay_path
+    config["hand"]["replay_clip_file"] = str(replay_path.resolve())
+
     start_pose_path = Path(config["arm"]["start_pose_file"])
     if not start_pose_path.is_absolute():
         start_pose_path = project_root / start_pose_path

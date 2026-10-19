@@ -44,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--control", choices=("arm", "hand", "both"), required=True)
     run_parser.add_argument("--execute", action="store_true", help="required acknowledgement")
     run_parser.add_argument("--record-dir")
+    run_parser.add_argument(
+        "--hand-mode", choices=("tracking", "wrist-only"), default="tracking",
+        help="tracking: follow VR fingers; wrist-only: track position/yaw, lock roll/pitch, P=replay, O=reset",
+    )
     return parser
 
 
@@ -94,7 +98,7 @@ def main() -> None:
     if args.command == "arm-reset":
         reset_arm(config)
         return
-    run(config, args.control, args.record_dir)
+    run(config, args.control, args.record_dir, hand_mode=args.hand_mode)
 
 
 if __name__ == "__main__":

@@ -337,6 +337,33 @@ def test_official_open_and_close_presets_are_used_exactly():
     ]
 
 
+def test_thumb_index_sends_only_two_groups_under_position_lock():
+    hand, api = connected_hand()
+    calls = []
+
+    def mapping(raw):
+        assert raw == list(range(20))
+        return [[10, 5, 0, 11, 12, 15], [6, 11, 1, 13, 14, 16]]
+
+    def send(name, values):
+        assert hand._position_io_lock.locked()
+        calls.append((name, values))
+
+    api.hand.cmd_range_to_joint_range = mapping
+    api.hand.set_thumb_positions = lambda values: send("thumb", values)
+    api.hand.set_index_positions = lambda values: send("index", values)
+    hand.set_thumb_index_positions_raw(list(range(20)))
+    assert calls == [("thumb", [10, 5, 0, 11, 12, 15]), ("index", [6, 11, 1, 13, 14, 16])]
+    assert api.commands == []
+
+
+@pytest.mark.parametrize("values", [[0] * 19, [256] * 20, [0.5] * 20])
+def test_thumb_index_rejects_invalid_commands_before_sending(values):
+    hand, _ = connected_hand()
+    with pytest.raises(ValueError):
+        hand.set_thumb_index_positions_raw(values)
+
+
 def test_unsupported_g20_current_and_embedded_version_are_not_public_methods():
     assert not hasattr(LinkerHandL20, "get_current")
     assert not hasattr(LinkerHandL20, "set_current")

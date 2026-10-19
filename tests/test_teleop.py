@@ -31,7 +31,10 @@ class FakeHandFeedbackPoller:
         pass
 
 
-def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(monkeypatch, tmp_path):
+@pytest.mark.parametrize("startup_flange_delayed", [False, True])
+def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(
+    monkeypatch, tmp_path, startup_flange_delayed,
+):
     from pathlib import Path
     from types import SimpleNamespace
     from teleop.config import load_config
@@ -58,6 +61,16 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(m
         events.append("hand_send")
         np.testing.assert_array_equal(target, hand_target)
         hand_position[:] = target
+
+    flange_reads = 0
+
+    def flange_feedback():
+        nonlocal flange_reads
+        flange_reads += 1
+        if startup_flange_delayed and flange_reads == 1:
+            assert "arm_send" not in events and "hand_send" not in events
+            raise RuntimeError("Nero SDK feedback is unavailable: None")
+        return np.zeros(6)
 
     class Feedback:
         def __init__(self, *args, **kwargs):
@@ -94,7 +107,7 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(m
                           is_enabled=lambda: True, disconnect=lambda: None,
                           get_joint_positions=arm_feedback, move_js=arm_send,
                           get_joint_torques=lambda: np.zeros(7),
-                          get_flange_pose=lambda: np.zeros(6), get_tcp_pose=lambda: np.zeros(6))
+                          get_flange_pose=flange_feedback, get_tcp_pose=lambda: np.zeros(6))
     hand = SimpleNamespace(connect=lambda: None, disconnect=lambda: None,
                            set_speed=lambda _: None, set_joint_positions_raw=hand_send)
     monkeypatch.setattr(controller, "_make_arm", lambda _: arm)
@@ -117,6 +130,7 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(m
         landmarks=np.zeros((21, 3)), received_at=0))
 
     controller.run(config, "both", str(tmp_path))
+    assert flange_reads == (2 if startup_flange_delayed else 1)
     assert len(rows) == 1
     row = rows[0]
     np.testing.assert_array_equal(row["observation_arm_joint_position"], np.full(7, .2))
@@ -126,6 +140,72 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(m
     start = events.index("image")
     assert events[start:] == ["image", "hand_cache", "arm_feedback", "arm_send",
                               "hand_send", "arm_feedback", "hand_cache"]
+
+
+@pytest.mark.parametrize("stage", ["flange", "tcp"])
+@pytest.mark.parametrize("error", [
+    "Nero SDK feedback is unavailable: None",
+    "Nero SDK pose feedback is incomplete.",
+])
+def test_startup_poses_wait_for_both_feedbacks(monkeypatch, stage, error):
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    reads = 0
+
+    def delayed_pose():
+        nonlocal reads
+        reads += 1
+        if reads <= 2:
+            raise RuntimeError(error)
+        return np.arange(6, dtype=float)
+
+    arm = SimpleNamespace(get_flange_pose=lambda: np.zeros(6), get_tcp_pose=lambda: np.zeros(6))
+    setattr(arm, f"get_{stage}_pose", delayed_pose)
+    monkeypatch.setattr(controller.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(controller.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    flange, tcp = controller._read_complete_arm_startup_poses(arm)
+
+    np.testing.assert_array_equal(flange if stage == "flange" else tcp, np.arange(6))
+    assert reads == 3
+    assert clock[0] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("stage", ["flange", "tcp"])
+def test_startup_poses_timeout_names_missing_feedback(monkeypatch, stage):
+    from types import SimpleNamespace
+
+    def missing_pose():
+        raise RuntimeError("Nero SDK feedback is unavailable: None")
+
+    arm = SimpleNamespace(get_flange_pose=lambda: np.zeros(6), get_tcp_pose=lambda: np.zeros(6))
+    setattr(arm, f"get_{stage}_pose", missing_pose)
+    ticks = iter((0.0, 3.0))
+    monkeypatch.setattr(controller.time, "monotonic", lambda: next(ticks))
+
+    with pytest.raises(TimeoutError, match=f"within 3.0 s; waiting for {stage if stage == 'flange' else 'TCP'}") as error:
+        controller._read_complete_arm_startup_poses(arm)
+    assert isinstance(error.value.__cause__, RuntimeError)
+
+
+@pytest.mark.parametrize("message", [
+    "Nero arm is not connected.",
+    "Nero SDK feedback is unavailable or malformed.",
+])
+def test_startup_poses_do_not_retry_other_errors(monkeypatch, message):
+    from types import SimpleNamespace
+
+    def broken_pose():
+        raise RuntimeError(message)
+
+    def unexpected_sleep(_):
+        pytest.fail("Unexpected retry of a non-transient error")
+
+    monkeypatch.setattr(controller.time, "sleep", unexpected_sleep)
+    with pytest.raises(RuntimeError) as error:
+        controller._read_complete_arm_startup_poses(SimpleNamespace(get_flange_pose=broken_pose))
+    assert str(error.value) == message
 
 
 def test_anydex_wrist_receives_only_site_calibration():

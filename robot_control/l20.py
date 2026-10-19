@@ -476,6 +476,21 @@ class LinkerHandL20:
             self.last_position_send_wait_s = time.perf_counter() - started
             self._require_connected().finger_move(pose=raw.tolist())
 
+    def set_thumb_index_positions_raw(self, positions: Any) -> None:
+        """Send only thumb/index targets from a normal L20 20-slot command.
+
+        The SDK's per-finger mapping is reused; the other fingers receive no
+        position commands. Serialize both sends with background feedback queries.
+        """
+        raw = self._validate_raw_values(positions, _L20_POSITION_SHAPE, "position")
+        started = time.perf_counter()
+        with self._position_io_lock:
+            self.last_position_send_wait_s = time.perf_counter() - started
+            driver = self._require_connected().hand
+            fingers = driver.cmd_range_to_joint_range(raw.tolist())
+            driver.set_thumb_positions(fingers[0])
+            driver.set_index_positions(fingers[1])
+
     def set_joint_positions_normalized(self, action: Any) -> None:
         """将归一化 20 槽位目标半向上转换后发送。
 
