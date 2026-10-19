@@ -1,4 +1,4 @@
-"""重播视频 3～4 秒的拇指/食指动作，其余三指先设为官方张开姿态。"""
+"""重播 file-001.mp4 视频 9～10 秒的拇指/食指动作，其余三指先设为官方张开姿态。"""
 
 import argparse
 import csv
@@ -21,10 +21,10 @@ INDICES = [0, 5, 10, 15, 1, 6, 16]  # 拇指四通道、食指三通道
 
 def extract():
     fps = json.loads((DATASET / "meta/info.json").read_text())["fps"]
-    first, end = round(3 * fps), round(4 * fps)
-    with np.load(DATASET / "diagnostics/episode-000000.npz") as data:
+    first, end = round(9 * fps), round(10 * fps)
+    with np.load(DATASET / "diagnostics/episode-000001.npz") as data:
         if len(data["hand_action_raw"]) < end:
-            raise ValueError("录制不足视频时间 4 秒。")
+            raise ValueError("录制不足视频时间 10 秒。")
         actions = data["hand_action_raw"][first:end].copy()
         feedback = data["hand_position_raw"][first:end].copy()
     if (actions.shape != (end - first, 20) or not np.isfinite(actions).all()
@@ -32,7 +32,7 @@ def extract():
             or np.any((actions < 0) | (actions > 255))):
         raise ValueError("手部目标必须是 20 槽、0～255 的整数。")
 
-    output = DATASET / "thumb_index_3_4s.csv"
+    output = DATASET / "thumb_index_9_10s.csv"
     names = [L20_JOINT_NAMES[i] for i in INDICES]
     with output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
@@ -42,7 +42,7 @@ def extract():
         for frame, action, actual in zip(range(first, end), actions, feedback):
             writer.writerow([frame, f"{frame / fps:.3f}"]
                             + action[INDICES].tolist() + actual[INDICES].tolist())
-    print(f"已导出视频 3≤t<4 秒：帧 {first}～{end - 1}，{len(actions)} 帧，{fps} FPS。")
+    print(f"已导出 file-001.mp4 视频 9≤t<10 秒：帧 {first}～{end - 1}，{len(actions)} 帧，{fps} FPS。")
     print(f"CSV: {output}")
     return actions.astype(int), fps
 

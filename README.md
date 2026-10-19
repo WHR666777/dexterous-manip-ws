@@ -229,9 +229,9 @@ python3 -m teleop.cli --config configs/pico4_nero_l20.yaml \
   run --control both --hand-mode wrist-only --execute
 ```
 
-该模式不使用 VR 手指重定向。启动时，中指、无名指、小指设为官方“张开”姿态；拇指、食指设为抓取视频 **3.000 秒**处的目标姿态，即之前截取的 3～4 秒片段的第一帧。片段保存在 `hand.replay_clip_file` 指向的 [CSV](configs/l20_thumb_index_3_4s.csv)，共 20 帧、名义 20 FPS，运行时无需打开原视频或数据集。
+该模式不使用 VR 手指重定向。启动时，中指、无名指、小指设为官方“张开”姿态；拇指、食指设为 `videos/observation.images.front/chunk-000/file-001.mp4` **9.000 秒**处的目标姿态。当前张开→闭合片段取自 episode 1 的视频 9～10 秒（第 180～199 帧），保存在 `hand.replay_clip_file` 指向的 [CSV](configs/l20_thumb_index_9_10s.csv)，共 20 帧、名义 20 FPS，运行时无需打开原视频或数据集。
 
-按 `R` 锚定后，机械臂跟踪腕部位置和 **yaw**；**roll、pitch 固定为示教参考值**。参考值由视频 3.000 秒处的关节反馈经同一套 URDF/FK 得到，保存在 `arm.wrist_only_roll_pitch_deg`，约为 `[-97.507°, -6.326°]`，采用 Nero base 固定坐标系下的 XYZ 外旋欧拉角。按 `R` 后，roll/pitch 目标以每周期最多 1° 的角度向量步长平滑收敛到参考值；yaw 使用锚定时机械臂 yaw 加上 Pico 的偏航增量，Pico 的 roll/pitch 不参与目标。再次按 `R` 会重新建立平移和 yaw 锚点，固定的 roll/pitch 参考值保持不变。
+按 `R` 锚定后，机械臂跟踪腕部位置和 **yaw**；**roll、pitch 固定为示教参考值**。参考值由该视频 9.000 秒处的关节反馈经同一套 URDF/FK 得到，保存在 `arm.wrist_only_roll_pitch_deg`，约为 `[-98.184°, +15.964°]`，采用 Nero base 固定坐标系下的 XYZ 外旋欧拉角。按 `R` 后，roll/pitch 目标以每周期最多 1° 的角度向量步长平滑收敛到参考值；yaw 使用锚定时机械臂 yaw 加上 Pico 的偏航增量，Pico 的 roll/pitch 不参与目标。再次按 `R` 会重新建立平移和 yaw 锚点，固定的 roll/pitch 参考值保持不变。
 
 `P` 从头重播一次两指动作，结束后保持末帧；再次按 `P` 从头开始。`O` 中断重播并回到片段第一帧。其余三指始终保持张开。重播按片段时间选择当前目标，随控制周期发送，不额外阻塞手腕控制；控制周期较慢时会跳过已经过去的片段帧。
 

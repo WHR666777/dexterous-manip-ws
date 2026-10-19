@@ -13,7 +13,7 @@ from teleop.hand_feedback import HandFeedbackSnapshot
 from teleop.hand_replay import HandReplay, THUMB_INDEX_INDICES
 
 
-CLIP = Path(__file__).resolve().parents[1] / "configs/l20_thumb_index_3_4s.csv"
+CLIP = Path(__file__).resolve().parents[1] / "configs/l20_thumb_index_9_10s.csv"
 
 
 def test_clip_matches_video_frames_and_holds_other_fingers_open():
@@ -21,7 +21,9 @@ def test_clip_matches_video_frames_and_holds_other_fingers_open():
     assert len(replay.actions) == 20
     assert replay.duration == pytest.approx(1.0)
     np.testing.assert_array_equal(replay.actions[0, THUMB_INDEX_INDICES],
-                                  [253, 156, 221, 160, 26, 255, 207])
+                                  [255, 183, 242, 151, 34, 255, 215])
+    np.testing.assert_array_equal(replay.actions[-1, THUMB_INDEX_INDICES],
+                                  [255, 142, 118, 50, 0, 75, 123])
     other = [i for i in range(20) if i not in THUMB_INDEX_INDICES]
     np.testing.assert_array_equal(replay.actions[:, other],
                                   np.tile(_L20_OPEN_PRESET, (20, 1))[:, other])
@@ -47,7 +49,7 @@ def test_playback_uses_elapsed_time_holds_last_pose_and_resets():
 @pytest.mark.parametrize("replacement", ["256", "-1", "1.5", "nan"])
 def test_clip_rejects_invalid_position_targets(tmp_path, replacement):
     clip = tmp_path / "clip.csv"
-    clip.write_text(CLIP.read_text().replace("3.000,253,", f"3.000,{replacement},"))
+    clip.write_text(CLIP.read_text().replace("9.000,255,", f"9.000,{replacement},"))
     with pytest.raises(ValueError, match="integers"):
         HandReplay(clip)
 

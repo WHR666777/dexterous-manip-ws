@@ -44,8 +44,8 @@ arm:
   start_pose_file: configs/nero_start_pose.yaml
   start_speed_percent: 10
   follow_speed_percent: 30
-  # wrist-only: video 3.000 s joint feedback -> URDF FK; base-frame XYZ Euler degrees.
-  wrist_only_roll_pitch_deg: [-97.507237617526, -6.3259108402547355]
+  # wrist-only: file-001.mp4 9.000 s joint feedback -> URDF FK; base-frame XYZ Euler degrees.
+  wrist_only_roll_pitch_deg: [-98.18399685481262, 15.964152899573257]
   start_tolerance_rad: 0.02
   start_timeout_s: 30.0
 
@@ -53,13 +53,13 @@ hand:
   type: right
   model: L20
   can_channel: can_hand_a
-  speed: [160, 160, 160, 160, 160]
+  speed: [240, 240, 240, 240, 240                                                                                                       ]
   max_raw_step: 10
   feedback_poll_hz: 20
   feedback_max_age_s: 0.25
   retarget_config: AnyDexRetarget/example/config/adaptive/pico4/pico4_linker_l20.yaml
-  # --hand-mode wrist-only: video 3–4 s, P=replay, O=initial pose.
-  replay_clip_file: configs/l20_thumb_index_3_4s.csv
+  # --hand-mode wrist-only: file-001.mp4 9–10 s, P=replay, O=initial pose.
+  replay_clip_file: configs/l20_thumb_index_9_10s.csv
 
 camera:
   enabled: true
