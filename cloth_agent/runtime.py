@@ -22,6 +22,7 @@ from .executor import Executor, MotionFailed, MotionInterrupted
 from .geometry import calculate
 from .observations import Observations
 from .planning import Planner, PlanningError
+from .records import event_description, status_text
 
 
 @dataclass
@@ -36,7 +37,7 @@ class Subtask:
     done: Event = field(default_factory=Event)
 
     def snapshot(self):
-        return {"subtask_id": self.id, "status": self.status, "result": self.result,
+        return {"subtask_id": self.id, "status": self.status, "status_text": status_text(self.status), "result": self.result,
                 "reason": self.reason, "directory": str(self.directory),
                 "pid": self.process.pid if self.process else None}
 
@@ -87,8 +88,9 @@ class Runtime:
 
     def emit(self, event):
         event = {"timestamp_monotonic": time.monotonic(), **event}
+        event["description"] = event_description(event)
         with self._log_lock:
-            with (self.directory / "events.jsonl").open("a") as stream:
+            with (self.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n")
         # Motion events remain in the log, but only decisions wake the agent.
         if event["type"] in {"recovery_requested", "subtask_completed", "subtask_failed",
@@ -189,22 +191,22 @@ class Runtime:
         running_motion = self.executor.active()
         reason = ""
         if running_motion:
-            reason = "Program exited before its motion finished."
+            reason = "程序在运动完成前退出 Program exited before its motion finished."
         if code != 0:
-            reason = f"Program exited with code {code}; see stderr.log."
+            reason = f"程序异常退出 Program exited with code {code}; 请查看 see stderr.log."
         try:
-            self.executor.pause_and_hold(reason=reason or "subtask ended")
+            self.executor.pause_and_hold(reason=reason or "子任务结束 subtask ended")
         except Exception as exc:
             reason = (reason + " " + str(exc)).strip()
         with self._recovery_condition:
             if self._pending_recovery and self._pending_recovery["subtask_id"] == subtask.id:
-                reason = reason or "Program exited while waiting for recovery."
+                reason = reason or "等待恢复时程序退出 Program exited while waiting for recovery."
                 self._pending_recovery = None
         with self._task_lock:
             if self.task_status == "aborted" or subtask.status == "aborted":
                 subtask.status = "aborted"
                 self.task_status = "aborted"
-                self.task_result = self.task_result or {"reason": "Program abandoned the task."}
+                self.task_result = self.task_result or {"reason": "程序主动放弃任务 Program abandoned the task."}
             elif reason or subtask.status == "failed":
                 subtask.status = "failed"
                 # Failure ends this attempt. It cannot be relabeled as a new
@@ -267,7 +269,7 @@ class Runtime:
             self._events_condition.wait_for(lambda: bool(self._events), timeout_s)
             if self._events:
                 return self._events.popleft()
-        return {"type": "running", "motion": self.executor.active(),
+        return {"type": "running", "description": event_description({"type": "running"}), "motion": self.executor.active(),
                 "subtask": self._subtask.snapshot() if self._subtask else None}
 
     def report_result(self, status="completed", result=None):
@@ -297,7 +299,7 @@ class Runtime:
         self.emit({"type": "task_completed", "result": self.task_result})
         return summary
 
-    def abort_task(self, reason="agent abandoned task"):
+    def abort_task(self, reason="agent 主动放弃任务 agent abandoned task"):
         hold_error = None
         try:
             self.executor.pause_and_hold(reason=reason)
@@ -330,7 +332,7 @@ class Runtime:
         return self.summary()
 
     def summary(self):
-        return {"status": self.task_status, "result": self.task_result,
+        return {"status": self.task_status, "status_text": status_text(self.task_status), "result": self.task_result,
                 "directory": str(self.directory), "backend": self.config["backend"],
                 "subtasks": [item.snapshot() for item in self._subtasks]}
 
@@ -395,7 +397,7 @@ class Runtime:
         self._closed = True
         try:
             if self._subtask and not self._subtask.done.is_set():
-                self.abort_task("runtime closing")
+                self.abort_task("运行环境关闭 runtime closing")
             if self._subtask and self._subtask.watcher:
                 self._subtask.watcher.join(timeout=3)
         finally:

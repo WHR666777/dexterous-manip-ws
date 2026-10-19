@@ -16,7 +16,7 @@ python3 AnyDexRetarget/example/input/pico4_daemon.py
 
 ```bash
 python3 -m teleop.cli --config configs/pico4_nero_l20.yaml input-check
-python3 -m teleop.cli --config configs/pico4_nero_l20.yaml run --control both --execute --record-dir data/lerobot/nero_l20_act
+python3 -m teleop.cli --config configs/pico4_nero_l20.yaml run --control both --hand-mode tracking --execute --record-dir data/lerobot/nero_l20_act-3
 ```
 
 Pico 使用 TCP 63901 → 常驻 daemon → localhost 63902，复用 AnyDex 的 26→21 关节映射和 Pico/L20 adaptive 配置。腕部和手指来自同一条 JSON；腕部位置/旋转转换为 RH x前、y左、z上，手指保留原 Pico 重定向坐标。PXR 原生腕姿格式和坐标依据 [XRoboToolkit 发送实现](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/blob/main/Assets/Scripts/TrackingData.cs) 与 [PXR SDK 关节读取实现](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/blob/main/PICO%20Unity%20Integration%20SDK/Runtime/Scripts/Features/PXR_HandTracking.cs)。
@@ -351,7 +351,11 @@ python3 -m cloth_agent.cli script my_subtask.py --params my_params.json --execut
 
 运动句柄提供 `status()`、`done()`、`wait()` 和 `pause_and_hold(reason)`。`done()` 表示运动已停止运行，包括正常完成、暂停和失败；通过 `wait()` 确认结果，暂停与失败分别抛出 `MotionInterrupted`、`MotionFailed`。这些异常可直接从工具模块导入。后台执行器持续运行，脚本等待或读取观测不会停止轨迹推进；调用暂停保持后原轨迹不再推进，已有恢复分支需要从实际状态规划新的轨迹。
 
-每个任务的源码、初始参数、轨迹、RGB-D 快照、`events.jsonl`、子进程输出和结果保存在 `data/agent_runs/`。真实 Codex 运行还保存 `thread.json`。同一任务中的活动程序不能替换；程序未处理的异常或未等待运动便退出会触发暂停收尾并结束该任务，不能提交改写后的程序继续尝试。
+每个任务的源码、初始参数、轨迹、RGB-D 快照、`events.jsonl`、子进程输出和结果保存在 `data/agent_runs/`。真实 Codex 运行还保存 `thread.json` 和便于阅读的 `codex.md`：后者记录实际发送的 developer instructions、工具定义、任务/续接消息、Codex 回复、工具参数/结果及提交的程序源码。
+
+提示词和工具说明以中文为主、保留 English 技术术语，并要求 Codex 的计划、回复、生成代码的注释和说明性日志使用同样形式。`events.jsonl` 增加中英 `description`，任务/子任务/运动状态增加 `status_text`；原有 JSON 字段、工具名和 `completed` / `continue` 等枚举值保持不变，便于程序解析与对照。提示词位于 `cloth_agent/codex.py` 的 `INSTRUCTIONS` 和 `tool_specs()`，demo 任务位于 `cloth_agent/demo.py` 的 `SMOKE_TASK`。新设置对后续运行生效。
+
+同一任务中的活动程序不能替换；程序未处理的异常或未等待运动便退出会触发暂停收尾并结束该任务，不能提交改写后的程序继续尝试。
 
 关键点模块暂未开发。`observations.keypoints_file` 可接收上游原子更新的 JSON，坐标系为 `task` 或 `camera`、单位米，时间戳采用同一主机的单调时钟；`camera` 三维点会使用 `task_from_camera` 自动转换，已经是 `task` 的点保持原值。缺失或过期返回 `null`：
 

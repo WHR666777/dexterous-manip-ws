@@ -63,7 +63,7 @@ class MotionHandle:
     def wait(self, timeout=None):
         return _call("wait_motion", motion_id=self.id, timeout=timeout)
 
-    def pause_and_hold(self, reason="program detected an anomaly"):
+    def pause_and_hold(self, reason="程序检测到异常 program detected an anomaly"):
         return _call("pause_and_hold", motion_id=self.id, reason=reason)
 
 
@@ -87,7 +87,7 @@ def set_hand_pose(pose, *, arm="left"):
     return _call("set_hand_pose", arm=arm, pose=pose)
 
 
-def pause_and_hold(reason="program requested pause"):
+def pause_and_hold(reason="程序请求暂停 program requested pause"):
     return _call("pause_and_hold", reason=reason)
 
 

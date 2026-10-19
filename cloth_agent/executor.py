@@ -11,6 +11,7 @@ import numpy as np
 
 from .backends import hand_vector
 from .planning import MotionPlan
+from .records import status_text
 
 
 class MotionInterrupted(RuntimeError):
@@ -32,7 +33,7 @@ class Motion:
     finished_at: float | None = None
 
     def snapshot(self):
-        return {"motion_id": self.id, "arm": self.plan.arm, "status": self.status,
+        return {"motion_id": self.id, "arm": self.plan.arm, "status": self.status, "status_text": status_text(self.status),
                 "elapsed": self.elapsed, "duration": self.plan.duration, "reason": self.reason}
 
 
@@ -92,7 +93,7 @@ class Executor:
             raise MotionFailed(motion.reason)
         return motion.snapshot()
 
-    def pause_and_hold(self, motion_id=None, reason="program requested pause"):
+    def pause_and_hold(self, motion_id=None, reason="程序请求暂停 program requested pause"):
         with self._condition:
             if motion_id is not None:
                 motion = self._motions[motion_id]
@@ -155,7 +156,7 @@ class Executor:
                         self._finish(motion, "completed")
                     elif motion.elapsed > motion.plan.duration + self.config["motion"]["completion_timeout_s"]:
                         self._holds[motion.plan.arm] = self.backend.get_joints(motion.plan.arm)
-                        self._finish(motion, "failed", "Motion arrival timed out.")
+                        self._finish(motion, "failed", "运动到位超时 Motion arrival timed out.")
             for arm, target in self._holds.items():
                 if self._active is None or self._active.plan.arm != arm:
                     self.backend.send_joints(arm, target)
@@ -182,7 +183,7 @@ class Executor:
                 time.sleep(max(0., self.period - (time.monotonic() - now)))
         except Exception as exc:
             with self._condition:
-                self._fatal = f"Executor failed: {exc}"
+                self._fatal = f"执行器故障 Executor failed: {exc}"
                 # Best effort holds use feedback, never the remaining path.
                 hold_errors = []
                 for arm in self._holds:
@@ -191,7 +192,7 @@ class Executor:
                     except Exception as hold_error:
                         hold_errors.append(f"{arm}: {hold_error}")
                 if hold_errors:
-                    self._fatal += "; hold failed: " + "; ".join(hold_errors)
+                    self._fatal += "; 保持失败 hold failed: " + "; ".join(hold_errors)
                 if self._active:
                     self._finish(self._active, "failed", self._fatal)
                 for request in self._hand_requests:
@@ -202,7 +203,7 @@ class Executor:
 
     def close(self):
         if self._thread.is_alive():
-            self.pause_and_hold(reason="executor closing")
+            self.pause_and_hold(reason="执行器关闭 executor closing")
             with self._condition:
                 self._closing = True
             self._thread.join(timeout=2.)
