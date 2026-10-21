@@ -1,0 +1,84 @@
+control_hz: 20
+input_device: pico4
+
+pico4:
+  transport: tcp
+  input_mode: relay
+  relay_host: 127.0.0.1
+  relay_port: 63902
+  port: 63901
+  broadcast_port: 29888
+  max_age_s: 0.25
+  max_pair_skew_s: 0.05
+
+tracking:
+  position_scale: 1.0
+  ema_alpha: 0.4
+  negate_rot_xy: false
+  position_deadband_m: 0.0
+  rotation_deadband_deg: 0.0
+
+safety:
+  max_position_step_m: 0.1
+  max_rotation_step_deg: 16.0
+  tcp_workspace_cube_side_m: 0.9
+  startup_fk_position_error_m: 0.01
+  startup_fk_rotation_error_deg: 5.0
+
+sides:
+  left:
+    calibration: &calibration
+      # Left/right Nero base axes have been confirmed to have the same orientation.
+      calibrated: true
+      R_base_pico4:
+        - [0.0, 1.0, 0.0]
+        - [-1.0, 0.0, 0.0]
+        - [0.0, 0.0, 1.0]
+    arm: &arm_defaults
+      can_interface: socketcan
+      can_channel: can_arm_b
+      max_joint_delta_rad: 0.3345329252
+      # Record this side explicitly; never copy the right arm's joint angles.
+      start_pose_file: configs/nero_left_start_pose.yaml
+      start_speed_percent: 10
+      follow_speed_percent: 30
+      start_tolerance_rad: 0.02
+      start_timeout_s: 30.0
+    hand: &hand_defaults
+      type: left
+      model: L20
+      can_channel: can_hand_b
+      speed: [240, 240, 240, 240, 240]
+      max_raw_step: 10
+      feedback_poll_hz: 20
+      feedback_max_age_s: 0.25
+      retarget_config: AnyDexRetarget/example/config/adaptive/pico4/pico4_linker_l20_left.yaml
+  right:
+    calibration: *calibration
+    arm:
+      <<: *arm_defaults
+      can_channel: can_arm_a
+      start_pose_file: configs/nero_start_pose.yaml
+      wrist_only_roll_pitch_deg: [-98.18399685481262, 15.964152899573257]
+    hand:
+      <<: *hand_defaults
+      type: right
+      can_channel: can_hand_a
+      retarget_config: AnyDexRetarget/example/config/adaptive/pico4/pico4_linker_l20.yaml
+
+camera:
+  enabled: true
+  model: L515
+  serial: ""
+  width: 640
+  height: 480
+  fps: 30
+  align_depth_to_color: true
+  max_age_s: 0.25
+
+recording:
+  output_dir: data/lerobot/nero_l20_bimanual_act
+  lerobot:
+    python: /home/lab404/anaconda3/envs/act/bin/python
+    repo_id: local/nero_l20_bimanual_act
+    task: "Bimanual NERO and L20 manipulation demonstration"

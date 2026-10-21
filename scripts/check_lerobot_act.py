@@ -33,8 +33,10 @@ def main():
         output_features={k: v for k, v in features.items() if v.type is FeatureType.ACTION},
         chunk_size=60, n_action_steps=20, pretrained_backbone_weights=None, device=device,
     )
-    assert config.input_features["observation.state"].shape == (23,)
-    assert config.output_features["action"].shape == (23,)
+    joint_dim = len(identity["joint_names"])
+    assert joint_dim in (23, 46)
+    assert config.input_features["observation.state"].shape == (joint_dim,)
+    assert config.output_features["action"].shape == (joint_dim,)
     dataset = LeRobotDataset(repo_id=identity["repo_id"], root=args.root,
                              delta_timestamps={"action": [i / dataset.fps for i in range(60)]})
     batch = next(iter(torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=0)))
@@ -50,7 +52,7 @@ def main():
     policy.eval()
     with torch.no_grad():
         predicted = policy.predict_action_chunk(batch)
-    assert predicted.shape == (1, 60, 23)
+    assert predicted.shape == (1, 60, joint_dim)
     assert torch.isfinite(predicted).all()
     print(f"PASS: ACT forward/backward/inference; loss={loss.item():.6f}; "
           f"prediction={tuple(predicted.shape)}; device={device}")

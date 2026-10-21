@@ -195,7 +195,7 @@ class EpisodeRecorder:
         np.savez_compressed(path, **arrays)
         metadata = {
             **self.metadata,
-            "schema_version": 2,
+            "schema_version": 3 if "input_sides" in self.metadata else 2,
             "created_at_utc": self._stamp,
             "sample_hz": self.sample_hz,
             "samples": len(self._rows),

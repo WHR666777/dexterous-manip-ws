@@ -344,6 +344,39 @@ def test_record_start_pose_times_out_without_complete_feedback(monkeypatch, tmp_
     assert arm.disconnected
 
 
+def test_preflight_waits_for_feedback_without_enabling_or_sending(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    arm = _DelayedFeedbackArm(unavailable_reads=1)
+    arm.get_flange_pose = arm.get_tcp_pose = lambda: np.zeros(6)
+    arm.is_enabled = lambda: False
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Read-only preflight must not enable or command the arm")
+
+    arm.enable_normal_mode = arm.enable = arm.move_js = forbidden
+    monkeypatch.setattr(controller, "_make_arm", lambda _: arm)
+    monkeypatch.setattr(controller, "NeroIK", lambda: SimpleNamespace(forward=lambda _: np.eye(4)))
+    monkeypatch.setattr(controller.time, "sleep", lambda _: None)
+    controller.preflight({"safety": {
+        "startup_fk_position_error_m": .01, "startup_fk_rotation_error_deg": 5,
+    }}, "arm")
+    assert arm.read_calls == 2
+    assert arm.disconnected
+    assert "Nero feedback OK; enabled=False" in capsys.readouterr().out
+
+
+def test_preflight_times_out_and_disconnects_when_no_arm_feedback(monkeypatch):
+    arm = _DelayedFeedbackArm(unavailable_reads=99)
+    monkeypatch.setattr(controller, "_make_arm", lambda _: arm)
+    ticks = iter((0.0, 3.0))
+    monkeypatch.setattr(controller.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(controller.time, "sleep", lambda _: None)
+    with pytest.raises(TimeoutError, match="完整的七轴关节反馈"):
+        controller.preflight({}, "arm")
+    assert arm.disconnected
+
+
 @pytest.mark.parametrize("camera_enabled", [True, False])
 @pytest.mark.parametrize("interrupt_recording", [True, False])
 def test_run_records_camera_before_action_and_cleans_up(

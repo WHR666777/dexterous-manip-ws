@@ -1,7 +1,8 @@
-"""Load and validate the single-arm teleoperation configuration."""
+"""Load single-side or Pico4 bimanual teleoperation configurations."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,59 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("Configuration root must be a mapping.")
 
+    if "sides" not in config:
+        return _validate_config(config, config_path)
+    if config.get("input_device") != "pico4":
+        raise ValueError("Bimanual teleoperation requires input_device: pico4.")
+    missing = [key for key in ("pico4", "tracking", "safety", "recording")
+               if not isinstance(config.get(key), dict)]
+    if missing:
+        raise ValueError(f"Missing configuration sections: {', '.join(missing)}")
+    if not isinstance(config["sides"], dict) or set(config["sides"]) != {"left", "right"}:
+        raise ValueError("sides must contain left and right configurations.")
+    for side, settings in config["sides"].items():
+        if not isinstance(settings, dict) or set(settings) != {"arm", "hand", "calibration"}:
+            raise ValueError(f"sides.{side} must contain arm, hand and calibration.")
+    # Validate each side with the existing single-side rules and path handling.
+    validated = {side: _validate_config(settings, config_path)
+                 for side, settings in select_side_configs(config).items()}
+    for key in ("camera", "recording"):
+        config[key] = deepcopy(validated["left"][key])
+    config["sides"] = {
+        side: {key: settings[key] for key in ("arm", "hand", "calibration")}
+        for side, settings in validated.items()
+    }
+    channels = [settings[device]["can_channel"]
+                for settings in validated.values() for device in ("arm", "hand")]
+    if len(set(channels)) != 4:
+        raise ValueError("Bimanual arm/hand configurations require four distinct CAN channels.")
+    config["_path"] = str(config_path)
+    return config
+
+
+def select_side_configs(
+    config: dict[str, Any], side: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve selected sides into independent, existing single-side configs."""
+    if side not in (None, "left", "right", "both"):
+        raise ValueError("side must be left, right or both.")
+    if "sides" not in config:
+        configured_side = input_config(config)["side"]
+        if side not in (None, configured_side):
+            raise ValueError(f"This configuration only defines the {configured_side} side.")
+        return {configured_side: config}
+    selected = ("left", "right") if side in (None, "both") else (side,)
+    shared = {key: value for key, value in config.items() if key != "sides"}
+    result = {}
+    for name in selected:
+        settings = deepcopy(shared)
+        settings.update(deepcopy(config["sides"][name]))
+        input_config(settings)["side"] = name
+        result[name] = settings
+    return result
+
+
+def _validate_config(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     device = config.setdefault("input_device", "quest3")
     if device not in ("quest3", "pico4"):
         raise ValueError("input_device must be 'quest3' or 'pico4'.")
@@ -63,8 +117,10 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"{section}.side must be 'left' or 'right'.")
     if config["hand"].get("type") != source.get("side"):
         raise ValueError(f"hand.type and {section}.side must select the same side.")
-    if float(config.get("control_hz", 0)) <= 0:
-        raise ValueError("control_hz must be positive.")
+    if not np.isfinite(float(config.get("control_hz", 0))) or float(config.get("control_hz", 0)) <= 0:
+        raise ValueError("control_hz must be finite and positive.")
+    if not np.isfinite(float(source["max_age_s"])) or float(source["max_age_s"]) <= 0:
+        raise ValueError(f"{section}.max_age_s must be finite and positive.")
     recording = config["recording"]
     lerobot = recording.get("lerobot")
     if lerobot is not None:
@@ -158,6 +214,16 @@ def require_site_configuration(
     require_calibration: bool = True,
     require_start_pose: bool = False,
 ) -> None:
+    if "sides" in config:
+        for side, settings in select_side_configs(config).items():
+            try:
+                require_site_configuration(
+                    settings, control=control, require_calibration=require_calibration,
+                    require_start_pose=require_start_pose,
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(f"{side}: {exc}") from exc
+        return
     unresolved: list[str] = []
     if control in ("arm", "both") and config["arm"].get("can_channel") == PLACEHOLDER:
         unresolved.append("arm.can_channel")

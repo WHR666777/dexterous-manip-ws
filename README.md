@@ -1,6 +1,6 @@
 # Pico 4 / Quest 3 → Nero + LinkerHand L20 遥操作
 
-本仓库的遥操作部分用 Pico 4 或 Quest 3 的一只手同时控制一台 AgileX Nero 七轴机械臂和一只 LinkerHand L20，并记录后续 OP 训练所需的数据。当前遥操作实现是**单臂 + 单手**。新增的折布 agent 软件入口支持两臂依次运动、普通 Python 脚本监督和参数恢复，当前通过假设备验证；见下方“折布 agent 与普通 Python 程序”。
+本仓库的遥操作部分用 Pico 4 或 Quest 3 控制 AgileX Nero 七轴机械臂和 LinkerHand L20，并记录后续 OP 训练所需的数据。默认仍是**单臂 + 单手**；Pico 4 另支持显式配置的**双臂 + 双手并行控制及联合录制**。新增的折布 agent 软件入口支持两臂依次运动、普通 Python 脚本监督和参数恢复，当前通过假设备验证；见下方“折布 agent 与普通 Python 程序”。
 
 `AnyDexRetarget/` 是唯一有效的 VR 输入和手部重定向实现。原 `vr_teleop` 只作为腕部相对锚定和平滑方案的参考，所需跟踪逻辑已经迁入 `teleop/`，不再作为运行依赖。
 
@@ -24,6 +24,32 @@ Pico 使用 TCP 63901 → 常驻 daemon → localhost 63902，复用 AnyDex 的 
 新配置保留原机械臂/手的 CAN、控制频率、相对锚定、平滑、IK、运动限制、相机与 R/B/S/Q 流程。`calibration.R_base_pico4` 以原 Quest 矩阵为初值，现场确认方向后将 `calibration.calibrated` 改为 `true` 才能运行 `arm/both`。`input-check` 和 `hand` 模式不要求腕部到机械臂的标定。无需运行 `quest-listener`；需要直连调试时，将 `pico4.input_mode` 改为 `direct` 并停止 daemon。
 
 以下保留原 Quest 配置和操作说明；使用 Pico 执行同一硬件命令时，把配置路径换为 `configs/pico4_nero_l20.yaml`，手侧字段使用 `pico4.side`，标定矩阵使用 `R_base_pico4`。
+
+## Pico 4 双侧遥操作
+
+使用独立配置 `configs/pico4_bimanual_nero_l20.yaml`；原配置和默认命令继续控制单侧。`sides.left/right` 各自定义 `arm`、`hand`、`calibration`，其余参数共用。左右 Nero base 已确认同向，配置使用相同旋转矩阵，但起始关节姿态分别记录。
+
+| 侧别 | Nero CAN | L20 CAN | 起始姿态 |
+| --- | --- | --- | --- |
+| 左 | `can_arm_b` | `can_hand_b` | `configs/nero_left_start_pose.yaml` |
+| 右 | `can_arm_a` | `can_hand_a` | `configs/nero_start_pose.yaml` |
+
+先配置并启用四条 CAN（`scripts/nero/can_up_all.sh` 已包含四条接口），保持原 Pico daemon 运行。将左臂放到所需起始位置后，只读记录它的姿态，再检查双侧输入及设备：
+
+```bash
+python3 -m teleop.cli --config configs/pico4_bimanual_nero_l20.yaml --side left record-start-pose
+python3 -m teleop.cli --config configs/pico4_bimanual_nero_l20.yaml input-check
+python3 -m teleop.cli --config configs/pico4_bimanual_nero_l20.yaml preflight --control both
+python3 -m teleop.cli --config configs/pico4_bimanual_nero_l20.yaml run --control both --execute
+```
+
+两侧都到达各自起始姿态后，R 同时重锚定并恢复，B 开始联合录制，S 保存，Q 保存并退出。任一侧输入失效、IK 失败或越界都会锁定暂停双侧；两侧输入恢复后仍需 R。使能、重置及 preflight 也接受全局 `--side left|right|both`；`record-start-pose` 必须选择单侧。
+
+主进程独占 Pico 输入、键盘和相机，两个 `spawn` 子进程分别持有左/右侧的 IK、retargeter、反馈线程和 CAN 对象。每轮左右并行计算，双方通过后才通知并行下发；失败或过期的一轮不会继续下发。CAN 调用不具备跨设备原子性，发送阶段异常可能留下部分已发出的命令，此时整套控制退出。
+
+`control_hz: 20` 是调度目标，实际取决于较慢一侧的计算与发送耗时。输出 `[left control timing]`、`[right control timing]` 和 `[bimanual timing]`，报告实测频率、各阶段耗时及超周期次数；并行本身不保证达到 20 Hz。
+
+联合录制保存在 `data/lerobot/nero_l20_bimanual_act/`，状态/动作顺序为左臂 7＋左手 16＋右臂 7＋右手 16，共 46 维，每个完整双侧周期对应一帧共享 RGB-D；格式见 [数据格式](docs/dataset_schema.md)。`--control arm/hand` 仅保存诊断。单独选择 `--side left/right` 时复用原单侧控制及 23 维录制，默认输出目录和 repo_id 加对应侧后缀。双侧目前支持 `tracking`，原单侧 `wrist-only` 入口保留。
 
 ## 数据流
 

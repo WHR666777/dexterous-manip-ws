@@ -389,6 +389,16 @@ class Pico4:
         """Check the relay connection without requiring headset tracking yet."""
         return self._connected.wait(timeout_s)
 
+    def get_hand_frames(self) -> dict[str, Optional[Pico4HandFrame]]:
+        """Copy both latest hands under one lock, from one tracking update."""
+        with self._lock:
+            return {
+                side: (replace(frame, wrist_position=frame.wrist_position.copy(),
+                               wrist_quat=frame.wrist_quat.copy(),
+                               landmarks=frame.landmarks.copy()) if frame is not None else None)
+                for side, frame in self._hand_frames.items()
+            }
+
     def _update_tracking(self, payload: bytes) -> None:
         data = _decode_tracking_json(payload)
         hands = data.get('Hand', {}) if data is not None else {}

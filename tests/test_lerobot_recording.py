@@ -8,7 +8,10 @@ import subprocess
 import numpy as np
 import pytest
 
-from teleop.lerobot_export import JOINT_NAMES, joint_vectors, validate_staging
+from teleop.lerobot_export import (
+    BIMANUAL_JOINT_NAMES, JOINT_NAMES, check_existing, dataset_features,
+    joint_vectors, validate_staging,
+)
 from teleop.recording import EpisodeRecorder
 from teleop.realsense_camera import RGBDFrame
 
@@ -19,6 +22,8 @@ METADATA = {"control": "both", "input_side": "right", "camera": {
     "width": 640, "height": 480, "depth_scale_m": 0.00025, "depth_aligned_to": "color",
     "color_intrinsics": {"fx": 600, "fy": 600, "ppx": 320, "ppy": 240},
 }}
+DUAL_METADATA = {key: value for key, value in METADATA.items() if key != "input_side"}
+DUAL_METADATA["input_sides"] = ["left", "right"]
 
 
 def row(i=0):
@@ -31,6 +36,20 @@ def row(i=0):
     )
 
 
+def dual_row(i=0):
+    base = row(i)
+    result = {key: base[key] for key in ("timestamp_monotonic", "observation_timestamp_monotonic")}
+    result["cycle_id"] = i + 1
+    for side in ("left", "right"):
+        for key, value in base.items():
+            if key == "timestamp_monotonic":
+                continue
+            if side == "right" and isinstance(value, np.ndarray):
+                value = value + (30 if "hand" in key else .05)
+            result[f"{side}_{key}"] = value
+    return result
+
+
 def frame(i=0):
     rgb = np.zeros((480, 640, 3), dtype=np.uint8)
     rgb[:, :, 0] = 180 + i
@@ -41,12 +60,13 @@ def frame(i=0):
                      i, i, "hardware_clock", "hardware_clock")
 
 
-def staged(tmp_path, monkeypatch, count=3):
-    recorder = EpisodeRecorder(tmp_path / "dataset", METADATA, lerobot=SETTINGS)
+def staged(tmp_path, monkeypatch, count=3, bimanual=False):
+    recorder = EpisodeRecorder(tmp_path / "dataset", DUAL_METADATA if bimanual else METADATA,
+                               lerobot=SETTINGS)
     monkeypatch.setattr(recorder, "_export_lerobot", lambda directory: directory)
     recorder.start()
     for i in range(count):
-        recorder.append(camera_frame=frame(i), **row(i))
+        recorder.append(camera_frame=frame(i), **(dual_row(i) if bimanual else row(i)))
     recorder.start()  # Repeated begin cannot discard data.
     return recorder, recorder.stop_and_save()
 
@@ -61,6 +81,52 @@ def test_active_channels_and_pre_command_feedback():
     np.testing.assert_array_equal(state[0, 7:], expected)
     np.testing.assert_array_equal(action[0, 7:], expected + 50)
     np.testing.assert_allclose(action[:, :7] - state[:, :7], .1, atol=1e-7)
+
+
+def test_bimanual_vectors_preserve_side_order_and_pre_command_feedback():
+    rows = [dual_row(0), dual_row(1)]
+    data = {key: np.array([sample[key] for sample in rows]) for key in rows[0]}
+    state, action = joint_vectors(data, bimanual=True)
+    active = np.array(list(range(11)) + list(range(15, 20)))
+    assert state.shape == action.shape == (2, 46)
+    assert state.dtype == action.dtype == np.float32
+    np.testing.assert_array_equal(state[0, 7:23], active)
+    np.testing.assert_array_equal(state[0, 30:], active + 30)
+    np.testing.assert_array_equal(action[0, 7:23], active + 50)
+    np.testing.assert_array_equal(action[0, 30:], active + 80)
+    assert BIMANUAL_JOINT_NAMES == [f"{side}.{name}" for side in ("left", "right") for name in JOINT_NAMES]
+    assert dataset_features(True)["action"]["names"] == BIMANUAL_JOINT_NAMES
+    assert dataset_features()["action"]["shape"] == (23,)
+
+
+def test_bimanual_rgbd_staging_and_schema(tmp_path, monkeypatch):
+    import h5py
+
+    recorder, directory = staged(tmp_path, monkeypatch, bimanual=True)
+    metadata, data, state, action = validate_staging(directory)
+    assert metadata["schema_version"] == 3
+    assert metadata["input_sides"] == ["left", "right"]
+    assert state.shape == action.shape == (3, 46)
+    np.testing.assert_array_equal(data["cycle_id"], [1, 2, 3])
+    assert not recorder.output_dir.exists()
+    with h5py.File(directory / "camera/depth.h5", "r") as depth:
+        np.testing.assert_array_equal(depth["depth"][:], [frame(i).depth for i in range(3)])
+
+
+@pytest.mark.parametrize("fault", ["missing_right", "reused_cycle", "bad_raw"])
+def test_bimanual_staging_rejects_partial_or_invalid_samples(tmp_path, monkeypatch, fault):
+    _, directory = staged(tmp_path, monkeypatch, bimanual=True)
+    with np.load(directory / "trajectory.npz") as archive:
+        data = {key: archive[key] for key in archive.files}
+    if fault == "missing_right":
+        del data["right_arm_action"]
+    elif fault == "reused_cycle":
+        data["cycle_id"][1] = data["cycle_id"][0]
+    else:
+        data["right_observation_hand_position_raw"][0, 0] = -1
+    np.savez_compressed(directory / "trajectory.npz", **data)
+    with pytest.raises(ValueError):
+        validate_staging(directory)
 
 
 def test_png_and_z16_staging_are_lossless(tmp_path, monkeypatch):
@@ -240,3 +306,53 @@ print("PASS: official loader, RGB channels, 23-D vectors, stats and episode padd
     with pytest.raises(ValueError, match="feature differs"):
         check_existing(root, metadata)
     (root / "meta/info.json").write_bytes(before)
+
+
+@pytest.mark.skipif(not ACT_PYTHON.is_file(), reason="Pinned act environment is not installed")
+def test_real_bimanual_lerobot_restart_loader_and_act(tmp_path):
+    import h5py
+
+    root = tmp_path / "bimanual_dataset"
+    for episode in range(2):
+        recorder = EpisodeRecorder(root, DUAL_METADATA, lerobot=SETTINGS)
+        recorder.start()
+        for i in range(3):
+            recorder.append(camera_frame=frame(i), **dual_row(i))
+        assert recorder.stop_and_save() == root
+        info = json.loads((root / "meta/info.json").read_text())
+        assert info["robot_type"] == "nero_l20_bimanual"
+        assert info["total_episodes"] == episode + 1
+        assert info["features"]["action"]["shape"] == [46]
+        assert info["features"]["action"]["names"] == BIMANUAL_JOINT_NAMES
+        with h5py.File(root / "depth" / f"episode-{episode:06d}.h5", "r") as depth:
+            np.testing.assert_array_equal(depth["depth"][:], [frame(i).depth for i in range(3)])
+        meta = json.loads((root / "diagnostics" / f"episode-{episode:06d}.json").read_text())
+        assert meta["actual_hz"] == pytest.approx(20.)
+    # Refuse a single-side append before touching official data files.
+    before = (root / "meta/info.json").read_bytes()
+    with pytest.raises(ValueError, match="robot_type"):
+        check_existing(root, {**METADATA, "lerobot": SETTINGS, "sample_hz": 20})
+    assert (root / "meta/info.json").read_bytes() == before
+    env = {**os.environ, "LD_PRELOAD": "/usr/lib/x86_64-linux-gnu/libffi.so.7",
+           "HF_HOME": str(tmp_path / "hf-cache"), "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
+    check = r'''
+import sys
+import numpy as np
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+ds = LeRobotDataset(repo_id="local/nero_l20_test", root=sys.argv[1],
+                    delta_timestamps={"action": [i/20 for i in range(5)]})
+assert ds.num_episodes == 2 and len(ds) == 6
+active = np.array(list(range(11)) + list(range(15,20)))
+for episode in range(2):
+    sample = ds[episode*3]
+    assert sample["observation.state"].shape == (46,)
+    np.testing.assert_array_equal(sample["observation.state"][7:23], active)
+    np.testing.assert_array_equal(sample["observation.state"][30:], active+30)
+    np.testing.assert_array_equal(sample["action"][0,7:23], active+50)
+    np.testing.assert_array_equal(sample["action"][0,30:], active+80)
+    assert sample["action_is_pad"].tolist() == [False,False,False,True,True]
+    assert sample["observation.images.front"].shape == (3,480,640)
+'''
+    subprocess.run([str(ACT_PYTHON), "-B", "-c", check, str(root)], check=True, env=env)
+    subprocess.run([str(ACT_PYTHON), "-B", "scripts/check_lerobot_act.py", str(root), "--device", "cpu"],
+                   check=True, env=env, cwd=Path(__file__).resolve().parents[1])

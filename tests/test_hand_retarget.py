@@ -4,7 +4,9 @@ import sys
 import numpy as np
 import pinocchio as pin
 import pytest
+from scipy.spatial.transform import Rotation
 
+from teleop.config import load_config, select_side_configs
 from teleop.hand_retarget import HAND_TIMING_FIELDS, L20Retargeter
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +64,36 @@ def synthetic_landmarks():
         for segment in range(1, 5):
             points.append([.025 * segment, .02 * (finger - 2), .003 * segment ** 2])
     return np.asarray(points)
+
+
+@pytest.mark.parametrize('bend', [0., .3, 1.])
+def test_bimanual_configs_align_mirrored_hands_in_model_frame(bend):
+    from anydexretarget.mediapipe import apply_mediapipe_transformations
+
+    configs = select_side_configs(load_config(ROOT / 'configs/pico4_bimanual_nero_l20.yaml'))
+    retargeters = {
+        side: L20Retargeter(settings['hand']['retarget_config'], side, 10)._retargeter
+        for side, settings in configs.items()
+    }
+    points = synthetic_landmarks()
+    points[:, 2] *= bend
+    # The palm correction must work independently of the hand's world pose.
+    rotation = Rotation.from_euler('xyz', [23., -41., 68.], degrees=True).as_matrix()
+    points = points @ rotation.T + [.12, -.18, .27]
+    mirror = np.array([1., -1., 1.])
+    right = retargeters['right']._apply_rotation(apply_mediapipe_transformations(points, 'right'))
+    left = retargeters['left']._apply_rotation(apply_mediapipe_transformations(points * mirror, 'left'))
+    np.testing.assert_allclose(left, right * mirror, atol=1e-10)
+
+    # Confirm that this is the reflection used by the actual left/right URDFs.
+    model_points = {}
+    for side, retargeter in retargeters.items():
+        optimizer = retargeter.optimizer
+        limits = optimizer.robot.joint_limits
+        q = limits[:, 0] + .4 * (limits[:, 1] - limits[:, 0])
+        model_points[side] = optimizer.robot.compute_points_batch(
+            q, optimizer.computed_link_indices, optimizer.computed_link_offsets)
+    np.testing.assert_allclose(model_points['left'], model_points['right'] * mirror, atol=1e-9)
 
 
 def test_retarget_diagnostics_are_per_solve_and_keep_limits_and_raw_slew():

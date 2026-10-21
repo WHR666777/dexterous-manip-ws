@@ -17,16 +17,16 @@ retarget:
   pinch_scaling: 1.5101
   alpha: 1.0
   w_contact: 6.0
-  mcp_lateral_scale: 0.60
+  lateral_scaling: 0.7
   thumb_scale: 1.0
   thumb_inward_offset: -0.02
 
   segment_scaling:
-    thumb: [1.95, 1.727, 1.53, 1.417]
-    index: [1.9, 1.617, 1.624, 1.579]
-    middle: [1.88, 1.58, 1.548, 1.47]
-    ring: [1.9, 1.613, 1.613, 1.55]
-    pinky: [1.95, 1.806, 1.821, 1.74]
+    thumb: [1.269, 2.361, 1.232, 1.033]
+    index: [1.753, 1.178, 1.512, 1.092]
+    middle: [1.847, 0.992, 1.288, 0.924]
+    ring: [1.884, 1.053, 1.54, 1.086]
+    pinky: [1.825, 1.681, 1.894, 1.197]
 
   pinch_thresholds:
     index: {d1: 2.0, d2: 4.0}
@@ -34,10 +34,12 @@ retarget:
     ring: {d1: 2.0, d2: 4.0}
     pinky: {d1: 2.0, d2: 4.0}
 
+  # Mirror the right hand's palm-frame correction for the mirrored left URDF.
+  # apply_mediapipe_transformations() already handles handedness.
   mediapipe_rotation:
-    x: -10.0
+    x: 10.0
     y: 0.0
-    z: 100.0
+    z: 10.0
 
   lp_alpha: 0.4
 

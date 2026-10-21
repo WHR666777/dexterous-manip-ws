@@ -10,6 +10,7 @@ import numpy as np
 
 
 NERO_DOF = 7
+NERO_MOTOR_FEEDBACK_MAX_AGE_S = 0.5
 
 
 def _load_nero_sdk():
@@ -75,6 +76,7 @@ class NeroArm:
             )
             driver = sdk.AgxArmFactory.create_arm(config)
         self._driver = driver
+        self._can_channel = can_channel
         self._max_joint_delta = self._validate_delta_setting(max_joint_delta)
         self._driver.set_joint_limits_enabled(True)
         config = self._driver.get_config()
@@ -186,11 +188,33 @@ class NeroArm:
         if not self.is_enabled():
             raise RuntimeError("Nero arm is not enabled.")
 
-    def enable_normal_mode(self) -> None:
-        while not self._driver.enable():
+    def enable_normal_mode(self, timeout: float = 5.0, poll_interval: float = 0.01) -> None:
+        """保留正常模式使能流程，反馈缺失时在有限时间内报告故障。"""
+        self._require_connected()
+
+        def attempt() -> bool:
+            if self._driver.enable():
+                return True
             self._driver.set_normal_mode()
-            time.sleep(0.01)
-    
+            return False
+
+        try:
+            self._retry_until_true(
+                attempt, timeout=timeout, poll_interval=poll_interval,
+                message="Nero normal-mode enable timed out.",
+            )
+        except TimeoutError as exc:
+            enabled = [bool(self._driver.get_joint_enable_status(index))
+                       for index in range(1, NERO_DOF + 1)]
+            status = self._driver.get_arm_status()
+            status = self._to_plain_data(status.msg) if status is not None else None
+            raise TimeoutError(
+                f"Nero normal-mode enable timed out on {self._can_channel}; "
+                f"enabled_joints={enabled}; arm_status={status}; "
+                f"CAN error={self._driver.get_comm_error()}. "
+                "Check CAN communication, arm power and controller faults."
+            ) from exc
+
     def enable_leader_mode(self) -> None:
         while not self._driver.enable():
             self._driver.set_leader_mode()
@@ -470,15 +494,32 @@ class NeroArm:
         Raises
         ------
         RuntimeError
-            未连接、官方反馈不可用，或反馈形状/数值不合法时抛出。
+            未连接、官方反馈不可用/超过 0.5 s 未更新，或反馈形状/数值不合法时抛出。
 
         Notes
         -----
         由七次 ``Driver.get_motor_states(1..7).msg.position`` 组成；仅当七个
         组成消息均存在且位置均为有限标量时返回，不使用可能部分填充的官方
-        ``get_joint_angles()`` 聚合缓存。
+        ``get_joint_angles()`` 聚合缓存。SDK 的 timestamp 来自 SocketCAN 接收帧，
+        使用 Unix 时间；静止时也必须持续刷新，不能将断流后的缓存当成当前状态。
         """
         messages = self.get_raw_motor_states()
+        now = time.time()
+        for index, message in enumerate(messages, start=1):
+            timestamp = getattr(message, "timestamp", None)
+            if timestamp is None or not np.isfinite(timestamp) or timestamp <= 0:
+                raise RuntimeError(
+                    f"Nero SDK feedback is unavailable: invalid J{index} timestamp "
+                    f"on {self._can_channel}."
+                )
+            age = now - timestamp
+            if age > NERO_MOTOR_FEEDBACK_MAX_AGE_S:
+                raise RuntimeError(
+                    f"Nero SDK feedback is unavailable: stale J{index} motor feedback "
+                    f"on {self._can_channel}, age={age:.3f} s "
+                    f"> {NERO_MOTOR_FEEDBACK_MAX_AGE_S:.3f} s; "
+                    f"CAN error={self._driver.get_comm_error()}."
+                )
         try:
             positions = [message.msg.position for message in messages]
         except AttributeError as exc:
@@ -827,6 +868,10 @@ class NeroArm:
         self._prepare_motion(None)
         command = self.validate_joint_command(joints)
         self._driver.move_js(command.tolist())
+        # The pinned SDK stores ENOBUFS/ENETDOWN instead of raising them.
+        error = self._driver.get_comm_error()
+        if error is not None:
+            raise RuntimeError(f"Nero JS send failed on {self._can_channel}: {error}")
 
     def move_pose(self, pose: Any, *, speed_percent: Optional[int] = None) -> None:
         """验证后非阻塞地发送法兰笛卡尔位姿目标。

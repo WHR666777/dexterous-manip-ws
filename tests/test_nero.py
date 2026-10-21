@@ -1,4 +1,5 @@
 from enum import Enum, IntEnum
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,9 +9,9 @@ from robot_control.nero import NeroArm
 
 
 class Message:
-    def __init__(self, msg, timestamp=123.0, hz=100.0):
+    def __init__(self, msg, timestamp=None, hz=100.0):
         self.msg = msg
-        self.timestamp = timestamp
+        self.timestamp = time.time() if timestamp is None else timestamp
         self.hz = hz
 
 
@@ -71,6 +72,8 @@ class FakeNeroDriver:
         self.enabled = False
         self.enable_after = 1
         self.enable_calls = 0
+        self.normal_mode_calls = 0
+        self.comm_error = None
         self.disable_calls = 0
         self.sent_joints = []
         self.sent_poses = []
@@ -125,6 +128,12 @@ class FakeNeroDriver:
         self.enabled = False
         return True
 
+    def set_normal_mode(self):
+        self.normal_mode_calls += 1
+
+    def get_comm_error(self):
+        return self.comm_error
+
     def get_joint_enable_status(self, index):
         return self.enabled
 
@@ -153,6 +162,9 @@ class FakeNeroDriver:
         self.speed = speed
 
     def move_j(self, joints):
+        self.sent_joints.append(list(joints))
+
+    def move_js(self, joints):
         self.sent_joints.append(list(joints))
 
     def move_p(self, pose):
@@ -231,6 +243,32 @@ def test_enable_timeout_is_finite():
     driver.enable_after = 10_000
     with pytest.raises(TimeoutError, match="Nero enable timed out"):
         arm.enable(timeout=0.01, poll_interval=0.001)
+
+
+def test_normal_mode_enable_retries_without_sending_motion():
+    arm, driver = make_connected_arm(enabled=False)
+    driver.enable_after = 3
+    arm.enable_normal_mode(timeout=0.2, poll_interval=0.001)
+    assert driver.enable_calls == 3
+    assert driver.normal_mode_calls == 2
+    assert arm.is_enabled()
+    assert driver.sent_joints == []
+
+
+def test_normal_mode_enable_timeout_reports_channel_and_can_error():
+    arm, driver = make_connected_arm(enabled=False, can_channel="can_arm_b")
+    driver.enable_after = 10_000
+    driver.comm_error = OSError(105, "No buffer space available")
+    driver.get_arm_status = lambda: None
+    with pytest.raises(TimeoutError) as failure:
+        arm.enable_normal_mode(timeout=0, poll_interval=0.001)
+    message = str(failure.value)
+    assert "can_arm_b" in message
+    assert "enabled_joints=[False, False, False, False, False, False, False]" in message
+    assert "arm_status=None" in message
+    assert "No buffer space available" in message
+    assert driver.enable_calls == 1
+    assert driver.sent_joints == []
 
 
 def test_disable_timeout_is_finite():
@@ -326,6 +364,35 @@ def test_joint_position_requires_all_seven_constituent_motor_frames():
         arm.get_joint_positions()
     with pytest.raises(RuntimeError, match="unavailable"):
         arm.validate_joint_command([0.01] * 7)
+
+
+def test_stale_motor_feedback_cannot_be_used_for_ik_or_js_command(monkeypatch):
+    arm, driver = make_connected_arm(max_joint_delta=0.1, can_channel="can_arm_b")
+    monkeypatch.setattr("robot_control.nero.time.time", lambda: 1000.0)
+    frames = [Message(SimpleNamespace(position=0.0), timestamp=999.99) for _ in range(7)]
+    frames[3].timestamp = 999.0
+    driver.get_motor_states = lambda index: frames[index - 1]
+    with pytest.raises(RuntimeError, match="stale J4 motor feedback on can_arm_b"):
+        arm.get_joint_positions()
+    with pytest.raises(RuntimeError, match="stale J4 motor feedback"):
+        arm.move_js([0.01] * 7)
+    assert driver.sent_joints == []
+    # The raw debugging interface still exposes stale SDK messages.
+    assert arm.get_raw_motor_states()[3].timestamp == 999.0
+    # A stationary arm with freshly received frames is valid.
+    frames[3].timestamp = 999.99
+    np.testing.assert_array_equal(arm.get_joint_positions(), np.zeros(7))
+
+
+def test_js_send_surfaces_the_can_error_suppressed_by_sdk():
+    arm, driver = make_connected_arm(can_channel="can_arm_b")
+
+    def failed_send(joints):
+        driver.comm_error = OSError(105, "No buffer space available")
+
+    driver.move_js = failed_send
+    with pytest.raises(RuntimeError, match="Nero JS send failed on can_arm_b.*No buffer space"):
+        arm.move_js([0.01] * 7)
 
 
 @pytest.mark.parametrize("method_name", ["get_flange_pose", "get_tcp_pose"])

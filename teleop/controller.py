@@ -49,8 +49,9 @@ class _ControlTiming:
         "timing_hand_send_wait_s",
     )
 
-    def __init__(self, control_hz: float) -> None:
+    def __init__(self, control_hz: float, label: str = "") -> None:
         self.period = 1.0 / control_hz
+        self.label = f"{label} " if label else ""
         self.rows: list[tuple[float, ...]] = []
         self.hand_rows: list[tuple[float, ...]] = []
         self.elapsed = 0.0
@@ -85,7 +86,7 @@ class _ControlTiming:
         )
         overruns = int(np.count_nonzero(values[:, -2] > self.period))
         print(
-            f"[control timing] cycles={len(values)} active_hz={len(values) / self.elapsed:.2f} "
+            f"[{self.label}control timing] cycles={len(values)} active_hz={len(values) / self.elapsed:.2f} "
             f"target_hz={1.0 / self.period:.1f} overruns={overruns}/{len(values)} "
             f"ms(mean/p95/max): {stages}"
         )
@@ -98,7 +99,7 @@ class _ControlTiming:
                 if len(ms):
                     name = key.removeprefix('timing_hand_').removesuffix('_s')
                     details.append(f'{name}={ms.mean():.1f}/{np.percentile(ms, 95):.1f}/{ms.max():.1f}')
-            print(f'[hand retarget] cycles={len(evals)} '
+            print(f'[{self.label}hand retarget] cycles={len(evals)} '
                   f'numevals(mean/p95/max)={evals.mean():.1f}/'
                   f'{np.percentile(evals, 95):.1f}/{evals.max():.0f} '
                   f'ms(mean/p95/max): {" ".join(details)}')
@@ -442,9 +443,9 @@ def preflight(config: dict[str, Any], control: str) -> None:
     try:
         if arm is not None:
             arm.connect()
-            arm.enable_normal_mode()
-            joints = arm.get_joint_positions()
-            flange = pose6_to_matrix(arm.get_flange_pose())
+            joints = _read_complete_arm_joint_positions(arm)
+            flange_pose, _ = _read_complete_arm_startup_poses(arm)
+            flange = pose6_to_matrix(flange_pose)
             predicted = NeroIK().forward(joints)
             position_error, rotation_error = pose_error(predicted, flange)
             print(
@@ -644,7 +645,9 @@ def run(
                 calibration_dir, config, calibration_hand_pose, calibration_hand_frame, camera.metadata,
             )
         if arm is not None:
+            print(f"Nero connecting: {arm_config['can_channel']}", flush=True)
             arm.connect()
+            print("Nero enabling normal mode (timeout=5.0 s).", flush=True)
             arm.enable_normal_mode()
             if not arm.is_enabled():
                 raise RuntimeError("Nero is not enabled. Enable it using the approved site procedure before run.")

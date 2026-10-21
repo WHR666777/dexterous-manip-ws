@@ -23,20 +23,38 @@ JOINT_NAMES = [f"nero.joint{i}" for i in range(1, 8)] + [
     f"l20.{L20_JOINT_NAMES[i]}" for i in L20_ACTIVE_POSITION_INDICES
 ]
 ROBOT_TYPE = "nero_l20"
+BIMANUAL_JOINT_NAMES = [f"{side}.{name}" for side in ("left", "right") for name in JOINT_NAMES]
+BIMANUAL_ROBOT_TYPE = "nero_l20_bimanual"
 IMAGE_KEY = "observation.images.front"
 
 
-def dataset_features() -> dict:
+def _is_bimanual(metadata: dict) -> bool:
+    sides = metadata.get("input_sides")
+    if sides is not None and sides != ["left", "right"]:
+        raise ValueError("Bimanual recording input_sides must be ['left', 'right'] in order.")
+    return sides is not None
+
+
+def dataset_features(bimanual: bool = False) -> dict:
+    names = BIMANUAL_JOINT_NAMES if bimanual else JOINT_NAMES
     return {
-        "observation.state": {"dtype": "float32", "shape": (23,), "names": JOINT_NAMES},
-        "action": {"dtype": "float32", "shape": (23,), "names": JOINT_NAMES},
+        "observation.state": {"dtype": "float32", "shape": (len(names),), "names": names},
+        "action": {"dtype": "float32", "shape": (len(names),), "names": names},
         IMAGE_KEY: {"dtype": "video", "shape": (480, 640, 3),
                     "names": ["height", "width", "channels"]},
     }
 
 
-def joint_vectors(data: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+def joint_vectors(
+    data: dict[str, np.ndarray], bimanual: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
     """Use pre-command feedback and the final targets, in identical channel order."""
+    if bimanual:
+        vectors = [joint_vectors({key[len(side)+1:]: value for key, value in data.items()
+                                  if key.startswith(f"{side}_")}) for side in ("left", "right")]
+        if len(vectors[0][0]) != len(vectors[1][0]):
+            raise ValueError("Left/right sample counts do not agree.")
+        return tuple(np.concatenate(parts, axis=1) for parts in zip(*vectors))
     arrays = {}
     for key, width in (("observation_arm_joint_position", 7),
                        ("observation_hand_position_raw", 20),
@@ -69,7 +87,8 @@ def validate_staging(staging: Path) -> tuple[dict, dict, np.ndarray, np.ndarray]
         data = {key: archive[key] for key in archive.files}
     if metadata.get("control") != "both" or metadata.get("recording_error"):
         raise ValueError("A complete, error-free --control both recording is required.")
-    state, action = joint_vectors(data)
+    bimanual = _is_bimanual(metadata)
+    state, action = joint_vectors(data, bimanual)
     count = len(state)
     if metadata["samples"] != count or any(len(v) != count for v in data.values()):
         raise ValueError("Trajectory sample counts do not agree.")
@@ -77,6 +96,11 @@ def validate_staging(staging: Path) -> tuple[dict, dict, np.ndarray, np.ndarray]
         times = data[key]
         if times.shape != (count,) or not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
             raise ValueError(f"{key} must contain strictly increasing host timestamps.")
+    if bimanual:
+        cycles = data.get("cycle_id", np.array([]))
+        if (cycles.shape != (count,) or not np.issubdtype(cycles.dtype, np.integer)
+                or np.any(np.diff(cycles) <= 0)):
+            raise ValueError("Bimanual cycle_id must contain strictly increasing integer cycles.")
     if (data["camera_valid"].shape != (count,) or not data["camera_valid"].all()
             or not np.array_equal(data["camera_frame_index"], np.arange(count))):
         raise ValueError("Missing RGB-D samples; the episode cannot be exported without dropping/faking rows.")
@@ -118,22 +142,26 @@ def dataset_lock(root: Path):
 
 
 def recording_identity(metadata: dict) -> dict:
+    bimanual = _is_bimanual(metadata)
     return {"repo_id": metadata["lerobot"]["repo_id"],
-            "hand_side": metadata.get("input_side", metadata.get("quest_side")),
-            "joint_names": JOINT_NAMES,
+            "hand_side": (metadata["input_sides"] if bimanual
+                          else metadata.get("input_side", metadata.get("quest_side"))),
+            "joint_names": BIMANUAL_JOINT_NAMES if bimanual else JOINT_NAMES,
             "l20_active_position_indices": list(L20_ACTIVE_POSITION_INDICES),
             "units": {"nero": "rad", "l20": "raw_0_255"}}
 
 
 def check_existing(root: Path, metadata: dict) -> None:
+    bimanual = _is_bimanual(metadata)
+    robot_type = BIMANUAL_ROBOT_TYPE if bimanual else ROBOT_TYPE
     info = json.loads((root / "meta/info.json").read_text(encoding="utf-8"))
     if (info.get("codebase_version") != "v3.0" or info.get("fps") != metadata["sample_hz"]
-            or info.get("robot_type") != ROBOT_TYPE):
+            or info.get("robot_type") != robot_type):
         raise ValueError("Existing dataset version, fps or robot_type differs; use a new output directory.")
     default_keys = {"timestamp", "frame_index", "episode_index", "index", "task_index"}
-    if set(info["features"]) != set(dataset_features()) | default_keys:
+    if set(info["features"]) != set(dataset_features(bimanual)) | default_keys:
         raise ValueError("Existing dataset feature keys differ.")
-    for key, expected in dataset_features().items():
+    for key, expected in dataset_features(bimanual).items():
         actual = info["features"].get(key, {})
         if (actual.get("dtype") != expected["dtype"]
                 or tuple(actual.get("shape", ())) != expected["shape"]
@@ -149,6 +177,7 @@ def check_existing(root: Path, metadata: dict) -> None:
 def export_episode(staging: Path, root: Path) -> dict:
     # Validate source files before importing the training stack or touching the dataset.
     metadata, data, state, action = validate_staging(staging)
+    bimanual = _is_bimanual(metadata)
     if version("lerobot") != "0.4.4":
         raise RuntimeError("The save process requires the pinned LeRobot 0.4.4 environment.")
     from PIL import Image
@@ -165,8 +194,9 @@ def export_episode(staging: Path, root: Path) -> dict:
             dataset = LeRobotDataset(repo_id=repo_id, root=root, vcodec="h264", encoder_threads=2)
         else:
             dataset = LeRobotDataset.create(
-                repo_id=repo_id, root=root, fps=fps, features=dataset_features(),
-                robot_type=ROBOT_TYPE, vcodec="h264", metadata_buffer_size=1, encoder_threads=2,
+                repo_id=repo_id, root=root, fps=fps, features=dataset_features(bimanual),
+                robot_type=BIMANUAL_ROBOT_TYPE if bimanual else ROBOT_TYPE,
+                vcodec="h264", metadata_buffer_size=1, encoder_threads=2,
             )
             (root / "meta/recording.json").write_text(
                 json.dumps(recording_identity(metadata), ensure_ascii=False, indent=2), encoding="utf-8",
@@ -195,7 +225,7 @@ def export_episode(staging: Path, root: Path) -> dict:
         intervals = np.diff(times)
         actual_hz = float((len(times) - 1) / (times[-1] - times[0])) if len(times) > 1 else 0.0
         metadata.update(
-            episode_index=episode_index, joint_names=JOINT_NAMES,
+            episode_index=episode_index, joint_names=BIMANUAL_JOINT_NAMES if bimanual else JOINT_NAMES,
             l20_active_position_indices=list(L20_ACTIVE_POSITION_INDICES),
             timestamp_semantics="LeRobot: frame_index/fps; diagnostics: original host/device clocks",
             actual_hz=actual_hz,

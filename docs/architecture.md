@@ -43,4 +43,10 @@ L515 以硬件支持的 30 FPS 采集；控制周期仍由现有 `control_hz` �
 
 ## 双臂扩展边界
 
-当前低层模块没有把 `right` 固化在算法里，side 由配置传入。双臂阶段应创建两套 tracker、gate、IK、hand retargeter 与硬件对象，再由上层同步调度；不要在当前单臂控制器中添加大量左右分支。
+`teleop.bimanual_controller` 实现 Pico4 双侧入口，单侧 `teleop.controller.run` 保留。主进程拥有唯一 Pico 输入客户端、键盘、相机和 recorder；通过 `spawn` 创建左右控制进程，各自构造 tracker、gate、IK、hand retargeter、反馈轮询和硬件对象。
+
+每轮携带唯一编号：同一份锁内双手快照 → 并行 PREPARE → 双方成功且输入未过期 → 并行 COMMIT → 收齐同轮 RESULT → 追加一条联合记录。最多一轮在途；取消或迟到的回复不进入下一轮。双方 CAN 调用仍不具备硬件原子性。
+
+任一侧追踪、IK 或目标门失败都会设置共享暂停事件，R 仅在两侧输入有效且均完成重新锚定后清除。计算/发送等待上限使用 `pico4.max_age_s`；通信超时、进程退出或 SDK 异常使整套控制退出。退出先协作停止两个 worker，5 s 内未退出的进程再终止，随后保存已完成样本并停止相机和输入；不自动失能。
+
+双侧名义调度为 20 Hz，实际周期取决于各阶段较慢侧加通信和记录开销。当前实现不改变单臂 IK、手部 retarget 或 CAN 协议，也不承诺稳定 20 Hz。

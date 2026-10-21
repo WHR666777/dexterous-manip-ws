@@ -2,6 +2,18 @@
 
 正式联合示教使用固定的 LeRobot 0.4.4 官方 API，生成 **LeRobotDataset v3.0**。旧 `data/episodes` 不迁移、不修改。遥操作仍在原环境运行，仅保存阶段调用 `act`；无需安装或调整两套环境的依赖。
 
+## 双侧布局
+
+`configs/pico4_bimanual_nero_l20.yaml` 使用独立目录 `data/lerobot/nero_l20_bimanual_act` 和 robot_type `nero_l20_bimanual`。`observation.state`、`action` 均为 float32 `(46,)`，固定顺序为 **左 Nero 7＋左 L20 16＋右 Nero 7＋右 L20 16**。名称分别加 `left.`、`right.` 前缀，例如 `left.nero.joint1`、`right.l20.thumb_base`；各侧 L20 仍使用索引 `0–10、15–19`，单位与单侧相同。
+
+主进程只将同一个 `cycle_id`、双侧均完成发送的结果作为一行追加。状态是各侧准备阶段、所有本轮发送之前读取的真实反馈；RGB-D 在本轮准备之前选择，每行只保存一份共享图像和深度。并行调度不等于硬件同步，左右观测和各设备发送时刻分别保留。
+
+双侧诊断使用 `schema_version: 3`、`input_sides: [left, right]`；原单侧字段加 `left_` 或 `right_` 前缀。公共字段为 `cycle_id`、`observation_timestamp_monotonic`（主进程开始选择观测）、`timestamp_monotonic`（双方结果收齐）以及 `camera_*`。左右的 `*_observation_timestamp_monotonic` 为各自开始读取状态的时间。`timing_prepare_wait_s`、`timing_dispatch_wait_s` 记录协调进程等待准备和发送结果的耗时；各侧另存 `*_timing_prepare_s`、`*_timing_dispatch_s` 和原分阶段耗时。
+
+暂停、准备失败或部分发送的周期不追加；不拿旧侧数据与新侧结果拼接。任一侧计算失败后两侧都需要 R 重锚定。采样间隔和 `actual_hz` 仍使用真实主机时间计算，不把名义 20 Hz 当作实测频率。
+
+相机、深度附件、导出失败保留暂存和官方重载验证均沿用下文规则。23/46 维的形状、通道名称、手侧顺序和 robot_type 必须与既有数据集一致，混合追加会被拒绝。`scripts/check_lerobot_act.py` 根据数据集名称列表检查 23 或 46 维，双侧动作块输出为 `(1,60,46)`。
+
 ## 配置与采集
 
 Pico、Quest 配置均已开启 L515，输出空间对齐的 640×480 RGB-D。相机仍为 30 FPS，录制跟随原 `control_hz: 20` 的有效周期。

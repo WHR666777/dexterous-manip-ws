@@ -20,9 +20,9 @@ def setup_arm_can(channel: str):
         time.sleep(0.01)
 
     robot.clear_joint_error()
-    time.sleep(0.01)
+    time.sleep(0.5)
     robot.reset()
-    time.sleep(0.01)
+    time.sleep(0.5)
     
     while not robot.enable():
         robot.set_normal_mode()
@@ -30,5 +30,5 @@ def setup_arm_can(channel: str):
 
     print("CAN mode enabled for " + channel)
 
-setup_arm_can("can0")
-#setup_arm_can("can1")
+setup_arm_can("can_arm_a")
+setup_arm_can("can_arm_b")

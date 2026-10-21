@@ -118,6 +118,21 @@ def test_other_hand_and_repeated_samples_do_not_refresh_selected_hand(monkeypatc
     assert source.get_hand_frame("right") is None
 
 
+def test_both_hand_snapshot_is_complete_and_owns_its_arrays():
+    source = offline_pico()
+    source._update_tracking(payload(hand(123), hand(456)))
+    frames = source.get_hand_frames()
+    assert set(frames) == {"left", "right"}
+    assert frames["left"].received_at == frames["right"].received_at
+    for side, frame in frames.items():
+        frame.wrist_position.fill(99)
+        frame.wrist_quat.fill(99)
+        frame.landmarks.fill(99)
+        assert not np.any(source.get_hand_frame(side).landmarks == 99)
+    source._update_tracking(payload(hand(124)))
+    assert source.get_hand_frames()["left"] is None
+
+
 @pytest.mark.parametrize("mode", ["relay", "direct"])
 def test_receive_loops_accept_fragmented_protocol_frames(mode):
     source = offline_pico()
