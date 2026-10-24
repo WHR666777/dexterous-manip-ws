@@ -88,7 +88,7 @@ class _SideController:
 
     def __init__(self, side, config, control):
         self.side, self.config, self.control = side, config, control
-        self.arm = self.hand = self.feedback = self.ik = self.retargeter = None
+        self.arm = self.hand = self.feedback = self.ik = self.retargeter = self.compute = None
         self.tracker = self.last_target = self.flange_to_tcp = None
 
     def start(self):
@@ -96,9 +96,11 @@ class _SideController:
         self.calibration = calibration_rotation(config)
         self.gate = TargetGate(**{key: config["safety"][key] for key in (
             "max_position_step_m", "max_rotation_step_deg", "tcp_workspace_cube_side_m")})
+        self.compute = single._make_compute(config, self.control)
+        self.ik, self.retargeter = self.compute.ik, self.compute.retargeter
+        self.compute.start()
         if self.control in ("arm", "both"):
             self.arm = single._make_arm(config)
-            self.ik = single.NeroIK(max_joint_delta_rad=config["arm"]["max_joint_delta_rad"])
             print(f"[{self.side}] Nero connecting: {config['arm']['can_channel']}", flush=True)
             self.arm.connect()
             print(f"[{self.side}] Nero enabling normal mode (timeout=5.0 s).", flush=True)
@@ -113,7 +115,6 @@ class _SideController:
             print(f"[{self.side}] TCP workspace center={model_tcp[:3, 3].tolist()}", flush=True)
         if self.control in ("hand", "both"):
             self.hand = single._make_hand(config)
-            self.retargeter = single._retargeter(config)
             self.feedback = HandFeedbackPoller(
                 self.hand, poll_hz=config["hand"]["feedback_poll_hz"],
                 max_age_s=config["hand"]["feedback_max_age_s"],
@@ -147,6 +148,7 @@ class _SideController:
         if not _fresh(frame, self.config):
             raise _Pause("Pico4 frame timeout")
         started = time.perf_counter()
+        self.compute.begin_cycle()
         stages = dict.fromkeys(single._ControlTiming.FIELDS, 0.0)
         diagnostics = dict.fromkeys(HAND_TIMING_FIELDS, np.nan)
         diagnostics["hand_retarget_numevals"] = -1
@@ -180,6 +182,7 @@ class _SideController:
             stages["timing_hand_retarget_s"] = time.perf_counter() - stage
             stats = getattr(self.retargeter, "last_diagnostics", {})
             diagnostics.update({key: stats[key] for key in diagnostics if key in stats})
+        stages.update(self.compute.timings)
         return dict(
             observation_timestamp_monotonic=observed_at,
             observation_arm_joint_position=seed,
@@ -229,7 +232,15 @@ class _SideController:
         row["timing_dispatch_s"] = time.perf_counter() - started
         return row
 
+    def check_health(self):
+        self.compute.check_health()
+
     def close(self):
+        if self.compute is not None:
+            try:
+                self.compute.close()
+            except Exception as exc:
+                print(f"[{self.side}] compute stop failed: {exc}", flush=True)
         stopped = True
         if self.feedback is not None:
             try:
@@ -254,6 +265,7 @@ def _worker_main(side, config, control, connection, paused, stopping):
         runtime.start()
         connection.send(dict(kind="ready", cycle=0))
         while not stopping.is_set():
+            runtime.check_health()
             if not connection.poll(.02):
                 continue
             command = connection.recv()

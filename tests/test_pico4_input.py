@@ -176,7 +176,7 @@ def test_factory_selects_existing_pico_relay(monkeypatch):
 
 
 @pytest.mark.parametrize("control", ["hand", "both"])
-def test_pico_tracking_loss_pauses_all_commands_until_reanchor(monkeypatch, tmp_path, control):
+def test_pico_tracking_loss_pauses_all_commands_until_reanchor(monkeypatch, tmp_path, control, inline_compute):
     config = load_config(EXAMPLE_ROOT.parents[1] / "configs/pico4_nero_l20.yaml")
     config["camera"]["enabled"] = False
     source = offline_pico()

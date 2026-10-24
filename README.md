@@ -45,7 +45,7 @@ python3 -m teleop.cli --config configs/pico4_bimanual_nero_l20.yaml run --contro
 
 两侧都到达各自起始姿态后，R 同时重锚定并恢复，B 开始联合录制，S 保存，Q 保存并退出。任一侧输入失效、IK 失败或越界都会锁定暂停双侧；两侧输入恢复后仍需 R。使能、重置及 preflight 也接受全局 `--side left|right|both`；`record-start-pose` 必须选择单侧。
 
-主进程独占 Pico 输入、键盘和相机，两个 `spawn` 子进程分别持有左/右侧的 IK、retargeter、反馈线程和 CAN 对象。每轮左右并行计算，双方通过后才通知并行下发；失败或过期的一轮不会继续下发。CAN 调用不具备跨设备原子性，发送阶段异常可能留下部分已发出的命令，此时整套控制退出。
+主进程独占 Pico 输入、键盘和相机，两个 `spawn` 控制子进程分别持有左/右侧的反馈线程和 CAN 对象；每侧再使用一个只做 IK 和 retarget 的计算进程，将求解与硬件 I/O 线程隔离。每轮左右并行计算，双方通过后才通知并行下发；失败或过期的一轮不会继续下发。每个计算进程最多处理一个请求，超时、通信异常或进程退出时停止整套控制并保存已有完整样本。CAN 调用不具备跨设备原子性，发送阶段异常可能留下部分已发出的命令，此时整套控制退出。
 
 `control_hz: 20` 是调度目标，实际取决于较慢一侧的计算与发送耗时。输出 `[left control timing]`、`[right control timing]` 和 `[bimanual timing]`，报告实测频率、各阶段耗时及超周期次数；并行本身不保证达到 20 Hz。
 
@@ -224,6 +224,8 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml run --control both -
 录制按原控制循环采样，`control_hz` 默认仍为 20。L515 的硬件深度流为 30 FPS，后台读取后由每个有效控制周期选取最近帧；图像采集和写盘不在控制线程等待。`B` 开始一个 episode，重复按 `B` 不会清空正在录制的数据；`S` 等待已排队图像写完并保存，随后仍可遥操作或再次按 `B`。暂停期间不新增轨迹/视觉样本。
 
 运行时每约 2 秒有效控制时间输出一次 `[control timing]`（退出时也输出剩余统计），显示 IK、手部 retarget、两设备发送、seed/发送后反馈读取、轨迹追加和周期耗时的平均值/P95/最大值（ms），以及有效周期频率和超过名义周期的次数。无需开始录制即可观察；开始录制后，各阶段耗时同时存入 `diagnostics/episode-XXXXXX.npz` 的 `timing_*_s` 字段，单位为秒。暂停和重锚定不混入有效周期统计，计时不改变控制调用顺序或限位逻辑；字段说明见 [数据格式](docs/dataset_schema.md)。
+
+单侧 `run`（包括 `--side left/right`）也默认使用一个独立计算进程，命令和 R/B/S/Q 操作不变。启动时打印计算进程 PID；IK、retarget 的阶段时间由计算进程测量，`compute_ipc` 记录进程通信及控制进程恢复执行的等待，`ik_cpu`、`hand_retarget_cpu` 分别记录实际计算线程 CPU 时间，CPU 时间是对应阶段的组成部分，不能重复相加。发送前若输入已过期则暂停，需 R 重新锚定；超时或计算进程退出则保存已有样本并停止。`wrist-only`/标定模式仅把 IK 移入计算进程，手指回放保持原流程。
 
 联合录制现在直接保存为 **LeRobot v3.0（LeRobot 0.4.4）**，供原版 ACT 使用：
 

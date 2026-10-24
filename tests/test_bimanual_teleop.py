@@ -17,6 +17,8 @@ from teleop.hand_feedback import HandFeedbackSnapshot
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/pico4_bimanual_nero_l20.yaml"
 
+pytestmark = pytest.mark.usefixtures("inline_compute")
+
 
 def frame(side, **kwargs):
     return SimpleNamespace(side=side, received_at=time.monotonic(), pair_skew=0.,
@@ -115,6 +117,7 @@ class FakeSideRuntime:
         self.index = dual.SIDES.index(side)
 
     def start(self): pass
+    def check_health(self): pass
     def reanchor(self, sample): pass
 
     def prepare(self, sample):

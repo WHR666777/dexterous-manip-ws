@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+pytestmark = pytest.mark.usefixtures("inline_compute")
 from scipy.spatial.transform import Rotation
 
 from robot_control.l20 import _L20_OPEN_PRESET

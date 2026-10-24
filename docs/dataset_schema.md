@@ -77,7 +77,11 @@ data/lerobot/nero_l20_act/
 
 诊断 JSON 保留型号、序列号、输出及原生内参、裁剪、缩放和深度单位。相机实现沿用原方案：原生 RGB 960×540、深度 640×480，先对齐至彩色，再共同中心裁剪/缩放；RGB 用 area，深度用 nearest-exact。空间对齐不等于机器人与相机硬件同步。
 
-诊断 NPZ 保留原有腕姿、landmarks、目标变换、力矩、TCP、完整 20 槽动作/反馈、`timing_*_s` 和 `camera_*` 字段；新增：
+诊断 NPZ 保留原有腕姿、landmarks、目标变换、力矩、TCP、完整 20 槽动作/反馈、`timing_*_s` 和 `camera_*` 字段。
+
+遥操作求解使用独立计算进程后，`timing_ik_s`、`timing_hand_retarget_s` 记录计算进程内的阶段耗时。`timing_compute_ipc_s` 为每周期求解请求的往返耗时减去计算耗时，包含序列化与控制进程恢复执行的等待；`timing_ik_cpu_s`、`timing_hand_retarget_cpu_s` 为对应阶段计算线程实际 CPU 时间，不能与阶段耗时重复相加。双侧使用相同的 `left_`/`right_` 前缀；旧数据没有这些新增字段。
+
+另保存以下发送前观测和反馈时间字段：
 
 | 字段 | 含义 |
 | --- | --- |

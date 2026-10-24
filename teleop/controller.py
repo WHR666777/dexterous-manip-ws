@@ -21,6 +21,7 @@ from .coordinate_frames import (
     position_quaternion_to_matrix,
 )
 from .config import calibration_rotation, input_config
+from .compute import ComputeProcess
 from .hand_feedback import HandFeedbackPoller
 from .hand_replay import HandReplay
 from .hand_retarget import HAND_TIMING_FIELDS, L20Retargeter
@@ -47,6 +48,7 @@ class _ControlTiming:
         "timing_ik_s", "timing_hand_retarget_s", "timing_arm_send_s",
         "timing_hand_send_s", "timing_seed_feedback_s", "timing_feedback_s",
         "timing_hand_send_wait_s",
+        "timing_compute_ipc_s", "timing_ik_cpu_s", "timing_hand_retarget_cpu_s",
     )
 
     def __init__(self, control_hz: float, label: str = "") -> None:
@@ -166,6 +168,10 @@ def _latest_frame(quest_input, config: dict[str, Any]):
 def _retargeter(config: dict[str, Any]) -> L20Retargeter:
     hand = config["hand"]
     return L20Retargeter(hand["retarget_config"], input_config(config)["side"], hand["max_raw_step"])
+
+
+def _make_compute(config, control, hand_mode="tracking"):
+    return ComputeProcess(config, control, hand_mode)
 
 
 def input_check(config: dict[str, Any]) -> None:
@@ -536,12 +542,8 @@ def run(
             raise ValueError("Calibration directory already exists; select a new session directory.")
     arm = _make_arm(config) if control in ("arm", "both") else None
     hand = _make_hand(config) if control in ("hand", "both") else None
-    ik = (
-        NeroIK(max_joint_delta_rad=config["arm"]["max_joint_delta_rad"])
-        if arm is not None
-        else None
-    )
-    hand_retargeter = _retargeter(config) if hand is not None and hand_replay is None else None
+    compute = _make_compute(config, control, hand_mode)
+    ik, hand_retargeter = compute.ik, compute.retargeter
     hand_feedback = (HandFeedbackPoller(
         hand, poll_hz=config['hand'].get('feedback_poll_hz', 20.0),
         max_age_s=config['hand'].get('feedback_max_age_s', .25),
@@ -617,6 +619,7 @@ def run(
         print("Re-anchored; command streaming resumed.")
 
     try:
+        compute.start()
         arm_config = config["arm"]
         quest_input = _input_device(config)
         if isinstance(quest_input, QuestRelayClient) and not quest_input.is_available():
@@ -704,6 +707,7 @@ def run(
                 key = keyboard.read()
                 if key == "q":
                     break
+                compute.check_health()
                 if key == "c" and calibration_session is not None:
                     paused = True
                     print("Capture paused target streaming; keep still while feedback settles.")
@@ -743,6 +747,7 @@ def run(
                     continue
 
                 stage_times = dict.fromkeys(_ControlTiming.FIELDS, 0.0)
+                compute.begin_cycle()
                 hand_diagnostics = dict.fromkeys(HAND_TIMING_FIELDS, np.nan)
                 hand_diagnostics['hand_retarget_numevals'] = -1
                 # Snapshot the observation before IK/actions; never wait for a camera frame here.
@@ -811,6 +816,15 @@ def run(
                     diagnostics = getattr(hand_retargeter, 'last_diagnostics', {})
                     hand_diagnostics.update({key: diagnostics[key] for key in hand_diagnostics
                                              if key in diagnostics})
+
+                stage_times.update(compute.timings)
+                if time.monotonic() - frame.received_at > float(input_config(config)["max_age_s"]):
+                    paused = True
+                    gate.pause("Input expired during computation")
+                    if hand_replay is not None:
+                        hand_replay.stop()
+                    print("PAUSED: input expired during computation; press R to re-anchor.")
+                    continue
 
                 arm_sent_at = np.nan
                 hand_sent_at = np.nan
@@ -888,6 +902,10 @@ def run(
                     if hand_feedback is not None:
                         hand_feedback.report()
     finally:
+        try:
+            compute.close()
+        except Exception as exc:
+            print(f"Compute process stop failed: {type(exc).__name__}: {exc}")
         feedback_stopped = True
         if hand_feedback is not None:
             try:

@@ -8,6 +8,8 @@ from teleop.wrist_tracker import WristTracker
 from teleop.hand_feedback import HandFeedbackSnapshot
 from teleop.hand_retarget import HAND_TIMING_FIELDS
 
+pytestmark = pytest.mark.usefixtures("inline_compute")
+
 
 class FakeHandFeedbackPoller:
     """Deterministic snapshot service; worker lifecycle is tested separately."""
@@ -127,7 +129,7 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(
         is_available=lambda: True, stop=lambda: None))
     monkeypatch.setattr(controller, "_latest_frame", lambda *_: SimpleNamespace(
         wrist_position=np.zeros(3), wrist_quat=np.array([0, 0, 0, 1.0]),
-        landmarks=np.zeros((21, 3)), received_at=0))
+        landmarks=np.zeros((21, 3)), received_at=controller.time.monotonic()))
 
     controller.run(config, "both", str(tmp_path))
     assert flange_reads == (2 if startup_flange_delayed else 1)
@@ -399,7 +401,7 @@ def test_run_records_camera_before_action_and_cleans_up(
     config["camera"].update(enabled=camera_enabled, width=64, height=48)
     events = []
     quest_frame = SimpleNamespace(wrist_position=np.zeros(3), wrist_quat=np.array([0, 0, 0, 1.0]),
-                                  landmarks=np.zeros((21, 3)), received_at=0.0)
+                                  landmarks=np.zeros((21, 3)), received_at=controller.time.monotonic())
     image = RGBDFrame(np.zeros((48, 64, 3), dtype=np.uint8),
                       np.full((48, 64), 1234, dtype=np.uint16),
                       10.0, 100.0, 100.0, 1, 1, "hardware_clock", "hardware_clock")
@@ -576,7 +578,11 @@ def test_control_timing_measures_stages_without_changing_dispatch_or_sleep(
     monkeypatch.setattr(controller, "_retargeter", lambda _: retargeter)
     monkeypatch.setattr(controller, "_input_device", lambda _: SimpleNamespace(
         stop=lambda: None, is_available=lambda: True))
-    monkeypatch.setattr(controller, "_latest_frame", lambda *_: frame)
+    def latest_frame(*_):
+        frame.received_at = clock[0]
+        return frame
+
+    monkeypatch.setattr(controller, "_latest_frame", latest_frame)
 
     controller.run(config, control, str(tmp_path))
 
