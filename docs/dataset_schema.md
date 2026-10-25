@@ -10,7 +10,7 @@
 
 双侧诊断使用 `schema_version: 3`、`input_sides: [left, right]`；原单侧字段加 `left_` 或 `right_` 前缀。公共字段为 `cycle_id`、`observation_timestamp_monotonic`（主进程开始选择观测）、`timestamp_monotonic`（双方结果收齐）以及 `camera_*`。左右的 `*_observation_timestamp_monotonic` 为各自开始读取状态的时间。`timing_prepare_wait_s`、`timing_dispatch_wait_s` 记录协调进程等待准备和发送结果的耗时；各侧另存 `*_timing_prepare_s`、`*_timing_dispatch_s` 和原分阶段耗时。
 
-暂停、准备失败或部分发送的周期不追加；不拿旧侧数据与新侧结果拼接。任一侧计算失败后两侧都需要 R 重锚定。采样间隔和 `actual_hz` 仍使用真实主机时间计算，不把名义 20 Hz 当作实测频率。
+暂停、准备失败或部分发送的周期不追加；不拿旧侧数据与新侧结果拼接。普通 IK 求解失败时双方跳过本轮，继续尝试新目标，可达后自动恢复；输入丢失、无效 IK 输入或目标门越界仍需 R 重锚定。保持和暂停期间 recorder 保持当前 episode，恢复后继续追加，时间戳保留真实间隔。采样间隔和 `actual_hz` 仍使用真实主机时间计算，不把名义 20 Hz 当作实测频率。
 
 相机、深度附件、导出失败保留暂存和官方重载验证均沿用下文规则。23/46 维的形状、通道名称、手侧顺序和 robot_type 必须与既有数据集一致，混合追加会被拒绝。`scripts/check_lerobot_act.py` 根据数据集名称列表检查 23 或 46 维，双侧动作块输出为 `(1,60,46)`。
 

@@ -41,7 +41,7 @@ class TargetGate:
         self.paused = True
         self.reason = reason
 
-    def accept(self, target: np.ndarray, tcp_position: np.ndarray) -> bool:
+    def accept(self, target: np.ndarray, tcp_position: np.ndarray, *, commit: bool = True) -> bool:
         if self.paused or self._accepted is None:
             return False
         candidate = np.asarray(target, dtype=np.float64)
@@ -72,5 +72,6 @@ class TargetGate:
         if np.degrees(rotation_step) > self.max_rotation_step_deg:
             self.pause(f"rotation step {np.degrees(rotation_step):.2f} deg exceeded limit")
             return False
-        self._accepted = candidate.copy()
+        if commit:
+            self._accepted = candidate.copy()
         return True

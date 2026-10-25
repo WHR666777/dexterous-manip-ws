@@ -34,8 +34,10 @@ class FakeHandFeedbackPoller:
 
 
 @pytest.mark.parametrize("startup_flange_delayed", [False, True])
+@pytest.mark.parametrize("ik_failure_code", [None, "IK_FAILED", "IK_FK_ERROR", "IK_JUMP",
+                                             "IK_JOINT_LIMIT", "IK_NUMERICAL_ERROR"])
 def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(
-    monkeypatch, tmp_path, startup_flange_delayed,
+    monkeypatch, tmp_path, startup_flange_delayed, ik_failure_code,
 ):
     from pathlib import Path
     from types import SimpleNamespace
@@ -98,7 +100,7 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(
 
         def stop_and_save(self): self.active = False
 
-    keys = iter(["r", "b", "q"])
+    keys = iter(["r", "b", None, "q"] if ik_failure_code else ["r", "b", "q"])
 
     class Keyboard:
         def __enter__(self): return self
@@ -118,8 +120,13 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(
     monkeypatch.setattr(controller, "EpisodeRecorder", Recorder)
     monkeypatch.setattr(controller, "Keyboard", Keyboard)
     monkeypatch.setattr(controller, "_move_arm_to_start_pose", lambda *_: None)
+    solve_count = 0
+    def solve(*_):
+        nonlocal solve_count
+        solve_count += 1
+        return None if ik_failure_code and solve_count == 1 else arm_target.copy()
     monkeypatch.setattr(controller, "NeroIK", lambda **_: SimpleNamespace(
-        forward=lambda _: np.eye(4), solve=lambda *_: arm_target.copy()))
+        forward=lambda _: np.eye(4), solve=solve, last_diagnostics={"code": ik_failure_code}))
     monkeypatch.setattr(controller, "_retargeter", lambda _: SimpleNamespace(
         reset=lambda _: None, retarget=lambda _: (None, hand_target.copy())))
     monkeypatch.setattr(controller, "RealSenseCamera", lambda _: SimpleNamespace(
@@ -133,13 +140,19 @@ def test_joint_recording_uses_pre_send_feedback_without_extra_hardware_queries(
 
     controller.run(config, "both", str(tmp_path))
     assert flange_reads == (2 if startup_flange_delayed else 1)
+    if ik_failure_code in ("IK_JOINT_LIMIT", "IK_NUMERICAL_ERROR"):
+        assert solve_count == 1
+        assert rows == []
+        assert "arm_send" not in events and "hand_send" not in events
+        return
+    assert solve_count == (2 if ik_failure_code else 1)
     assert len(rows) == 1
     row = rows[0]
     np.testing.assert_array_equal(row["observation_arm_joint_position"], np.full(7, .2))
     np.testing.assert_array_equal(row["observation_hand_position_raw"], np.full(20, 30))
     np.testing.assert_array_equal(row["arm_joint_position"], arm_target)
     np.testing.assert_array_equal(row["hand_position_raw"], hand_target)
-    start = events.index("image")
+    start = max(index for index, event in enumerate(events) if event == "image")
     assert events[start:] == ["image", "hand_cache", "arm_feedback", "arm_send",
                               "hand_send", "arm_feedback", "hand_cache"]
 

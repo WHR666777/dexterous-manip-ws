@@ -121,6 +121,8 @@ class FakeSideRuntime:
     def reanchor(self, sample): pass
 
     def prepare(self, sample):
+        if getattr(sample, "hold", False):
+            raise dual._IKHold("IK_FK_ERROR")
         if getattr(sample, "fail", False):
             raise dual._Pause("IK failed")
         if getattr(sample, "crash", False):
@@ -142,6 +144,9 @@ class FakeSideRuntime:
     def close(self):
         self.config["closed"][self.index] = 1
 
+    def cancel_prepared(self, row):
+        self.config["cancelled"][self.index] += 1
+
 
 def fake_sdk_worker(side, config, control, connection, paused, stopping):
     dual._SideController = FakeSideRuntime
@@ -151,7 +156,7 @@ def fake_sdk_worker(side, config, control, connection, paused, stopping):
 
 def worker_group(parallel_barrier=False):
     context = mp.get_context("spawn")
-    counters = {name: context.Array("i", [0, 0]) for name in ("sends", "prepared", "closed")}
+    counters = {name: context.Array("i", [0, 0]) for name in ("sends", "prepared", "closed", "cancelled")}
     shared = {**counters, "barrier": context.Barrier(2) if parallel_barrier else None}
     configs = {side: {"input_device": "pico4", "pico4": {
         "side": side, "max_age_s": 10., "max_pair_skew_s": .05}, **shared} for side in dual.SIDES}
@@ -214,6 +219,45 @@ def test_failure_cancels_both_and_late_replies_cannot_enter_next_cycle():
         group.close()
 
 
+def test_ik_hold_retries_without_anchor_and_cancels_every_unsent_peer_target():
+    group, counters = worker_group()
+    try:
+        group.start()
+        group.collect("ready", 0, 8.)
+        anchor(group)
+        for cycle in (2, 3, 4):
+            group.request("prepare", cycle, {side: frame(side, hold=side == "left") for side in dual.SIDES})
+            with pytest.raises(dual._IKHold, match="left: IK_FK_ERROR"):
+                group.collect("prepared", cycle, 8.)
+            assert not group.paused.is_set()
+            assert list(counters["sends"]) == [0, 0]
+            group.request("cancel", cycle)
+        group.request("prepare", 5, {side: frame(side) for side in dual.SIDES})
+        group.collect("prepared", 5, 8.)
+        assert list(counters["cancelled"]) == [0, 3]
+        group.request("commit", 5)
+        group.collect("result", 5, 8.)
+        assert list(counters["sends"]) == [1, 1]
+    finally:
+        group.close()
+
+
+def test_hard_pause_takes_precedence_over_peer_ik_hold():
+    group, counters = worker_group()
+    try:
+        group.start()
+        group.collect("ready", 0, 8.)
+        anchor(group)
+        group.request("prepare", 2, {side: frame(side, hold=side == "left", fail=side == "right")
+                                     for side in dual.SIDES})
+        with pytest.raises(dual._Pause):
+            group.collect("prepared", 2, 8.)
+        assert group.paused.is_set()
+        assert list(counters["sends"]) == [0, 0]
+    finally:
+        group.close()
+
+
 @pytest.mark.parametrize("fault", ["expired", "crash", "timeout"])
 def test_expired_results_worker_crash_and_timeout_never_send(fault):
     group, counters = worker_group()
@@ -265,7 +309,8 @@ def test_side_runtime_keeps_pre_command_feedback_and_existing_send_order(monkeyp
                            set_speed=lambda _: None, set_joint_positions_raw=hand_send)
     feedback = SimpleNamespace(start=lambda: None, stop=lambda: None, report=lambda: None,
                                get_latest=lambda: HandFeedbackSnapshot(positions["hand"].copy(), 1., 1., 1))
-    retargeter = SimpleNamespace(reset=lambda _: None,
+    resets = []
+    retargeter = SimpleNamespace(reset=lambda raw: resets.append(raw.copy()),
                                 retarget=lambda _: (np.zeros(16), np.full(20, 40)))
     ik = SimpleNamespace(forward=lambda _: np.eye(4), solve=lambda *_: np.full(7, .1))
     monkeypatch.setattr(controller, "_make_arm", lambda _: arm)
@@ -279,9 +324,17 @@ def test_side_runtime_keeps_pre_command_feedback_and_existing_send_order(monkeyp
         runtime.start()
         sample = frame("right")
         runtime.reanchor(sample)
+        sample.wrist_position[:] = [.02, 0., 0.]
         row = runtime.prepare(sample)
         assert sends == []
+        np.testing.assert_array_equal(runtime.last_target, np.eye(4))
+        np.testing.assert_array_equal(runtime.gate._accepted, np.eye(4))
+        runtime.cancel_prepared(row)
+        np.testing.assert_array_equal(resets[-1], row["observation_hand_position_raw"])
+        row = runtime.prepare(sample)
         runtime.dispatch(row, lambda: True)
+        np.testing.assert_array_equal(runtime.last_target, row["target_base_flange"])
+        np.testing.assert_array_equal(runtime.gate._accepted, runtime.last_target)
         assert sends == ["arm", "hand"]
         np.testing.assert_array_equal(row["observation_arm_joint_position"], np.zeros(7))
         np.testing.assert_array_equal(row["observation_hand_position_raw"], np.full(20, 20))
@@ -292,10 +345,11 @@ def test_side_runtime_keeps_pre_command_feedback_and_existing_send_order(monkeyp
     assert disconnected == ["hand", "arm"]
 
 
-def test_coordinator_records_only_complete_pairs_and_requires_reanchor(tmp_path, monkeypatch):
+@pytest.mark.parametrize("soft_hold", [False, True])
+def test_coordinator_records_only_complete_pairs_and_requires_reanchor(tmp_path, monkeypatch, soft_hold):
     config = load_config(CONFIG)
     config["sides"]["left"]["arm"]["start_pose_file"] = str(ROOT / "configs/nero_start_pose.yaml")
-    keys = iter(["r", "b", None, "r", None, "q"])
+    keys = iter(["r", "b", None, None if soft_hold else "r", None, "q"])
     rows, commands, stopped, cameras = [], [], [], []
     image = object()
     source = SimpleNamespace(is_available=lambda: True,
@@ -328,6 +382,8 @@ def test_coordinator_records_only_complete_pairs_and_requires_reanchor(tmp_path,
         def request(self, kind, cycle, frames=None): commands.append((kind, cycle))
         def collect(self, kind, cycle, *args):
             if kind == "prepared" and cycle == 2:
+                if soft_hold:
+                    raise dual._IKHold("left: IK_FK_ERROR")
                 self.paused.set()
                 raise dual._Pause("left IK failed")
             return {side: {"cycle": cycle, "row": fake_row(side)} for side in dual.SIDES}
@@ -340,8 +396,8 @@ def test_coordinator_records_only_complete_pairs_and_requires_reanchor(tmp_path,
     monkeypatch.setattr(dual.time, "sleep", lambda _: None)
     dual.run(config, "both", str(tmp_path))
     assert len(cameras) == 1
-    assert len(rows) == 1 and rows[0]["cycle_id"] == 5
+    assert [row["cycle_id"] for row in rows] == ([3, 4, 5] if soft_hold else [5])
     assert rows[0]["camera_frame"] is image
-    assert [cycle for kind, cycle in commands if kind == "commit"] == [5]
-    assert [cycle for kind, cycle in commands if kind == "anchor"] == [1, 4]
+    assert [cycle for kind, cycle in commands if kind == "commit"] == ([3, 4, 5] if soft_hold else [5])
+    assert [cycle for kind, cycle in commands if kind == "anchor"] == ([1] if soft_hold else [1, 4])
     assert stopped == ["workers", "camera", "input"]

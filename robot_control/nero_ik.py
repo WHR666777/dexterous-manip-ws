@@ -21,6 +21,8 @@ URDF_PATH = (
 MAX_FK_POSITION_ERROR_M = 0.002
 MAX_FK_ROTATION_ERROR_DEG = 2.0
 DEFAULT_MAX_IK_JOINT_DELTA_RAD = np.deg2rad(10.0)
+DEFAULT_JOINT_LIMIT_MARGIN_RAD = np.deg2rad(2.0)
+DEFAULT_FEEDBACK_LIMIT_TOLERANCE_RAD = np.deg2rad(1.0)
 REGULARIZATION_WEIGHT = 0.05
 MAX_NFEV = 80
 MAX_SOLVE_SECONDS = 0.075  # 单次求解软预算；当前超过 20 Hz 周期，仅用于实机诊断。
@@ -54,6 +56,8 @@ class NeroIK:
         urdf_path=URDF_PATH,
         *,
         max_joint_delta_rad=DEFAULT_MAX_IK_JOINT_DELTA_RAD,
+        joint_limit_margin_rad=DEFAULT_JOINT_LIMIT_MARGIN_RAD,
+        feedback_limit_tolerance_rad=DEFAULT_FEEDBACK_LIMIT_TOLERANCE_RAD,
     ):
         self.urdf_path = Path(urdf_path).resolve()
         self.max_joint_delta_rad = float(max_joint_delta_rad)
@@ -95,6 +99,17 @@ class NeroIK:
         self.limits = np.asarray(limits)
         if not np.isfinite(self.limits).all() or np.any(self.limits[:, 0] >= self.limits[:, 1]):
             raise ValueError('非法关节限位')
+        self.joint_limit_margin_rad = float(joint_limit_margin_rad)
+        self.feedback_limit_tolerance_rad = float(feedback_limit_tolerance_rad)
+        for name, value in (("joint_limit_margin_rad", self.joint_limit_margin_rad),
+                            ("feedback_limit_tolerance_rad", self.feedback_limit_tolerance_rad)):
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f'{name} 必须是有限非负数')
+        self.command_limits = self.limits + np.array([
+            self.joint_limit_margin_rad, -self.joint_limit_margin_rad,
+        ])
+        if np.any(self.command_limits[:, 0] >= self.command_limits[:, 1]):
+            raise ValueError('joint_limit_margin_rad 过大，关节可用区间为空')
         # 只加载运动学模型，不加载 mesh，也不连接硬件。保持七轴数组的原有顺序。
         self._model = pin.buildModelFromUrdf(str(self.urdf_path))
         if self._model.nq != 7 or self._model.nv != 7:
@@ -122,12 +137,23 @@ class NeroIK:
             return False
 
     def continuous(self, q, reference):
-        if not self.in_limits(q) or not self.in_limits(reference):
+        if not self.in_limits(q) or not self._valid_feedback_seed(reference):
             return False
         direct = np.asarray(q) - np.asarray(reference)
         # Nero 七轴均非 continuous。实际发送必须走合法的直接路径。
         return bool(np.max(np.abs(direct)) <= self.max_joint_delta_rad
                     and np.max(np.abs(wrap_angle(direct))) <= self.max_joint_delta_rad)
+
+    def _valid_feedback_seed(self, q):
+        """容许小幅反馈越界作为状态；输出目标仍受原始限位约束。"""
+        try:
+            q = np.asarray(q, dtype=float)
+            tolerance = self.feedback_limit_tolerance_rad
+            return bool(q.shape == (7,) and np.isfinite(q).all()
+                        and np.all(q >= self.limits[:, 0] - tolerance)
+                        and np.all(q <= self.limits[:, 1] + tolerance))
+        except (ValueError, TypeError):
+            return False
 
     def forward(self, q):
         q = np.asarray(q, dtype=float)
@@ -159,22 +185,38 @@ class NeroIK:
         if not valid_transform(target_pose):
             diag['code'] = 'IK_NUMERICAL_ERROR'
             return None
-        if not self.in_limits(q_seed):
-            try:
-                raw = np.asarray(q_seed, dtype=float)
-                numeric = raw.shape == (7,) and np.isfinite(raw).all()
-            except (TypeError, ValueError):
-                numeric = False
-            diag['code'] = 'IK_JOINT_LIMIT' if numeric else 'IK_NUMERICAL_ERROR'
+        try:
+            seed = np.asarray(q_seed, dtype=float).copy()
+            numeric = seed.shape == (7,) and np.isfinite(seed).all()
+        except (TypeError, ValueError):
+            numeric = False
+        if not numeric:
+            diag['code'] = 'IK_NUMERICAL_ERROR'
+            return None
+        diag['seed_limit_violations'] = [
+            dict(joint=index + 1, angle_rad=float(angle),
+                 lower_rad=float(lower), upper_rad=float(upper))
+            for index, (angle, (lower, upper)) in enumerate(zip(seed, self.limits))
+            if angle < lower or angle > upper
+        ]
+        diag['feedback_limit_tolerance_rad'] = self.feedback_limit_tolerance_rad
+        diag['joint_limit_margin_rad'] = self.joint_limit_margin_rad
+        if not self._valid_feedback_seed(seed):
+            diag['code'] = 'IK_JOINT_LIMIT'
             return None
         target = np.asarray(target_pose, dtype=float)
-        seed = np.asarray(q_seed, dtype=float).copy()
-        p0, r0 = pose_error(self.forward(seed), target)
-        # 精确静止目标直接保持 seed；不能用宽 FK 容差形成“永远不动”的死区。
+        # 只投影优化初值，不伪造真实反馈。连续性、正则项和步长仍相对 seed。
+        initial = np.clip(seed, self.command_limits[:, 0], self.command_limits[:, 1])
+        diag['seed_projected'] = bool(np.any(initial != seed))
+        p0, r0 = pose_error(self.forward(initial), target)
+        # 精确目标只允许返回内侧初值；不能用静止捷径绕过缓冲区和真实步长检查。
         if p0 < 1e-9 and r0 < 1e-9:
             diag.update(code='IK_SUCCESS', ik_success=True, fk_position_error_mm=p0*1000,
-                        fk_rotation_error_deg=np.rad2deg(r0), dq_ik_deg=[0.0]*7)
-            return seed
+                        fk_rotation_error_deg=np.rad2deg(r0), dq_ik_deg=np.rad2deg(initial-seed).tolist())
+            if self.continuous(initial, seed):
+                return initial.copy()
+            diag.update(code='IK_JUMP', ik_success=False)
+            return None
 
         progress = {
             'residual_evaluations': 0,
@@ -183,7 +225,7 @@ class NeroIK:
                 (p0 / MAX_FK_POSITION_ERROR_M) ** 2
                 + (r0 / np.deg2rad(MAX_FK_ROTATION_ERROR_DEG)) ** 2
             ),
-            'best_q': seed.copy(),
+            'best_q': initial.copy(),
             'best_position_error_m': p0,
             'best_rotation_error_rad': r0,
         }
@@ -249,7 +291,8 @@ class NeroIK:
             )
             if not np.isfinite(q).all():
                 info['code'] = 'IK_NUMERICAL_ERROR'
-            elif not self.in_limits(q):
+            elif (not self.in_limits(q) or np.any(q < self.command_limits[:, 0])
+                  or np.any(q > self.command_limits[:, 1])):
                 info['code'] = 'IK_JOINT_LIMIT'
             else:
                 p, r = pose_error(self.forward(q), target)
@@ -271,9 +314,9 @@ class NeroIK:
         try:
             result = least_squares(
                 residual,
-                seed,
+                initial,
                 jac=jacobian,
-                bounds=(self.limits[:, 0], self.limits[:, 1]),
+                bounds=(self.command_limits[:, 0], self.command_limits[:, 1]),
                 max_nfev=MAX_NFEV,
             )
         except TimeoutError:

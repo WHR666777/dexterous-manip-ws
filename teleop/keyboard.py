@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import select
 import sys
 import termios
@@ -21,6 +22,7 @@ class Keyboard:
         termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
 
     def read(self) -> str | None:
-        ready, _, _ = select.select([sys.stdin], [], [], 0.0)
-        return sys.stdin.read(1).lower() if ready else None
+        ready, _, _ = select.select([self._fd], [], [], 0.0)
+        # TextIOWrapper can read ahead, hiding queued keys from select().
+        return os.read(self._fd, 1).decode("ascii", errors="ignore").lower() if ready else None
 

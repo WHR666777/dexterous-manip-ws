@@ -207,11 +207,14 @@ def test_wrist_continues_during_replay_and_reset_and_recording_matches_sends(wri
 
 
 @pytest.mark.parametrize("fault", ["tracking", "ik", "gate"])
-def test_pause_cancels_replay_and_reanchor_preserves_last_finger_pose(wrist_run, fault):
+def test_hold_or_pause_cancels_replay_and_preserves_last_finger_pose(wrist_run, fault):
     events = wrist_run(["r", "p", None, None, None, "r", None, "p", None, "q"], fault)
-    assert events.arm == [2, 3, 7, 8, 9]
+    expected = [2, 3, 5, 7, 8, 9] if fault == "ik" else [2, 3, 7, 8, 9]
+    assert events.arm == expected
     by_cycle = dict(events.hand)
-    assert set(by_cycle) == {0, 2, 3, 7, 8, 9}
+    assert set(by_cycle) == {0, *expected}
+    if fault == "ik":
+        np.testing.assert_array_equal(by_cycle[5], by_cycle[3])
     np.testing.assert_array_equal(by_cycle[7], by_cycle[3])
     np.testing.assert_array_equal(by_cycle[8], HandReplay(CLIP).actions[0])
 

@@ -1,6 +1,7 @@
 """Keep controller ordering tests deterministic; spawn is tested separately."""
 
 import pytest
+import numpy as np
 
 
 @pytest.fixture
@@ -9,7 +10,10 @@ def inline_compute(monkeypatch):
 
     class InlineCompute:
         def __init__(self, config, control, hand_mode="tracking"):
-            self.ik = (controller.NeroIK(max_joint_delta_rad=config["arm"]["max_joint_delta_rad"])
+            self.ik = (controller.NeroIK(max_joint_delta_rad=config["arm"]["max_joint_delta_rad"],
+                                       joint_limit_margin_rad=np.deg2rad(config["arm"].get("ik_joint_limit_margin_deg", 2.0)),
+                                       feedback_limit_tolerance_rad=np.deg2rad(
+                                           config["arm"].get("ik_feedback_limit_tolerance_deg", 1.0)))
                        if control in ("arm", "both") else None)
             self.retargeter = (controller._retargeter(config)
                               if control in ("hand", "both") and hand_mode == "tracking" else None)

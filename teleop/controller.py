@@ -39,6 +39,7 @@ START_POSE_FEEDBACK_TIMEOUT_S = 3.0
 START_POSE_FEEDBACK_POLL_S = 0.05
 STARTUP_POSE_FEEDBACK_TIMEOUT_S = 3.0
 STARTUP_POSE_FEEDBACK_POLL_S = 0.05
+RETRYABLE_IK_CODES = frozenset(("IK_FAILED", "IK_FK_ERROR", "IK_JUMP"))
 
 
 class _ControlTiming:
@@ -307,6 +308,16 @@ def _print_ik_failure_diagnostics(
         "IK seed deg J1..J7: "
         + np.array2string(np.degrees(seed), precision=2, suppress_small=True)
     )
+    for violation in diag.get("seed_limit_violations", []):
+        print(
+            f"IK feedback outside URDF limits: J{violation['joint']}="
+            f"{np.degrees(violation['angle_rad']):.3f}deg; allowed="
+            f"[{np.degrees(violation['lower_rad']):.3f}, "
+            f"{np.degrees(violation['upper_rad']):.3f}]deg. "
+            + ("Feedback exceeds the inward-recovery tolerance; inspect the joint before resuming."
+               if diag.get("code") == "IK_JOINT_LIMIT" else
+               "Trying an inward solution with bounded real-feedback joint steps.")
+        )
     best = diag.get("best_intermediate")
     if best is not None:
         details = [
@@ -564,6 +575,7 @@ def run(
     tracker: WristTracker | None = None
     last_accepted_target: np.ndarray | None = None
     paused = True
+    ik_hold_reason = None
     record_root = Path(record_dir or config["recording"]["output_dir"])
     lerobot_recording = config["recording"].get("lerobot")
     if control != "both" and lerobot_recording is not None:
@@ -589,7 +601,7 @@ def run(
         recorder.metadata["fixed_roll_pitch_deg"] = np.rad2deg(fixed_roll_pitch).tolist()
 
     def reanchor(frame) -> None:
-        nonlocal tracker, last_accepted_target, paused
+        nonlocal tracker, last_accepted_target, paused, ik_hold_reason
         if arm is not None:
             # Keep the teleoperation target in the same URDF model used by IK.
             # SDK flange feedback remains an independent preflight observation.
@@ -616,6 +628,7 @@ def run(
         if hand_replay is not None:
             hand_replay.stop()
         paused = False
+        ik_hold_reason = None
         print("Re-anchored; command streaming resumed.")
 
     try:
@@ -770,6 +783,12 @@ def run(
                     target_position, target_quaternion = tracker.update(wrist_position, wrist_quaternion)
                     target_transform = position_quaternion_to_matrix(target_position, target_quaternion)
                     target_tcp_position = (target_transform @ flange_to_tcp)[:3, 3]
+                    if not gate.accept(target_transform, target_tcp_position, commit=False):
+                        paused = True
+                        if hand_replay is not None:
+                            hand_replay.stop()
+                        print(f"PAUSED: {gate.reason}; press R to re-anchor.")
+                        continue
                     stage_started = time.perf_counter()
                     seed = arm.get_joint_positions()
                     observation_arm_joints = seed.copy()
@@ -778,23 +797,32 @@ def run(
                     solved = ik.solve(target_transform, seed)
                     stage_times["timing_ik_s"] = time.perf_counter() - stage_started
                     if solved is None:
-                        paused = True
                         if hand_replay is not None:
                             hand_replay.stop()
                         reason = ik.last_diagnostics.get("code", "IK failed")
-                        print(f"PAUSED: {reason}; press R to re-anchor.")
                         if last_accepted_target is None:
                             raise RuntimeError("IK diagnostic anchor is not initialized.")
-                        _print_ik_failure_diagnostics(
-                            ik, seed, target_transform, last_accepted_target
-                        )
+                        retryable = reason in RETRYABLE_IK_CODES
+                        if not retryable or ik_hold_reason != reason:
+                            if retryable:
+                                print(f"IK HOLD: {reason}; move your hand back toward the last "
+                                      "reachable pose, or press R to re-anchor. Retrying fresh targets.")
+                            else:
+                                print(f"PAUSED: {reason}; press R to re-anchor.")
+                            _print_ik_failure_diagnostics(
+                                ik, seed, target_transform, last_accepted_target
+                            )
+                        if retryable:
+                            ik_hold_reason = reason
+                            time.sleep(max(0.0, period - (time.monotonic() - loop_started)))
+                        else:
+                            paused = True
+                            gate.pause(reason)
                         continue
-                    if not gate.accept(target_transform, target_tcp_position):
-                        paused = True
-                        if hand_replay is not None:
-                            hand_replay.stop()
-                        print(f"PAUSED: {gate.reason}; press R to re-anchor.")
-                        continue
+                    gate.reanchor(target_transform)
+                    if ik_hold_reason is not None:
+                        print("IK target reachable again; command streaming resumed.")
+                        ik_hold_reason = None
                     arm_action = solved
                     last_accepted_target = target_transform.copy()
                 if hand is not None:

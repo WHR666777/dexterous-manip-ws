@@ -11,6 +11,8 @@ import multiprocessing as mp
 import signal
 import time
 
+import numpy as np
+
 from robot_control.nero_ik import NeroIK
 
 from .config import input_config
@@ -21,7 +23,10 @@ def _compute_main(connection, config, use_arm, use_hand):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     request_id = 0
     try:
-        ik = (NeroIK(max_joint_delta_rad=config["arm"]["max_joint_delta_rad"])
+        ik = (NeroIK(max_joint_delta_rad=config["arm"]["max_joint_delta_rad"],
+                     joint_limit_margin_rad=np.deg2rad(config["arm"].get("ik_joint_limit_margin_deg", 2.0)),
+                     feedback_limit_tolerance_rad=np.deg2rad(
+                         config["arm"].get("ik_feedback_limit_tolerance_deg", 1.0)))
               if use_arm else None)
         hand = config["hand"]
         retargeter = (L20Retargeter(hand["retarget_config"], input_config(config)["side"],
