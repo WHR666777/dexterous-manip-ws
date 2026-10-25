@@ -66,6 +66,6 @@ R_base_camera * point_camera_i + t_base_camera
 
 `a_from_b` 表示将 B 坐标转换到 A 坐标，平移单位是米。标定程序不改写运行配置；agent 配置通过 `calibration.file` 引用结果 YAML、通过 `calibration.arm` 指定对应机械臂。路径相对于配置文件所在目录，也支持绝对路径。
 
-当前 `configs/cloth_agent.yaml` 引用 `pinch-01/calibration_candidate.yaml` 的右臂候选结果。启动时自动读取 `base_from_camera`、`flange_from_tcp`、`hand_pose_raw` 和 `reference_roll_pitch_deg`，计算任务坐标系中的相机外参、TCP 参考朝向和工作区边界。重新标定后只需改 `calibration.file` 并启动新任务，不必复制矩阵；执行中的任务不会热更新标定。CAN 通道、官方张开预设、规划限值仍由运行配置提供。当前任务坐标系取该 Nero base，另一条臂的基座关系仍需独立确定。
+`configs/cloth_agent.yaml` 保留为独立规划/标定参考，引用 `pinch-01/calibration_candidate.yaml` 的右臂候选结果。显式调用 `cloth_agent.config.load_config` 时会读取 `base_from_camera`、`flange_from_tcp`、`hand_pose_raw` 和 `reference_roll_pitch_deg`，计算任务坐标系中的相机外参、TCP 参考朝向和工作区边界。重新标定后可修改 `calibration.file`，不必复制矩阵。当前新 TaskSession 尚未加载这份配置或连接设备，不能通过启动 agent 使用上述标定；设备适配留待后续实现。当前参考任务坐标系取该 Nero base，另一条臂的基座关系仍需独立确定。
 
-相机三维关键点标记为 `frame: camera` 时会自动转入任务坐标系，也可通过 `geometry("camera_to_task", points=...)` 或 `geometry("pixel_to_task", pixel=..., depth_m=..., intrinsics=...)` 显式转换。
+几何底层 `cloth_agent.geometry.calculate` 保留 `camera_to_task` 和 `pixel_to_task` 操作，需要显式传入 `task_from_camera`，深度与内参必须来自同一 RGB-D 快照。旧观测封装已删除，当前没有关键点自动坐标转换或 agent 几何工具入口。

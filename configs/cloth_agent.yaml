@@ -1,27 +1,22 @@
-# Right-arm hardware configuration. Task frame = this Nero base_link.
-# Calibration values are loaded at startup; replace calibration.file after recalibration.
+# Right-arm planning/calibration reference. Task frame = this Nero base_link.
+# The current TaskSession does not load this file or connect hardware.
+# load_config reads calibration values explicitly; replace the file after recalibration.
 # Software planning caps: 0.2 rad/s, 0.4 rad/s^2 (not measured hardware ratings).
 # Workspace: 0.9 m cube at nero_start_pose.yaml FK + calibrated TCP; fixed in base.
-# Only the calibrated right arm is configured. Demo uses cloth_agent_mock.yaml.
+# Only the calibrated right arm is configured. No agent demo/runtime backend.
 backend: hardware
 control_hz: 20
-output_dir: data/agent_runs
-folds: 2
 calibration:
   # Paths are relative to this config directory, or may be absolute.
   file: ../data/calibration/pinch-01/calibration_candidate.yaml
   arm: right
 motion:
-  joint_tolerance_rad: 0.02
-  completion_timeout_s: 30.0
   max_ik_step_rad: 0.3345329252
   joint_step_rad: 0.08
   position_step_m: 0.005
   rotation_step_rad: 0.034906585
 observations:
-  recorded_episode: null
-  keypoints_file: null
-  keypoints_max_age_s: 0.25
+  task_from_camera: null
 camera:
   enabled: true
   model: L515
@@ -47,8 +42,3 @@ arms:
     hand_poses:
       open: [255, 255, 255, 255, 255, 255, 10, 100, 180, 240, 245, 255, 255, 255, 255, 255, 255, 255, 255, 255]
     hand_speed: [160, 160, 160, 160, 160]
-codex:
-  executable: codex
-  model: null
-  extra_args: []
-  request_timeout_s: 300

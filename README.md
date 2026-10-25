@@ -1,6 +1,6 @@
 # Pico 4 / Quest 3 → Nero + LinkerHand L20 遥操作
 
-本仓库的遥操作部分用 Pico 4 或 Quest 3 控制 AgileX Nero 七轴机械臂和 LinkerHand L20，并记录后续 OP 训练所需的数据。默认仍是**单臂 + 单手**；Pico 4 另支持显式配置的**双臂 + 双手并行控制及联合录制**。新增的折布 agent 软件入口支持两臂依次运动、普通 Python 脚本监督和参数恢复，当前通过假设备验证；见下方“折布 agent 与普通 Python 程序”。
+本仓库的遥操作部分用 Pico 4 或 Quest 3 控制 AgileX Nero 七轴机械臂和 LinkerHand L20，并记录后续 OP 训练所需的数据。默认仍是**单臂 + 单手**；Pico 4 另支持显式配置的**双臂 + 双手并行控制及联合录制**。折布 agent 正在改为 `codex exec + MCP + 独立持久 Python worker/控制进程`；当前新框架只完成代码与语法检查，尚无 robo 或设备接入，见 [框架阅读说明](docs/cloth_framework.md)。
 
 `AnyDexRetarget/` 是唯一有效的 VR 输入和手部重定向实现。原 `vr_teleop` 只作为腕部相对锚定和平滑方案的参考，所需跟踪逻辑已经迁入 `teleop/`，不再作为运行依赖。
 
@@ -325,75 +325,30 @@ python3 examples/l20_example.py --can-channel can1 --hand-type right
 
 它们默认只读。带 `--execute` 的单步动作仍需输入 `EXECUTE`，只用于现场分级验证。
 
-## 折布 agent 与普通 Python 程序
+## 折布 agent
 
-项目说明见 [docs/closth_agent.md](docs/closth_agent.md)，实施与验证进度见 [docs/cloth_agent_plan.md](docs/cloth_agent_plan.md)。agent 为每个子任务生成完整 Python 脚本，通过导入 `cloth_agent.tools` 调用工具，自行组织动作、监督循环和既有恢复分支。
+架构见 [docs/closth_agent.md](docs/closth_agent.md)，代码阅读与运行说明见 [docs/cloth_framework.md](docs/cloth_framework.md)。唯一主流程使用 `codex exec + MCP + 独立持久 Python worker / 控制进程`，入口为 `python -m cloth_agent`。
 
-在具备现有 NumPy、SciPy、Pinocchio 等依赖的环境中安装额外的 TOPPRA 依赖：
-
-```bash
-python3 -m pip install -e '.[agent]'
-```
-
-默认任务配置 `configs/cloth_agent.yaml` 已填写当前右臂的实机参数：`can_arm_a` / `can_hand_a`、L515 序列号和官方张开手型；相机外参、虚拟 TCP、闭合手型和参考朝向在启动时从标定文件读取。任务坐标系为该 Nero base。另一条臂尚未标定，当前只配置右臂。
-
-重新标定后只需替换下面的文件路径。相对路径以配置文件所在目录为基准，也支持绝对路径；新任务启动时读取，不在执行途中热更新：
-
-```yaml
-calibration:
-  file: ../data/calibration/pinch-01/calibration_candidate.yaml
-  arm: right
-```
-
-`demo` 自动使用独立的 `configs/cloth_agent_mock.yaml`。运行两个阶段和一次注入异常的演示：
+安装 agent 运行依赖后，可启动纯计算任务服务或一次 Codex 任务：
 
 ```bash
-# 确定性驱动：不调用模型、不连接 CAN 或相机
-python3 -m cloth_agent.cli demo
+python -m pip install -e '.[agent]'
 
-# 真实 Codex 在同一个 thread 中生成两个程序并处理参数恢复
-python3 -m cloth_agent.cli demo --with-codex
+python -m cloth_agent serve --output-dir data/agent_runs/session-01
+
+python -m cloth_agent run \
+  --output-dir data/agent_runs/session-02 \
+  --task '在两个 cell 中定义并复用一个函数，检查结果后结束。'
+
+# 另一个终端直接通知控制进程，不经过 Codex 或 MCP。
+python -m cloth_agent estop data/agent_runs/session-02/session.json
 ```
 
-后一条命令需要本机 `codex` 可执行且已登录，沿用现有模型配置，也可在 YAML 中指定模型。程序通过本地 app-server 协议工作，接口依据 [OpenAI 官方文档](https://learn.chatgpt.com/docs/app-server)，动态工具已对照本机 `codex-cli 0.162.1` 验证。
+当前没有 `robo`、运动、观测或设备连接。人工入口只锁定控制状态，不发送 Nero 电子急停；回执明确报告硬件未连接、停机未确认。代码包含中文注释，agent prompt 和事件说明采用中英夹杂形式。本轮仅检查语法，没有执行上述命令、测试或联调。
 
-启动自定义任务，或运行已有的普通 Python 子任务脚本：
+旧 app-server、普通子任务脚本提交、参数回信、demo 与对应执行后端已删除，不再提供原来的 `demo/script` 命令或 `cloth_agent.tools` 接口。
 
-```bash
-python3 -m cloth_agent.cli run --task "将平铺的矩形抹布折叠两次" --folds 2 --execute
-python3 -m cloth_agent.cli script my_subtask.py --params my_params.json --execute
-```
-
-`run` 驱动 Codex；`script` 直接启动现有程序，并在其请求恢复时从终端接收 JSON 回复。脚本可以导入以下接口：
-
-- `parameters()`：读取提交时保存的初始参数。
-- `observe(include_images=True)`：取得机器人反馈、运动状态、RGB-D 文件及元数据、可选关键点。
-- `execute_trajectory(plan_id, wait=False)`：后台执行已规划轨迹，返回运动句柄；默认 `wait=True` 等待执行结果。
-- `move_J(arm, target_joints, wait=True)`、`move_L(arm, target_tcp, wait=True)`：通过同一规划器和执行器执行点到点或 TCP 直线运动。
-- `plan_from_current(waypoints=None, arm="left", mode="cartesian", target_joints=None)`：从当前反馈生成关节路径及 TOPPRA 时间参数化，返回计划 ID。`mode` 可选 `joint` 或 `cartesian`。
-- `set_hand_pose(pose, arm="left")`：发送 20 槽 raw 手型，或使用已填写的 `open`/`closed` 预设。
-- `request_agent(reason, observation=None)`：暂停保持后发送反馈，在原 Python 进程中等待恢复参数。回复必须包含 `action: continue/abort`，其余字段由程序既有恢复分支约定。
-- `wait_next_observation(period_s=.05)`、`report_result(status="completed", **result)` 和 `geometry(operation, **values)`：监督循环、结果报告及几何计算辅助工具。
-
-`geometry("camera_to_task", points=...)` 使用已配置的相机外参转换相机三维点；`geometry("pixel_to_task", pixel=[u, v], depth_m=z, intrinsics=...)` 先反投影再转换到任务坐标系。深度和内参必须来自所点选的同一份 RGB-D 观测，深度单位为米。原有 `pixel_to_point` 仍返回相机坐标。观测中包含 `images.task_from_camera` 和该臂的 `reference_tcp_rotation`；后者是 replay 抓姿对应的 TCP 参考朝向，可绕任务竖直轴调整 yaw。
-
-运动句柄提供 `status()`、`done()`、`wait()` 和 `pause_and_hold(reason)`。`done()` 表示运动已停止运行，包括正常完成、暂停和失败；通过 `wait()` 确认结果，暂停与失败分别抛出 `MotionInterrupted`、`MotionFailed`。这些异常可直接从工具模块导入。后台执行器持续运行，脚本等待或读取观测不会停止轨迹推进；调用暂停保持后原轨迹不再推进，已有恢复分支需要从实际状态规划新的轨迹。
-
-每个任务的源码、初始参数、轨迹、RGB-D 快照、`events.jsonl`、子进程输出和结果保存在 `data/agent_runs/`。真实 Codex 运行还保存 `thread.json` 和便于阅读的 `codex.md`：后者记录实际发送的 developer instructions、工具定义、任务/续接消息、Codex 回复、工具参数/结果及提交的程序源码。
-
-提示词和工具说明以中文为主、保留 English 技术术语，并要求 Codex 的计划、回复、生成代码的注释和说明性日志使用同样形式。`events.jsonl` 增加中英 `description`，任务/子任务/运动状态增加 `status_text`；原有 JSON 字段、工具名和 `completed` / `continue` 等枚举值保持不变，便于程序解析与对照。提示词位于 `cloth_agent/codex.py` 的 `INSTRUCTIONS` 和 `tool_specs()`，demo 任务位于 `cloth_agent/demo.py` 的 `SMOKE_TASK`。新设置对后续运行生效。
-
-同一任务中的活动程序不能替换；程序未处理的异常或未等待运动便退出会触发暂停收尾并结束该任务，不能提交改写后的程序继续尝试。
-
-关键点模块暂未开发。`observations.keypoints_file` 可接收上游原子更新的 JSON，坐标系为 `task` 或 `camera`、单位米，时间戳采用同一主机的单调时钟；`camera` 三维点会使用 `task_from_camera` 自动转换，已经是 `task` 的点保持原值。缺失或过期返回 `null`：
-
-```json
-{"timestamp_monotonic": 12345.0, "frame": "task", "points": {"corner": [0.1, 0.2, 0.3]}}
-```
-
-`observations.recorded_episode` 可指定现有 `data/episodes/episode_...` 格式的 RGB-D 记录用于假设备测试，需安装视觉依赖；录制输入不用于实机运动。默认假设备图像明确标为 `synthetic`，没有伪造布料关键点。
-
-当前实机配置引用 `pinch-01/calibration_candidate.yaml` 的候选标定（拟合 RMS 7.142 mm）。关节规划速度/加速度软件上限为 0.2 rad/s、0.4 rad/s²；`workspace.start_pose_file` 和 `workspace.cube_side_m` 定义工作区，启动时按起始关节姿态 FK 和所读 TCP 自动计算 0.9 m 立方体边界，同一任务中保持固定。实机入口仍要求 `--execute` 和原有 `EXECUTE` 确认。关键点输入、实际定位精度、暂停保持及抓布/折布效果仍待现场验证；离线测试不连接设备。需要纯软件任务时显式使用 `--config configs/cloth_agent_mock.yaml`。
+`geometry.py`、`planning.py`、`config.py` 与标定配置保留为独立底层代码，新任务主流程尚未接入它们。几何函数仍供现有 TCP/相机标定使用；TOPPRA 离线规划依赖可通过 `python -m pip install -e '.[planning]'` 安装。`configs/cloth_agent_mock.yaml` 仅作为规划测试的数值输入，不再对应假设备运行或 demo。
 
 ## 目录
 
@@ -402,7 +357,7 @@ AnyDexRetarget/              权威手部重定向实现与 Quest3/L20 配置
 assets/nero/                 本项目固定使用的 Nero URDF
 configs/                     唯一遥操作现场配置
 robot_control/               Nero、L20 封装与 Nero IK
-cloth_agent/                 自主程序工具、规划、后台执行、脚本与 Codex 通信
+cloth_agent/                 Codex exec、MCP、独立 worker/控制进程及几何规划底层
 teleop/                      AnyDex 输入适配、现场坐标、锚定、控制、录制、CLI
 examples/                    单设备低层只读/小步诊断
 tests/                       不接硬件的纯逻辑与 wrapper 测试
@@ -414,4 +369,4 @@ docs/review.md               本次改造的代码 review 导航
 
 ## 当前验证边界
 
-本轮执行了离线测试、假设备脚本恢复演示，以及真实 Codex thread 驱动的假设备联调，没有连接 CAN、相机或执行实机运动。遥操作的现场验证顺序见 `docs/calibration.md`，折布 agent 的分级验收见 `docs/cloth_agent_plan.md`。
+当前 agent 按用户要求仅检查语法，没有运行 mock、测试、Codex 联调或实机运动；运行行为尚待验证，范围见 [docs/cloth_framework.md](docs/cloth_framework.md)。遥操作的现场验证顺序见 `docs/calibration.md`。

@@ -1,74 +1,67 @@
-"""Standalone entry point. No device connection until Runtime is constructed."""
+"""Cloth agent 命令行；仅显式启动 run/serve 才创建进程与 MCP 服务。"""
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
-from .config import DEFAULT_CONFIG, MOCK_CONFIG, load_config, validate_hardware_config
-from .runtime import Runtime
+from .control import request_estop
+from .session import TaskSession
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="折布 agent：Code-as-policy 与普通 Python 程序工具")
-    parser.add_argument("--config", type=Path, help="任务默认 cloth_agent.yaml；demo 使用 cloth_agent_mock.yaml")
-    parser.add_argument("--output-dir", type=Path, help="本次任务记录 artifacts 的完整目录")
-    subcommands = parser.add_subparsers(dest="command", required=True)
-    demo = subcommands.add_parser("demo", help="两个 mock 阶段与一次注入异常恢复")
-    demo.add_argument("--with-codex", action="store_true", help="通过真实 Codex thread 生成程序并监督执行")
-    run = subcommands.add_parser("run", help="让 Codex 生成并监督 task 程序")
-    run.add_argument("--task", default="将平铺的矩形抹布折叠两次。")
-    run.add_argument("--folds", type=int, default=None)
-    run.add_argument("--execute", action="store_true")
-    script = subcommands.add_parser("script", help="运行已有普通 Python subtask 程序")
-    script.add_argument("source", type=Path)
-    script.add_argument("--params", type=Path)
-    script.add_argument("--execute", action="store_true")
+    parser = argparse.ArgumentParser(description="Cloth agent 进程框架 Process framework; no robo")
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", help="启动一次 Codex exec task")
+    run.add_argument("--task", required=True, help="纯计算任务；当前不支持机器人操作")
+    run.add_argument("--codex", default="codex", help="本机 Codex executable")
+    run.add_argument("--model", default=None, help="省略时沿用 Codex 模型设置")
+    serve = commands.add_parser("serve", help="仅启动 MCP 与两个子进程，等待外部 MCP client")
+    for command in (run, serve):
+        command.add_argument("--output-dir", help="新任务记录目录，不覆盖已有 events.jsonl")
+        command.add_argument("--cell-timeout", type=float, default=60.)
+        command.add_argument("--task-timeout", type=float, default=900.)
+        command.add_argument("--max-cells", type=int, default=40)
+    estop = commands.add_parser("estop", help="直接向控制进程请求人工急停锁定，不经过 MCP")
+    estop.add_argument("session_file", help="本次任务的 session.json")
+    estop.add_argument("--reason", default="操作者请求急停 Operator requested e-stop")
     args = parser.parse_args(argv)
-    config = load_config(args.config or (MOCK_CONFIG if args.command == "demo" else DEFAULT_CONFIG))
-    if args.command == "demo" and config["backend"] != "mock":
-        parser.error("demo 要求 backend: mock")
-    allow_hardware = False
-    if config["backend"] == "hardware":
-        validate_hardware_config(config)  # Check blanks before opening any device.
-        if not args.execute:
-            parser.error("实机 hardware 执行需要 --execute 和 EXECUTE 确认。")
-        if input("确认工作区、机械臂使能和急停 e-stop 可用，输入 EXECUTE：").strip() != "EXECUTE":
-            parser.error("未确认实机执行 Hardware execution was not confirmed.")
-        allow_hardware = True
-    with Runtime(config, args.output_dir, allow_hardware=allow_hardware) as runtime:
-        if args.command == "demo":
-            from .demo import SMOKE_TASK, run_demo
-            if args.with_codex:
-                from .codex import CodexAppServer
-                result = CodexAppServer(runtime).run(SMOKE_TASK)
+
+    if args.command == "estop":
+        # 此分支不创建 TaskSession，不启动 Codex，也不需要 MCP 依赖。
+        # 当前回执仅证明控制状态锁定，hardware_connected/stop_confirmed 均为 False。
+        print(json.dumps(request_estop(args.session_file, args.reason), ensure_ascii=False, indent=2))
+        return 0
+
+    from .mcp_server import CellMcpServer
+
+    with TaskSession(args.output_dir, cell_timeout_s=args.cell_timeout,
+                     task_timeout_s=args.task_timeout, max_cells=args.max_cells) as session:
+        server = CellMcpServer(session)
+        try:
+            url = server.start()
+            print(json.dumps({"description": "任务服务已启动 Task service ready; no hardware",
+                              "mcp_url": url, "session_file": str(session.directory / "session.json")},
+                             ensure_ascii=False), flush=True)
+            if args.command == "run":
+                from .codex_exec import run_codex
+
+                result = run_codex(session, url, args.task, executable=args.codex, model=args.model)
             else:
-                result = run_demo(runtime)
-        elif args.command == "run":
-            from .codex import CodexAppServer
-            folds = args.folds if args.folds is not None else config["folds"]
-            if folds < 1:
-                parser.error("折叠次数 folds 必须为正数。")
-            result = CodexAppServer(runtime).run(f"{args.task}\n折叠次数 folds：{folds}。")
-        else:
-            params = json.loads(args.params.read_text()) if args.params else {}
-            runtime.submit_subtask(args.source.read_text(), params, args.source.stem)
-            while True:
-                event = runtime.wait_event(30)
-                print(json.dumps(event, ensure_ascii=False))
-                if event["type"] == "recovery_requested":
-                    reply = json.loads(input("恢复参数 Recovery JSON（action: continue/abort）："))
-                    runtime.reply_recovery(event["request_id"], reply)
-                elif event["type"] in ("subtask_completed", "subtask_failed", "subtask_aborted"):
-                    if event["type"] == "subtask_completed":
-                        result = runtime.finish_task({"kind": "script_execution", "description": "已有 Python 程序执行完成 script completed"})
-                    else:
-                        result = runtime.abort_task(event.get("reason", "程序失败 script failed"))
-                    break
+                session.ended.wait()
+                result = session.summary()
+        except KeyboardInterrupt:
+            # Ctrl+C 是普通任务取消；真正的人工电子急停必须使用独立入口。
+            session.abort("终端取消任务 Terminal cancelled task")
+            result = session.summary()
+        finally:
+            # 先结束生成代码，再等待 HTTP 服务退出，避免服务关闭被活动 cell 卡住。
+            session.abort("MCP 服务关闭 MCP service closing")
+            server.close()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "completed" else 1
 
 
 if __name__ == "__main__":
+    # spawn 子进程重新导入模块时不能再次进入 CLI，否则会递归创建进程。
     raise SystemExit(main())

@@ -18,7 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = ["toppra>=0.6,<0.7"]
+agent = ["mcp>=1.8,<2", "uvicorn>=0.30,<1"]
+planning = ["toppra>=0.6,<0.7"]
 vision = [
   "pyrealsense2>=2.50,<2.55",
   "opencv-python>=4.8,<5",

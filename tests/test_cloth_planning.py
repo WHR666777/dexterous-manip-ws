@@ -119,7 +119,6 @@ def hardware_config_path(tmp_path):
 
 def test_default_hardware_config_has_right_arm_calibration_and_official_open_pose(hardware_config_path):
     from robot_control.l20 import _L20_OPEN_PRESET
-    from cloth_agent.backends import hand_vector
 
     config = load_config(hardware_config_path)
     validate_hardware_config(config)  # Pure validation, never constructs devices.
@@ -128,7 +127,6 @@ def test_default_hardware_config_has_right_arm_calibration_and_official_open_pos
     arm = config["arms"]["right"]
     assert (arm["can_channel"], arm["hand_can_channel"]) == ("can_arm_a", "can_hand_a")
     np.testing.assert_array_equal(arm["hand_poses"]["open"], _L20_OPEN_PRESET)
-    hand_vector(arm["hand_poses"]["closed"])
     np.testing.assert_allclose(arm["task_from_base"], np.eye(4))
     transform(config["observations"]["task_from_camera"])
     transform(arm["flange_from_tcp"])
