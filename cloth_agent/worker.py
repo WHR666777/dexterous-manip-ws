@@ -1,4 +1,4 @@
-"""独立持久 Python worker：只执行计算代码，不持有机器人或控制通道。
+"""独立持久 Python worker：执行 cell 与几何/规划，通过 robo 代理请求设备操作。
 
 一个任务只创建一个 spawn 子进程；每个 cell 都使用同一份 globals。
 生成代码退出或发生普通异常时保留 globals；进程被终止后不尝试恢复内存。
@@ -18,6 +18,8 @@ from threading import Lock
 import time
 import traceback
 
+from .robo import Robo, CellPaused
+
 
 class WorkerUnavailable(RuntimeError):
     """worker 已退出或被取消，调用者应结束本次任务。"""
@@ -36,7 +38,7 @@ class _Output(io.StringIO):
         return len(text)
 
 # 子进程的相关代码，以_开头，表示私有。
-def _namespace():
+def _namespace(robo):
     # 本轮仅允许计算所需模块。尤其不允许源码直接导入设备 SDK、进程、网络或文件库。
     # import numpy 等模块内部仍会使用其自身运行环境，因此不能据此宣称强安全隔离。
     allowed = {"math", "time", "numpy", "scipy", "json", "statistics", "collections",
@@ -55,9 +57,8 @@ def _namespace():
     safe["__import__"] = computation_import
     import numpy as np
 
-    # 不注入 robo 占位对象；尚未实现的机器人能力不能被误认为已经可用。
     return {"__name__": "__cell__", "__builtins__": safe,
-            "np": np, "math": math, "time": time}
+            "np": np, "math": math, "time": time, "robo": robo}
 
 
 def _execute(source, namespace, cell_id):
@@ -78,6 +79,8 @@ def _execute(source, namespace, cell_id):
                 value = eval(compile(ast.Expression(tail.value), f"<cell {cell_id}>", "eval"), namespace)
                 # 最后一行用于方便模型查看结果；变量本身仍留在 worker，回传值不是反序列化协议。
                 result["value"] = repr(value)[:8000] if value is not None else None
+    except CellPaused as exc:
+        result.update(status="paused", reason=str(exc))
     except BaseException:
         # KeyboardInterrupt / SystemExit 也只结束当前 cell。进程级强制终止由父进程处理。
         result.update(status="error", exception=traceback.format_exc()[-8000:])
@@ -86,30 +89,37 @@ def _execute(source, namespace, cell_id):
     return result
 
 
-def _worker_main(connection, workspace):
+def _worker_main(connection, workspace, robot_connection, config):
     # 此函数在新解释器执行。先关闭对外能力，再进入串行收发循环；不创建任何设备对象。
     import os
 
     os.chdir(workspace)
     try:
-        namespace = _namespace()
+        robo = Robo(robot_connection, config)
+        namespace = _namespace(robo)
         connection.send({"status": "ready", "pid": os.getpid()})
         while True:
             message = connection.recv()
             if message["operation"] == "close":
                 return
-            connection.send(_execute(message["source"], namespace, message["cell_id"]))
+            robo._begin_cell(message["cell_id"])
+            result = _execute(message["source"], namespace, message["cell_id"])
+            # 文件路径和 crop 元数据只交给宿主附图；不把整幅 RGB-D 转成文本日志。
+            result["images"] = robo._shows
+            result["robot_calls"] = robo._calls
+            connection.send(result)
     except (EOFError, BrokenPipeError):
         # 协调进程退出时，worker 不能自行重连或继续接受旧任务。
         return
     finally:
         connection.close()
+        robot_connection.close()
 
 
 class PythonWorker:
     """父进程持有的 worker 句柄；execute 串行，stop 不等待 execute 的锁。"""
 
-    def __init__(self, workspace):
+    def __init__(self, workspace, robot_connection, config):
         workspace = Path(workspace).resolve()
         workspace.mkdir(parents=True, exist_ok=True)
         context = mp.get_context("spawn")
@@ -117,7 +127,8 @@ class PythonWorker:
         self._execution_lock = Lock()
         self._stop_lock = Lock()
         self._stopped = False
-        self.process = context.Process(target=_worker_main, args=(child, str(workspace)),
+        self.process = context.Process(target=_worker_main,
+                                       args=(child, str(workspace), robot_connection, config),
                                        name="cloth-python-worker")
         self.process.start()
         child.close()

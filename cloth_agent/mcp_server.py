@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+from pathlib import Path
 import socket
 from threading import Thread
 import time
@@ -23,7 +26,7 @@ class CellMcpServer:
     def start(self):
         try:
             from mcp.server.fastmcp import FastMCP
-            from mcp.types import ToolAnnotations
+            from mcp.types import ToolAnnotations, TextContent, ImageContent
             import uvicorn
         except ImportError as exc:
             raise RuntimeError("缺少 MCP 依赖 Install the project agent dependencies") from exc
@@ -37,10 +40,28 @@ class CellMcpServer:
         annotations = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False)
 
         @mcp.tool(name="python", annotations=annotations)
-        async def python(code: str) -> dict:
-            """执行持久 Python cell Execute a persistent cell; currently no robo or hardware."""
+        async def python(code: str):
+            """执行持久 cell Execute Python with robo; show() attaches observation images."""
             try:
-                return await asyncio.to_thread(self.session.execute, code)
+                result = await asyncio.to_thread(self.session.execute, code)
+                attachments = []
+                for shown in result.get("images", []):
+                    try:
+                        # 图片只能来自本次控制进程保存的观测目录。源码不获得任意文件读取入口。
+                        path = Path(shown["rgb_path"]).resolve()
+                        expected = self.session.directory / "observations" / (shown["observation_id"] + ".png")
+                        if path != expected.resolve() or path.parent != expected.parent.resolve():
+                            raise ValueError("图像不是本次观测 Image is outside the observation store")
+                        data = await asyncio.to_thread(self._image_bytes, path, shown["crop"])
+                        attachments.append(TextContent(type="text", text=json.dumps({
+                            "description": "观测图像 Observation image; crop uses original pixel coordinates",
+                            "observation_id": shown["observation_id"], "crop": shown["crop"]}, ensure_ascii=False)))
+                        attachments.append(ImageContent(type="image", mimeType="image/png",
+                                                        data=base64.b64encode(data).decode("ascii")))
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        # 不把磁盘路径文本当作“模型已经看图”。附图失败必须明确回传。
+                        result.setdefault("image_errors", []).append(str(exc))
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False)), *attachments]
             except asyncio.CancelledError:
                 # MCP 客户端取消不会自动停止 to_thread 内的代码，需要显式撤销任务。
                 # 这是普通任务取消；人工电子急停由控制进程的 Unix socket 独立接收。
@@ -67,6 +88,22 @@ class CellMcpServer:
         self.url = f"http://127.0.0.1:{port}/mcp"
         self.session.log("mcp_started", "MCP 服务已启动 MCP server ready", url=self.url)
         return self.url
+
+    @staticmethod
+    def _image_bytes(path, crop):
+        if crop is None:
+            return path.read_bytes()
+        import cv2
+
+        # 裁剪只用于模型看局部；pixel_to_task 始终使用原始快照的完整图像坐标。
+        image = cv2.imread(str(path))
+        if image is None:
+            raise RuntimeError("图像无法读取 Observation image could not be read")
+        u0, v0, u1, v1 = crop
+        ok, encoded = cv2.imencode(".png", image[v0:v1, u0:u1])
+        if not ok:
+            raise RuntimeError("裁剪图像编码失败 Crop encoding failed")
+        return encoded.tobytes()
 
     def close(self):
         if self._server:

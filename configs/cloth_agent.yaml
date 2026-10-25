@@ -1,9 +1,9 @@
-# Right-arm planning/calibration reference. Task frame = this Nero base_link.
-# The current TaskSession does not load this file or connect hardware.
-# load_config reads calibration values explicitly; replace the file after recalibration.
+# 右臂 robo 配置 Right-arm configuration. Task frame = this Nero base_link.
+# TaskSession 显式加载后冻结参数；只有 --execute + EXECUTE 才连接设备。
+# 启动读取标定 Calibration is read once; replace after recalibration.
 # Software planning caps: 0.2 rad/s, 0.4 rad/s^2 (not measured hardware ratings).
 # Workspace: 0.9 m cube at nero_start_pose.yaml FK + calibrated TCP; fixed in base.
-# Only the calibrated right arm is configured. No agent demo/runtime backend.
+# 仅标定后的右臂 Only calibrated right arm; no mock device backend.
 backend: hardware
 control_hz: 20
 calibration:
@@ -15,6 +15,8 @@ motion:
   joint_step_rad: 0.08
   position_step_m: 0.005
   rotation_step_rad: 0.034906585
+  joint_tolerance_rad: 0.02
+  completion_timeout_s: 30.0
 observations:
   task_from_camera: null
 camera:

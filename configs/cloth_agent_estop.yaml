@@ -1,0 +1,38 @@
+# 人工位置保持联调专用 Manual position-hold commissioning; right Nero + right L20.
+# 保留历史配置文件名，但新入口使用 hold，不调用阻尼电子急停。
+# 与 cloth_agent.yaml 使用同一标定；关闭相机，避免相机启动影响本次保持排查。
+# 不自动使能/reset/回零。连接时不设置手速，不主动发送开合手位置命令。
+backend: hardware
+control_hz: 20
+calibration:
+  file: ../data/calibration/pinch-01/calibration_candidate.yaml
+  arm: right
+motion:
+  max_ik_step_rad: 0.3345329252
+  joint_step_rad: 0.08
+  position_step_m: 0.005
+  rotation_step_rad: 0.034906585
+  joint_tolerance_rad: 0.02
+  completion_timeout_s: 30.0
+observations:
+  task_from_camera: null
+camera:
+  enabled: false
+arms:
+  right:
+    can_channel: can_arm_a
+    hand_can_channel: can_hand_a
+    task_from_base:
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0, 0.0]
+      - [0.0, 0.0, 1.0, 0.0]
+      - [0.0, 0.0, 0.0, 1.0]
+    # 仅为规划/执行的软件上限，不是经测量的硬件速度或急停性能保证。
+    velocity_limits: [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+    acceleration_limits: [0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04]
+    workspace:
+      start_pose_file: nero_start_pose.yaml
+      cube_side_m: 0.9
+    hand_poses:
+      open: [255, 255, 255, 255, 255, 255, 10, 100, 180, 240, 245, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+    hand_speed: null

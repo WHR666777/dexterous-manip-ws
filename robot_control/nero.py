@@ -159,7 +159,9 @@ class NeroArm:
 
         Notes
         -----
-        映射七次 ``Driver.get_joint_enable_status(1..7)``；不阻塞。
+        映射 ``Driver.get_joint_enable_status(1..7)``；不阻塞。
+        官方 SDK 在某轴驱动反馈尚未收到时也返回 False，因此 False 不能单独
+        证明物理机械臂未使能。新连接应先等待反馈，再决定是否允许动作。
         """
         return all(
             bool(self._driver.get_joint_enable_status(index))
@@ -958,8 +960,9 @@ class NeroArm:
 
         Notes
         -----
-        映射 ``Driver.electronic_emergency_stop()``；不等待，急停后 reset 可能
-        造成机械臂下落。
+        映射 ``Driver.electronic_emergency_stop()``。SDK 定义为阻尼急停，
+        不承诺固定位置保持；现场已观察到下落，因此不能用作空中悬停。
+        不等待停止确认；急停后 reset 同样可能造成机械臂下落。
         """
         self._require_connected()
         self._driver.electronic_emergency_stop()

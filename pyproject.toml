@@ -29,5 +29,8 @@ vision = [
 [tool.setuptools.packages.find]
 include = ["robot_control*", "teleop*", "cloth_agent*"]
 
+[tool.setuptools.package-data]
+cloth_agent = ["robot_operations.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

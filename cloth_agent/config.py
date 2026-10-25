@@ -1,6 +1,6 @@
 """独立规划/标定配置的读取与校验，不创建设备连接。
 
-新 TaskSession 当前不加载这些配置；保留给几何与 TOPPRA 规划使用。
+TaskSession 启动时显式加载标定与运动配置；只有控制进程可以连接设备。
 其中 mock 配置只提供离线规划数值，不再对应一个假设备执行后端。
 """
 
@@ -96,6 +96,9 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
     # 此处仅校验独立规划器仍使用的参数；旧执行器的到位/录制参数已随主流程删除。
     for name in ("max_ik_step_rad", "position_step_m", "rotation_step_rad", "joint_step_rad"):
         positive(config["motion"][name], name)
+    # 反馈到位与暂停收尾仍由设备执行层判断；默认值只补到内存，不改写现场标定文件。
+    for name, default in (("joint_tolerance_rad", .02), ("completion_timeout_s", 30.)):
+        config["motion"][name] = positive(config["motion"].get(name, default), name)
     if not config["arms"] or any(name not in ("left", "right") for name in config["arms"]):
         raise ValueError("Configure left and/or right arms.")
     _load_calibration(config)
