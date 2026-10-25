@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="请求进入二次确认后的单次小动作分支。",
+        help="指定后发送单次小动作，无交互确认。",
     )
     parser.add_argument(
         "--joint-index",
@@ -64,34 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def confirm_execution() -> bool:
-    """阻塞等待操作者输入精确的执行确认词。
-
-    Returns
-    -------
-    bool
-        去除首尾空白后的输入恰为 ``"EXECUTE"`` 时为 ``True``。
-
-    Raises
-    ------
-    EOFError
-        标准输入在读取前关闭时抛出。
-
-    Notes
-    -----
-    本函数只读取标准输入且可能无限等待；它本身不访问 CAN，也不发送 L20
-    位置命令。返回 ``True`` 只是 :func:`run` 动作分支的第二道门。
-    """
-    return input("Type EXECUTE to send a small robot command: ").strip() == "EXECUTE"
-
-
 def run(
     args: argparse.Namespace,
     hand_factory: Callable[..., LinkerHandL20] = LinkerHandL20,
-    confirm: Callable[[], bool] = confirm_execution,
     wait: Callable[[float], None] = time.sleep,
 ) -> int:
-    """连接 L20、打印已验证反馈，并在双重确认后改变一个主动槽位。
+    """连接 L20、打印已验证反馈，并在指定 --execute 后改变一个主动槽位。
 
     Parameters
     ----------
@@ -101,8 +79,6 @@ def run(
     hand_factory : callable, optional
         创建公开 :class:`LinkerHandL20` 接口的工厂，默认创建真实封装；可注入
         无硬件测试替身。
-    confirm : callable, optional
-        返回精确执行确认结果的函数。
     wait : callable, optional
         动作发送后等待稳定时间的函数；默认映射 :func:`time.sleep`，测试可注入
         无等待替身。
@@ -110,14 +86,14 @@ def run(
     Returns
     -------
     int
-        正常或未确认时为 ``0``；仅断开失败时为 ``1``；候选 raw 位置不在
+        正常时为 ``0``；仅断开失败时为 ``1``；候选 raw 位置不在
         ``[0, 255]`` 时为 ``2``；收到 ``KeyboardInterrupt`` 时为 ``130``。
 
     Notes
     -----
     默认路径仅连接并通过 SDK 3.1.1 的 G20 协议读取版本、20 槽位置、速度、
-    最大扭矩、温度与故障，不发送位置命令。执行路径只在 ``--execute`` 与精确确认
-    均成立后，先为五指设置统一的保守 raw 速度，再从当前反馈复制 20 槽 raw 位置并
+    最大扭矩、温度与故障，不发送位置命令。执行路径只在指定 ``--execute`` 后，
+    先为五指设置统一的保守 raw 速度，再从当前反馈复制 20 槽 raw 位置并
     改变一个主动槽位；不使用张开、握拳等预设。发送后再次请求位置反馈供操作者比较，
     但固定 SDK 不提供响应 generation，回读不单独证明该次 CAN 命令已经执行。
     finally 始终尝试断开；断开失败报告到标准错误流且不会掩盖已有主异常。
@@ -135,8 +111,6 @@ def run(
         print("L20 fault:", hand.get_fault())
         if not args.execute:
             print("Read-only mode: no L20 position command was sent.")
-        elif not confirm():
-            print("Execution was not confirmed: no L20 position command was sent.")
         else:
             target = hand.get_joint_positions_raw().copy()
             target[args.joint_index] += args.delta_raw
@@ -183,7 +157,7 @@ def main() -> int:
     Notes
     -----
     本函数进入 :func:`run` 后会连接真实 CAN，相关 SDK 操作可能阻塞。默认只读；
-    只有 ``--execute`` 和交互式 ``EXECUTE`` 双门均通过后才会发送一次单槽位小
+    指定 ``--execute`` 后才会发送一次单槽位小
     动作。SDK 正常返回只表示调用结束，不保证每个底层 CAN 帧均已发送成功。
     """
     args = build_parser().parse_args()

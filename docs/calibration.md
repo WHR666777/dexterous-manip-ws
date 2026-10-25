@@ -23,7 +23,7 @@ python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-01 \
   --config configs/pico4_nero_l20.yaml --execute
 ```
 
-输入现有的 `EXECUTE` 确认后，机械臂会先到配置中的起始姿态，手指设为所选 replay 帧。与 `wrist-only` 不同，标定模式允许通过 Pico 控制完整腕部旋转，包括 roll、pitch。
+指定 `--execute` 后直接开始：机械臂会先到配置中的起始姿态，手指设为所选 replay 帧。与 `wrist-only` 不同，标定模式允许通过 Pico 控制完整腕部旋转，包括 roll、pitch。
 
 1. 按 `R` 锚定，通过 Pico 改变位置和倾斜角度。
 2. 保持姿态不动，按 `C` 停止发送后续运动目标。程序等待七轴实际反馈在 0.4 s 内保持稳定（范围 0.002 rad），然后保存一组 RGB-D、实际关节反馈、URDF/FK 和时间信息。停止发送不是急停；最后目标可能仍在执行，所以必须等待反馈稳定。

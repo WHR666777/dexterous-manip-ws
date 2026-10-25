@@ -90,7 +90,6 @@ def test_cli_side_selection_and_dual_start_pose_guard(monkeypatch):
     monkeypatch.setattr("sys.argv", ["teleop", "--config", str(CONFIG), "--side", "left", "record-start-pose"])
     cli.main()
     assert seen[0]["arm"]["can_channel"] == "can_arm_b"
-    monkeypatch.setattr("builtins.input", lambda _: "EXECUTE")
     monkeypatch.setattr(dual, "run", lambda *a: seen.append(a))
     monkeypatch.setattr("sys.argv", ["teleop", "--config", str(CONFIG), "run", "--control", "hand", "--execute"])
     cli.main()

@@ -34,7 +34,7 @@ python3 -m teleop.cli \
   --record-dir data/lerobot/nero_l20_act
 ```
 
-输入 `EXECUTE` 后，按 R 开始跟随，B 开始录制，S 保存，Q 保存并退出。重复按 B 不会清空正在录制的数据。输入失效或超时后仍需按 R 重新锚定。
+启动后按 R 开始跟随，B 开始录制，S 保存，Q 保存并退出。重复按 B 不会清空正在录制的数据。输入失效或超时后仍需按 R 重新锚定。
 
 CLI 默认配置也已改为 Pico；原 Quest 链路可继续显式使用 `--config configs/quest3_nero_l20.yaml`。
 

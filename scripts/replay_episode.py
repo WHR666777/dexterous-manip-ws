@@ -310,8 +310,6 @@ def main():
                 config = load_config(args.config)
                 require_site_configuration(config, control=args.control, require_calibration=False)
                 print(f"Selected hardware: {args.control}. It will move to episode sample 0; clear the path/hand.")
-                if input("Type EXECUTE to allow robot motion: ").strip() != "EXECUTE":
-                    parser.exit(1, "Confirmation did not match; no hardware commands sent.\n")
                 if args.control in ("arm", "both"):
                     arm_config = config["arm"]
                 if args.control in ("hand", "both"):

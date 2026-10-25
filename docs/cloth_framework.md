@@ -81,7 +81,7 @@ python -m cloth_agent run \
   --output-dir data/agent_runs/session-02 \
   --task '在两个 cell 中定义并复用一个函数，检查结果后结束。'
 
-# 机器人入口还需项目现有 Nero/L20 SDK；以下连接真实硬件，启动需输入 EXECUTE。
+# 机器人入口还需项目现有 Nero/L20 SDK；--execute 直接连接真实硬件，无交互确认。
 python -m pip install -e '.[agent,planning,vision]'
 python -m cloth_agent run --config configs/cloth_agent.yaml --execute \
   --output-dir data/agent_runs/robot-01 \

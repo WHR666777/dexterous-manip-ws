@@ -19,7 +19,7 @@ def main(argv=None):
     serve = commands.add_parser("serve", help="仅启动 MCP 与两个子进程，等待外部 MCP client")
     for command in (run, serve):
         command.add_argument("--config", help="机器人标定/运动配置；--execute 时默认 configs/cloth_agent.yaml")
-        command.add_argument("--execute", action="store_true", help="经人工确认后连接右臂、右手及配置相机")
+        command.add_argument("--execute", action="store_true", help="连接右臂、右手及配置相机并允许执行动作")
         command.add_argument("--output-dir", help="新任务记录目录，不覆盖已有 events.jsonl")
         command.add_argument("--cell-timeout", type=float, default=60.)
         command.add_argument("--task-timeout", type=float, default=900.)
@@ -59,12 +59,8 @@ def main(argv=None):
 
     from .mcp_server import CellMcpServer
 
-    if args.execute:
-        # 与遥操作入口一致，真实设备连接需要显式开关和操作者确认；不自动使能设备。
-        confirmation = input("即将连接 Nero/L20 并允许 agent 动作。输入 EXECUTE 确认 Connect hardware: ")
-        if confirmation.strip() != "EXECUTE":
-            print("未确认，取消启动 Not confirmed; cancelled")
-            return 1
+    # --execute 直接决定是否允许连接真实设备，不再读取交互确认词。
+    # 未传此参数仍只启动无硬件会话；机器人使能仍由操作者通过已有流程处理。
     with TaskSession(args.output_dir, cell_timeout_s=args.cell_timeout,
                      task_timeout_s=args.task_timeout, max_cells=args.max_cells,
                      config_path=args.config, allow_hardware=args.execute) as session:

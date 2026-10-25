@@ -80,8 +80,6 @@ def main(argv=None):
             raise ValueError("Enable camera.enabled in the teleop config before collection.")
         if not args.execute:
             raise SystemExit("Refusing to command hardware without --execute.")
-        if input("Type EXECUTE to start calibration teleop: ").strip() != "EXECUTE":
-            raise SystemExit("Confirmation did not match; no commands were sent.")
         run(config, "both", None, hand_mode="calibration", calibration_dir=str(args.directory),
             calibration_hand_frame=args.hand_frame)
 

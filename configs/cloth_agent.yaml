@@ -1,5 +1,5 @@
 # 右臂 robo 配置 Right-arm configuration. Task frame = this Nero base_link.
-# TaskSession 显式加载后冻结参数；只有 --execute + EXECUTE 才连接设备。
+# TaskSession 显式加载后冻结参数；只有 --execute 才连接设备，无交互确认。
 # 启动读取标定 Calibration is read once; replace after recalibration.
 # Software planning caps: 0.2 rad/s, 0.4 rad/s^2 (not measured hardware ratings).
 # Workspace: 0.9 m cube at nero_start_pose.yaml FK + calibrated TCP; fixed in base.

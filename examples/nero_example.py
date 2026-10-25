@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="请求进入二次确认后的单次小动作分支。",
+        help="指定后发送单次小动作，无交互确认。",
     )
     parser.add_argument(
         "--joint-index",
@@ -54,33 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def confirm_execution() -> bool:
-    """阻塞等待操作者输入精确的执行确认词。
-
-    Returns
-    -------
-    bool
-        去除首尾空白后的输入恰为 ``"EXECUTE"`` 时为 ``True``。
-
-    Raises
-    ------
-    EOFError
-        标准输入在读取前关闭时抛出。
-
-    Notes
-    -----
-    本函数只读取标准输入且可能无限等待；它本身不访问 CAN、不使能 Nero，也不
-    发送运动命令。返回 ``True`` 只是 :func:`run` 动作分支的第二道门。
-    """
-    return input("Type EXECUTE to send a small robot command: ").strip() == "EXECUTE"
-
-
 def run(
     args: argparse.Namespace,
     arm_factory: Callable[..., NeroArm] = NeroArm,
-    confirm: Callable[[], bool] = confirm_execution,
 ) -> int:
-    """连接 Nero、读取状态，并在双重确认后发送一次相对小动作。
+    """连接 Nero、读取状态，并在指定 --execute 后发送一次相对小动作。
 
     Parameters
     ----------
@@ -90,19 +68,17 @@ def run(
     arm_factory : callable, optional
         创建公开 :class:`NeroArm` 接口的工厂，默认创建真实封装；可注入无硬件
         测试替身。
-    confirm : callable, optional
-        返回精确执行确认结果的函数。
 
     Returns
     -------
     int
-        正常或未确认时为 ``0``；仅断开失败时为 ``1``；当前反馈加增量被 Wrapper
+        正常时为 ``0``；仅断开失败时为 ``1``；当前反馈加增量被 Wrapper
         拒绝时为 ``2``；收到 ``KeyboardInterrupt`` 时为 ``130``。
 
     Notes
     -----
-    默认路径只连接和读取，不使能、不发送运动。执行路径只在 ``--execute`` 与
-    精确确认均成立后使能，并以当前七维 rad 反馈为基准改变一个关节。finally
+    默认路径只连接和读取，不使能、不发送运动。执行路径只在指定 ``--execute`` 后
+    使能，并以当前七维 rad 反馈为基准改变一个关节。finally
     始终尝试断开；断开失败报告到标准错误流且不会掩盖已有主异常。不自动 disable，
     避免可能的机械臂下落。
     """
@@ -120,8 +96,6 @@ def run(
         print("Nero joint position (rad):", arm.get_joint_positions())
         if not args.execute:
             print("Read-only mode: no Nero enable or motion command was sent.")
-        elif not confirm():
-            print("Execution was not confirmed: no Nero enable or motion command was sent.")
         else:
             arm.enable()
             target = arm.get_joint_positions().copy()
@@ -164,7 +138,7 @@ def main() -> int:
     Notes
     -----
     本函数进入 :func:`run` 后会连接真实 CAN，相关 SDK 操作可能阻塞。默认不
-    使能或运动；只有 ``--execute`` 和交互式 ``EXECUTE`` 双门均通过后才会发送
+    使能或运动；指定 ``--execute`` 后才会发送
     一次小动作，操作者仍须负责机械臂工作区和承载安全。
     """
     args = build_parser().parse_args()

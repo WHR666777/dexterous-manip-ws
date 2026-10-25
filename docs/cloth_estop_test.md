@@ -49,7 +49,7 @@ python -m cloth_agent serve --execute \
   --cell-timeout 600 --task-timeout 900
 ```
 
-输入 `EXECUTE`；出现 `hardware_connected: true` 和 `session_file` 才表示初始化完成。
+带 `--execute` 启动后直接连接设备；出现 `hardware_connected: true` 和 `session_file` 才表示初始化完成。
 在初始化完成前，人工 socket 尚未公布，不能依赖此入口停止初始化过程。
 
 终端 B：

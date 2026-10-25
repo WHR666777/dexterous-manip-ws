@@ -160,7 +160,7 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml preflight --control 
 
 Nero preflight 会比较当前七轴反馈经本仓库 URDF/FK 算出的 flange 与 SDK flange 反馈；默认允许 `10 mm / 5°`，超出就停止。它是启动一致性检查，不是标定替代品。
 
-确认 preflight 后，可用项目内的“只使能”命令使能 Nero。它不发送关节或笛卡尔目标，但仍需现场监护、急停可达，并要求双重确认：
+确认 preflight 后，可用项目内的“只使能”命令使能 Nero。它不发送关节或笛卡尔目标，指定 `--execute` 后直接执行，仍需现场监护、急停可达：
 
 ```bash
 python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-enable --execute
@@ -201,7 +201,7 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-reset --execute
 
 ## 正式控制与录制
 
-`--control` 必须明确指定，`run` 还要求 `--execute` 并在终端输入 `EXECUTE`。Nero 必须已通过上面的命令或现场批准流程使能；`run` 不会隐式使能或自动失能。
+`--control` 必须明确指定，`run` 指定 `--execute` 后直接执行，无交互确认。Nero 必须已通过上面的命令或现场批准流程使能；`run` 不会隐式使能或自动失能。
 
 对于 `--control arm/both`，程序首先校验记录的七轴目标和官方关节限位，然后使用低速 `move_joints` 到达起始姿态并等待反馈误差收敛。到位后仍保持暂停：操作者摆好 Quest，再按 `R` 才建立腕部零点并开始叠加。运行中再次按 `R` 只在机械臂当前位置重新锚定，不会自动返回起始姿态。
 
@@ -298,7 +298,7 @@ python3 scripts/replay_episode.py data/episodes/episode_20260929T120000.000000Z 
   --config configs/quest3_nero_l20.yaml --control both --execute
 ```
 
-输入 `EXECUTE` 后，先用 `arm.start_speed_percent` 点到点移动到该 episode 的第一条 `arm_joint_position`，按 `start_tolerance_rad` / `start_timeout_s` 等待到位；不使用 `nero_start_pose.yaml`。必须保证起始移动及整段录制轨迹的现场路径无碰撞。机械臂需已使能；脚本不会自动使能，可通过已有的 `teleop.cli --config ... arm-enable --execute` 命令使能。
+指定 `--execute` 后，先用 `arm.start_speed_percent` 点到点移动到该 episode 的第一条 `arm_joint_position`，按 `start_tolerance_rad` / `start_timeout_s` 等待到位；不使用 `nero_start_pose.yaml`。必须保证起始移动及整段录制轨迹的现场路径无碰撞。机械臂需已使能；脚本不会自动使能，可通过已有的 `teleop.cli --config ... arm-enable --execute` 命令使能。
 
 选中灵巧手时，使用 `hand.can_channel` / `hand.type` 连接，按 `hand.speed` 设置五指速度，并发送第一条 `hand_position_raw`；`both` 模式在 Nero 初始到位后才发送手部首姿态。请确认手部周围无夹持风险、手指已到首姿态，再按空格开始。手部不自动判断到位；仅手模式不连接 Nero。
 
@@ -327,7 +327,7 @@ python3 examples/nero_example.py --can-channel can0
 python3 examples/l20_example.py --can-channel can1 --hand-type right
 ```
 
-它们默认只读。带 `--execute` 的单步动作仍需输入 `EXECUTE`，只用于现场分级验证。
+它们默认只读。带 `--execute` 后直接执行单步动作，只用于现场分级验证。
 
 ## 折布 agent
 
@@ -348,7 +348,7 @@ python -m cloth_agent run \
 python -m cloth_agent hold data/agent_runs/session-02/session.json
 ```
 
-默认不连接设备。真实机器人入口需安装 `.[agent,planning,vision]` 及已有设备 SDK，并显式传入 `--config configs/cloth_agent.yaml --execute`，启动时输入 `EXECUTE`。程序不自动使能、回零或复位。只传 `--config` 可加载几何标定而不连接设备。
+默认不连接设备。真实机器人入口需安装 `.[agent,planning,vision]` 及已有设备 SDK，并显式传入 `--config configs/cloth_agent.yaml --execute`，启动后直接连接，无交互确认。程序不自动使能、回零或复位。只传 `--config` 可加载几何标定而不连接设备。
 
 `robo` 提供状态、RGB-D、附图、像素反投影、top-down 位姿、`move_J` / `move_L`、拇指/食指开合及普通暂停；固定知识随启动 prompt 注入，没有 info、公开 plan/execute 或抓布判定接口。操作约定见 [robot_operations.md](cloth_agent/robot_operations.md)。人工 `hold` 绕过 MCP/Codex，锁定动作后持续发送固定关节目标，agent 结束后保持进程仍运行。只有机械臂已安全落座或获得外部支撑后，操作者才能 `release-hold`。旧 `estop` 已禁用：Nero 阻尼急停现场出现下落，不用于悬停。新版保持仅检查语法，未验证实机效果；见 [人工保持说明](docs/cloth_estop_test.md)。
 
