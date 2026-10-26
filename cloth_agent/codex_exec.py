@@ -22,6 +22,11 @@ INSTRUCTIONS = """你是本次任务唯一的 agent，使用同一 Codex session
 不使用 shell、网络或其他服务绕过 robo。设备未连接或能力缺失时如实报告，以 failure
 或 stuck 结束，不编造物理效果。没有 info、公开 plan/execute 或抓布判定接口。
 
+初始姿态 Startup：本次配置启用 startup 且 startup_prepared=true 时，宿主已经先回记录
+关节位姿，再到约定的初始抓取位姿。不要重复执行准备 cell 000 或自行回零。
+规划中的 yaw 是相对该初始抓取姿态、绕 task +Z 的增量，单位 rad；yaw=0 保持其朝向，
+不是把法兰绝对 RPY yaw 设成 0，也不随每个 cell 的当前姿态重新锚定。
+
 临时调用接口 Temporary tools：通过 cloth_agent MCP 服务的 python(code) 执行 cell，
 通过 finish(status, summary) 结束任务；status 为 success / failure / stuck。
 Python 环境预置 robo、np、math、time。变量、函数与允许的 import 跨 cell 保留。
@@ -41,6 +46,7 @@ def build_prompt(session, task):
     # 固定操作知识在启动时一次注入，不再让模型为了单位/TCP/手型调用 info 工具。
     operations = Path(__file__).with_name("robot_operations.md").read_text(encoding="utf-8")
     actual = {"hardware_connected": session.control.ready["hardware_connected"],
+              "startup_prepared": session.startup_prepared,
               "robot_config": session.robot_config}
     return (INSTRUCTIONS + "\n" + operations
             + "\n\n本次冻结配置 Frozen configuration (null means not loaded)：\n```json\n"

@@ -14,9 +14,9 @@ from scipy.spatial.transform import Rotation
 import yaml
 
 from .geometry import transform
+from .paths import DEFAULT_CONFIG
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs/cloth_agent.yaml"
 MOCK_CONFIG = DEFAULT_CONFIG.with_name("cloth_agent_mock.yaml")
 
 
@@ -61,8 +61,8 @@ def _load_calibration(config):
     roll_pitch = np.asarray(calibration["reference_roll_pitch_deg"], dtype=float)
     if roll_pitch.shape != (2,) or not np.isfinite(roll_pitch).all():
         raise ValueError("Calibration reference_roll_pitch_deg must contain two finite angles.")
-    base_reference = Rotation.from_euler("xyz", [*roll_pitch, 0], degrees=True).as_matrix()
-    settings["reference_tcp_rotation"] = (task_base[:3, :3] @ base_reference @ flange_tcp[:3, :3]).tolist()
+    # 此处只加载示教倾角；实际抓取零点必须结合记录起始位姿的 yaw 再构造。
+    settings["reference_roll_pitch_deg"] = roll_pitch.tolist()
     reference["file"] = str(path)
     reference["fit"] = calibration.get("fit")
 
@@ -79,10 +79,28 @@ def _resolve_workspaces(config):
             start = yaml.safe_load(stream)
         joints = joint_vector(start["joint_positions_rad"], "workspace start joints")
         half_side = positive(workspace["cube_side_m"], "workspace.cube_side_m") / 2
-        tcp = (transform(settings["task_from_base"]) @ NeroIK().forward(joints)
-               @ transform(settings["flange_from_tcp"]))
+        base_flange = NeroIK().forward(joints)
+        task_base = transform(settings["task_from_base"])
+        flange_tcp = transform(settings["flange_from_tcp"])
+        tcp = task_base @ base_flange @ flange_tcp
         center = tcp[:3, 3]
         settings["workspace"] = [(center - half_side).tolist(), (center + half_side).tolist()]
+        if "reference_roll_pitch_deg" in settings:
+            # 与 wrist-only 一样：roll/pitch 采用示教参考，yaw 保留记录起始关节
+            # 经 FK 得到的法兰 yaw。标定内部为了计算工具旋转而补入的 yaw=0
+            # 不是现场的初始航向，不能直接作为 agent 的零点。
+            yaw = float(Rotation.from_matrix(base_flange[:3, :3]).as_euler("xyz")[2])
+            initial_flange = base_flange.copy()
+            initial_flange[:3, :3] = Rotation.from_euler(
+                "xyz", [*np.deg2rad(settings["reference_roll_pitch_deg"]), yaw]).as_matrix()
+            initial_tcp = task_base @ initial_flange @ flange_tcp
+            # 初始抓取位姿保留记录的法兰位置；TCP 位置因固定工具偏移随倾角改变。
+            # 后续 top_down_pose 的 yaw 是绕 task +Z 左乘的增量，不再是绝对法兰 yaw。
+            settings["start_pose_file"] = str(start_file)
+            settings["start_joint_positions"] = joints.tolist()
+            settings["initial_grasp_tcp"] = initial_tcp.tolist()
+            settings["reference_flange_yaw_rad"] = yaw
+            settings["reference_tcp_rotation"] = initial_tcp[:3, :3].tolist()
 
 
 def load_config(path=DEFAULT_CONFIG) -> dict:
@@ -103,6 +121,12 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
         raise ValueError("Configure left and/or right arms.")
     _load_calibration(config)
     _resolve_workspaces(config)
+    startup = config.setdefault("startup", {"enabled": False})
+    if not isinstance(startup.get("enabled"), bool):
+        raise ValueError("startup.enabled must be a boolean.")
+    startup["timeout_s"] = positive(startup.get("timeout_s", 120.), "startup.timeout_s")
+    if startup["enabled"] and any("initial_grasp_tcp" not in settings for settings in config["arms"].values()):
+        raise ValueError("Startup requires calibrated reference angles and workspace.start_pose_file.")
     if config["observations"].get("task_from_camera") is not None:
         transform(config["observations"]["task_from_camera"])
     return config
@@ -122,7 +146,7 @@ def effective_arm(config, arm):
 def validate_hardware_config(config):
     missing = []
     for arm, settings in config["arms"].items():
-        for name in ("can_channel", "hand_can_channel", "task_from_base", "flange_from_tcp",
+        for name in ("can_channel", "hand_can_channel", "task_from_base", "flange_from_tcp", "reference_tcp_rotation",
                      "velocity_limits", "acceleration_limits", "workspace"):
             if settings.get(name) is None:
                 missing.append(f"arms.{arm}.{name}")

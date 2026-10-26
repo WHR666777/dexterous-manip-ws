@@ -175,7 +175,8 @@ def test_switching_calibration_file_updates_all_derived_parameters(hardware_conf
     expected_center = (task_base @ NeroIK().forward(start["joint_positions_rad"])
                        @ transform(calibration["flange_from_tcp"]))[:3, 3]
     np.testing.assert_allclose(np.mean(arm["workspace"], axis=0), expected_center)
-    expected_rotation = (task_base[:3, :3] @ Rotation.from_euler("xyz", [-90, -5, 0], degrees=True).as_matrix()
+    start_yaw = Rotation.from_matrix(NeroIK().forward(start["joint_positions_rad"])[:3, :3]).as_euler("xyz")[2]
+    expected_rotation = (task_base[:3, :3] @ Rotation.from_euler("xyz", [np.deg2rad(-90), np.deg2rad(-5), start_yaw]).as_matrix()
                          @ transform(calibration["flange_from_tcp"])[:3, :3])
     np.testing.assert_allclose(arm["reference_tcp_rotation"], expected_rotation)
     assert updated["calibration"]["file"] == str(new_file.resolve())

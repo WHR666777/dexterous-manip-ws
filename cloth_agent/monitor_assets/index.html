@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Cloth Agent · 实机观察</title>
+  <link rel="stylesheet" href="/monitor.css">
+  <script src="/monitor.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div><div class="eyebrow">CLOTH AGENT / OBSERVER</div><h1>实机观察 <span>运行过程与现场证据</span></h1></div>
+    <div class="top-actions"><span class="readonly">只读监控</span><span id="connection" class="badge" data-tone="warn">正在连接</span></div>
+  </header>
+  <main>
+    <section class="summary" aria-label="任务状态">
+      <div><div class="label">任务状态</div><strong id="task-state">等待记录</strong><div id="reason" class="hint"></div></div>
+      <div><div class="label">当前阶段</div><strong id="phase">等待任务启动</strong><div id="cell-count" class="hint">尚无 cell</div></div>
+      <div><div class="label">任务用时</div><strong id="elapsed">—</strong><div class="hint">按任务事件计时</div></div>
+      <div><div class="label">设备连接 · 启动快照</div><strong id="hardware">尚无记录</strong><div class="hint">不是实时设备健康检查</div></div>
+    </section>
+    <details class="task-description"><summary id="task-summary">本次任务 · 等待任务描述</summary><p id="task-text"></p></details>
+    <div class="workspace">
+      <section class="panel timeline-panel">
+        <div class="panel-heading"><h2>执行时间线</h2><label class="follow"><input id="follow" type="checkbox" checked>跟随最新</label></div>
+        <div id="timeline" class="timeline scroll"><p class="empty">等待 agent 输出。旧任务也可在这里回看。</p></div>
+      </section>
+      <section class="panel code-panel">
+        <div class="panel-heading"><h2 id="selected-title">Python cell</h2><span id="cell-badge" class="badge">待执行</span></div>
+        <div class="code-content scroll">
+          <div id="selected-note" class="hint">提交工具调用后即可查看代码。</div>
+          <pre id="code" class="source-code"># 等待 Python cell</pre>
+          <div class="result-heading"><h3>执行反馈</h3><span id="duration" class="hint"></span></div>
+          <div id="outcome" class="outcome" hidden></div>
+          <div id="robot-results" class="robot-results"></div>
+          <p id="buffer-note" class="hint">stdout 和运动反馈在 cell 返回后更新。</p>
+          <h4>stdout</h4><pre id="stdout" class="console">暂无输出</pre>
+          <h4>返回值</h4><pre id="value" class="console">—</pre>
+          <div id="error-section" hidden><h4>错误 / stderr</h4><pre id="errors" class="console errors"></pre></div>
+          <details class="raw-details"><summary>原始结构化结果</summary><pre id="raw" class="console">暂无结果</pre></details>
+        </div>
+      </section>
+      <section class="panel image-panel">
+        <div class="panel-heading"><h2>观测快照</h2><span class="hint">非实时视频</span></div>
+        <div class="image-content scroll">
+          <label class="label" for="image-select">选择 agent 请求展示的图像</label>
+          <select id="image-select"><option value="">暂无附图</option></select>
+          <div id="image-context" class="image-context hint">图片来自 cell 的 show() 记录。</div>
+          <div id="image-stage" class="image-stage"><p class="empty">等待观测图像</p><canvas id="observation" hidden></canvas></div>
+          <div id="image-error" class="errors" role="status"></div>
+          <dl id="image-meta" class="image-meta"></dl>
+          <p class="hint">新快照只在观测 cell 返回后展示。裁剪坐标使用原图像素；图片不证明运动或抓取成功。</p>
+        </div>
+      </section>
+    </div>
+    <details class="diagnostics"><summary>诊断信息 <span id="diagnostic-count"></span></summary><div class="diagnostic-grid"><div><h4>记录 / 控制反馈</h4><pre id="notices" class="console">暂无异常</pre></div><div><h4>Codex stderr</h4><pre id="codex-stderr" class="console">暂无输出</pre></div></div></details>
+    <footer><span id="directory">等待目录信息</span><span>监控页不发送控制命令 · 人工停止仍使用独立 hold 入口</span></footer>
+  </main>
+</body>
+</html>

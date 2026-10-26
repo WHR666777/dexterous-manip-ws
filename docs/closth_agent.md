@@ -94,7 +94,10 @@ TCP 固定于工具，开手后也不随指尖位置重定义。已有轴定义�
 
 第一版只公开 `move_J(target_joints, wait=True)` 与 `move_L(target_tcp, wait=True)`。
 不提供独立 plan/execute；规划在 move 内完成。`top_down_pose(xyz, yaw)` 用标定参考姿态构造目标，
-旋转为 `Rz_task(yaw) @ R_reference`；yaw 是绕 task +Z 的参考增量，不是绝对法兰 yaw。
+旋转为 `Rz_task(yaw) @ R_initial_grasp`；yaw 是相对约定初始抓取姿态绕 task +Z 的增量，单位 rad，
+不是绝对法兰 yaw，也不随当前 cell 重新锚定。初始抓取姿态保留记录起始关节位姿的法兰位置/yaw，
+roll/pitch 采用标定的示教参考。开启 `startup.enabled` 后，宿主先回记录关节，再到该抓取姿态，
+确认 TCP 反馈后才启动 Codex；固定准备 cell 000 不占模型 cell 预算，人工 hold 全程可用。
 开合手只操作食指和拇指。坐标、单位、TCP、参考姿态、工作区及手型随启动 prompt 提供，
 没有 `robo.info()`。具体约定见 [机器人操作说明](../cloth_agent/robot_operations.md)。
 

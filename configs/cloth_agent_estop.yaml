@@ -3,7 +3,13 @@
 # 与 cloth_agent.yaml 使用同一标定；关闭相机，避免相机启动影响本次保持排查。
 # 不自动使能/reset/回零。连接时不设置手速，不主动发送开合手位置命令。
 backend: hardware
+session:
+  # 使用本配置的 serve/hold/monitor 等命令共用此目录；每轮联调前换新目录。
+  output_dir: ../data/agent_runs/hold-idle-01
 control_hz: 20
+# 仅验证人工保持，不执行 agent 的自动回起始位姿。
+startup:
+  enabled: false
 calibration:
   file: ../data/calibration/pinch-01/calibration_candidate.yaml
   arm: right

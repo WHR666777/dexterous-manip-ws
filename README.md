@@ -333,24 +333,58 @@ python3 examples/l20_example.py --can-channel can1 --hand-type right
 
 架构见 [docs/closth_agent.md](docs/closth_agent.md)，代码阅读与运行说明见 [docs/cloth_framework.md](docs/cloth_framework.md)。唯一主流程使用 `codex exec + MCP + 独立持久 Python worker / 控制进程`，入口为 `python -m cloth_agent`。
 
-安装 agent 运行依赖后，可启动纯计算任务服务或一次 Codex 任务：
+使用已配置好的 `nero` 环境进行首轮 agent 实机测试，连接右侧 Nero、右侧 L20 和 L515。
+启动前确认右臂已使能、配置中的 CAN 通道/相机序列号与当前设备一致，并使用当前现场标定。
+`run` 先启动 worker/控制进程并公布人工 `hold` 入口，再自动完成起始位姿准备，之后才启动 MCP/Codex，无需预先启动 `serve`。
+默认 `startup.enabled: true`：先回到 `nero_start_pose.yaml` 的记录关节位姿，再保留其法兰位置/yaw、
+将 roll/pitch 调整到标定的示教倾角。此时的抓取朝向定义为 `yaw=0`；后续规划 yaw 是相对它绕 task +Z 的增量，单位 rad。
+准备过程中也会实际运动；未确认到位、规划失败、超时或人工停止时不会启动 agent。
+首轮任务完成一次“观察 → 抓取 → 小幅抬升 → 再观察 → 放回”的闭环：
 
-```bash
-python -m pip install -e '.[agent]'
+每轮测试前，在 `configs/cloth_agent.yaml` 中修改一次本轮记录目录。相对路径以配置文件所在的 `configs/` 目录为基准：
 
-python -m cloth_agent serve --output-dir data/agent_runs/session-01
-
-python -m cloth_agent run \
-  --output-dir data/agent_runs/session-02 \
-  --task '在两个 cell 中定义并复用一个函数，检查结果后结束。'
-
-# 另一个终端直接通知控制进程，不经过 Codex 或 MCP。
-python -m cloth_agent hold data/agent_runs/session-02/session.json
+```yaml
+session:
+  output_dir: ../data/agent_runs/robot-grasp-02
 ```
 
-默认不连接设备。真实机器人入口需安装 `.[agent,planning,vision]` 及已有设备 SDK，并显式传入 `--config configs/cloth_agent.yaml --execute`，启动后直接连接，无交互确认。程序不自动使能、回零或复位。只传 `--config` 可加载几何标定而不连接设备。
+```bash
+conda activate nero
+cd /home/lab404/WHR/dexterous-manip-ws
 
-`robo` 提供状态、RGB-D、附图、像素反投影、top-down 位姿、`move_J` / `move_L`、拇指/食指开合及普通暂停；固定知识随启动 prompt 注入，没有 info、公开 plan/execute 或抓布判定接口。操作约定见 [robot_operations.md](cloth_agent/robot_operations.md)。人工 `hold` 绕过 MCP/Codex，锁定动作后持续发送固定关节目标，agent 结束后保持进程仍运行。只有机械臂已安全落座或获得外部支撑后，操作者才能 `release-hold`。旧 `estop` 已禁用：Nero 阻尼急停现场出现下落，不用于悬停。新版保持仅检查语法，未验证实机效果；见 [人工保持说明](docs/cloth_estop_test.md)。
+python -m cloth_agent run \
+  --execute \
+  --task '进行第一次抹布实机抓取测试。先读取真实机器人状态，获取并展示现场图像；收到图像反馈后，选择清晰可见且深度有效的布料抓取点。以 L20 食指、拇指闭合接触点为虚拟 TCP，进行一次 top-down 抓取，沿 task +Z 抬升最多 0.05 m，再获取并展示图像，判断是否抓住。验证后将布料放回原处、松手并撤离布面，再结束任务。目标或深度不明确、规划或执行失败时停止并报告，不盲试、不重复抓取，本轮不执行折叠。'
+```
+
+另一个终端同样进入 `nero` 环境和项目目录；需要人工停止并保持时，直接通知本次控制进程：
+
+```bash
+python -m cloth_agent hold
+python -m cloth_agent hold-status
+```
+
+上面的 `--execute` 会直接连接设备并按配置准备起始抓取位姿，无需输入确认词；程序不自动使能、执行硬件回零或复位。
+固定准备流程及完整反馈保存在 `cells/000.py` / `000.json`，不占 agent 的 cell 预算；准备超时由 `startup.timeout_s` 控制。
+`configs/cloth_agent.yaml` 启用相机与自动准备；人工保持测试用的 `configs/cloth_agent_estop.yaml` 关闭了相机和自动准备，不用于这次视觉抓取任务。
+每次重试只需把配置中的 `session.output_dir` 换成新目录，`run` / `serve` / `monitor` / `hold` / `hold-status` / `release-hold` 共用它，旧记录不覆盖。本轮运行期间保持该字段不变。
+默认读取 `configs/cloth_agent.yaml`；使用其他配置时，各命令加同一个 `--config 配置文件`。
+临时覆盖仍可使用 `run/serve --output-dir 目录`、`monitor 目录` 或 `hold/hold-status/release-hold 路径/session.json`，显式参数优先于配置。
+需要改测试目标时修改 `--task`；仅手动使用外部 MCP client 时才使用 `serve`。
+
+`robo` 提供状态、RGB-D、附图、像素反投影、top-down 位姿、`move_J` / `move_L`、拇指/食指开合及普通暂停；固定知识随启动 prompt 注入，没有 info、公开 plan/execute 或抓布判定接口。操作约定见 [robot_operations.md](cloth_agent/robot_operations.md)。人工 `hold` 绕过 MCP/Codex，锁定动作后持续发送固定关节目标，agent 结束后保持进程仍运行。只有机械臂已安全落座或获得外部支撑后，操作者才能 `release-hold`。旧 `estop` 已禁用：Nero 阻尼急停现场出现下落，不用于悬停。人工静止保持已由操作者现场验证，记录见 `data/agent_runs/estop-idle-02/`，其中已连接真实设备、发送固定关节目标且记录的关节误差为 0；该记录没有执行运动 cell，不代替本次视觉抓取与运动中停止验证。保持操作见 [人工保持说明](docs/cloth_estop_test.md)。
+
+在另一个终端启动只读观察页，默认读取同一配置中的本轮目录：
+
+```bash
+conda activate nero
+python -m cloth_agent monitor
+```
+
+浏览器打开 `http://127.0.0.1:8765/`，查看 agent 时间线、当前 cell 代码与反馈、观测图片和任务状态。
+可在 agent 启动前打开，也可回看已经结束的任务；端口冲突时加 `--port 8766`。
+监控不连接机器人、不发送控制命令；关闭页面或监控不会停止机器人。
+stdout 和运动反馈在 cell 返回后更新，图片为观测快照；详细说明见 [实时观察页](docs/cloth_monitor.md)。
 
 旧 app-server、普通子任务脚本提交、参数回信、demo 与对应执行后端已删除，不再提供原来的 `demo/script` 命令或 `cloth_agent.tools` 接口。
 

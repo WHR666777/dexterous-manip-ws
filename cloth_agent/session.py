@@ -59,6 +59,7 @@ class TaskSession:
         self.reason = ""
         self.report = None
         self.cell_count = 0
+        self.startup_prepared = False
         self.agent = None
         self.control = self.worker = None
         self._started_at = time.monotonic()
@@ -85,6 +86,14 @@ class TaskSession:
             raise
         self._monitor = Thread(target=self._watch, name="cloth-session-monitor", daemon=True)
         self._monitor.start()
+        # 控制进程、人工 socket、worker 和 session.json 都准备好之后才允许自动运动。
+        # 不能把准备运动放到设备构造函数里，否则操作者在运动时还拿不到 hold 入口。
+        try:
+            self._prepare_robot()
+        except KeyboardInterrupt:
+            self.abort("初始抓取姿态准备被终端取消 Startup preparation cancelled")
+        except Exception as exc:
+            self.abort(f"初始抓取姿态准备失败 Startup preparation failed: {exc}", status="failed")
 
     def _write(self, relative_path, value):
         (self.directory / relative_path).write_text(
@@ -103,6 +112,7 @@ class TaskSession:
             return {"status": self.status, "reason": self.reason, "report": self.report,
                     "cells": self.cell_count, "directory": str(self.directory),
                     "hardware_connected": self.control.ready["hardware_connected"],
+                    "startup_prepared": self.startup_prepared,
                     "stop_confirmed": False,
                     "description": "机器人任务会话 Robot task session; task outcome needs visual evidence"}
 
@@ -117,26 +127,85 @@ class TaskSession:
             state = self.control.request("status")
         return state
 
-    def execute(self, source):
+    def _prepare_robot(self):
+        """固定宿主流程，先回记录关节再到初始抓取姿态；完成前不会启动 Codex。"""
+        startup = (self.robot_config or {}).get("startup", {})
+        if not self.control.ready["hardware_connected"] or not startup.get("enabled", False):
+            return
+        settings = self.robot_config["arms"]["right"]
+        self.log("startup_started", "准备初始抓取姿态 Preparing initial grasp pose",
+                 start_joints=settings["start_joint_positions"],
+                 initial_grasp_tcp=settings["initial_grasp_tcp"],
+                 reference_flange_yaw_rad=settings["reference_flange_yaw_rad"])
+        print(json.dumps({"description": "即将自动准备初始抓取姿态 Preparing robot before agent; hold is available",
+                          "session_file": str(self.directory / "session.json")}, ensure_ascii=False), flush=True)
+        # 使用固定 cell 000 复用现有 robo、IK/TOPPRA、轨迹复核、到位与暂停收尾。
+        # 源码由宿主构造，不由模型决定；不新增公开回零工具，也不占 agent 的 cell 预算。
+        # 第一段只回记录关节，第二段到保持记录法兰位置/yaw 的示教抓取倾角。
+        source = (
+            # 与 teleop 回记录位姿一致：已在容差内就跳过第一段，避免为原地
+            # 等待构造一条零位移轨迹、无必要地切换到 JS 并立刻开始下一段。
+            "startup_joints = np.array(" + repr(settings["start_joint_positions"]) + ", dtype=float)\n"
+            "startup_state = robo.state()\n"
+            "if np.max(np.abs(np.array(startup_state['joints']) - startup_joints)) > "
+            + repr(self.robot_config["motion"]["joint_tolerance_rad"]) + ":\n"
+            "    startup_joint_result = robo.move_J(startup_joints.tolist())\n"
+            "    print('记录关节位姿反馈 Recorded joint pose:', startup_joint_result)\n"
+            "    if startup_joint_result.status != 'completed' or not startup_joint_result.reached:\n"
+            "        raise RuntimeError('回记录关节位姿失败 Recorded joint move failed: ' + repr(startup_joint_result))\n"
+            "else:\n"
+            "    print('已在记录关节位姿，跳过原地运动 Already at recorded joint pose; skip move_J')\n"
+            "startup_grasp_result = robo.move_L(" + repr(settings["initial_grasp_tcp"]) + ")\n"
+            "print('初始抓取位姿反馈 Initial grasp pose:', startup_grasp_result)\n"
+            "if startup_grasp_result.status != 'completed' or not startup_grasp_result.reached:\n"
+            "    raise RuntimeError('初始抓取姿态准备失败 Initial grasp move failed: ' + repr(startup_grasp_result))\n"
+        )
+        result = self.execute(source, _startup=True)
+        if self.status != "running":
+            return  # 人工停止/超时已收尾，不将其改写成普通准备失败或继续发动作。
+        if result["status"] != "completed":
+            raise RuntimeError(result.get("exception") or result.get("reason") or str(result))
+        from robot_control.nero_ik import pose_error, MAX_FK_POSITION_ERROR_M, MAX_FK_ROTATION_ERROR_DEG
+        from .geometry import transform
+
+        # 关节到位后还检查实际 TCP 与初始抓取位姿一致，不能只凭 Python cell 正常
+        # 返回就向模型宣称“已准备”。沿用 IK 的位置/角度容差，不放宽规划门限。
+        actual = transform(result["control"]["tcp"])
+        target = transform(settings["initial_grasp_tcp"])
+        position_error, angle_error = pose_error(actual, target)
+        if position_error >= MAX_FK_POSITION_ERROR_M or math.degrees(angle_error) >= MAX_FK_ROTATION_ERROR_DEG:
+            raise RuntimeError(f"初始抓取位姿反馈未达标 Startup pose feedback mismatch: "
+                               f"{position_error} m, {math.degrees(angle_error)} deg")
+        with self._state_lock:
+            if self.status != "running" or self.control.manual_hold.is_set():
+                return
+            self.startup_prepared = True
+        self.log("startup_prepared", "已到达初始抓取姿态 Initial grasp pose ready; yaw=0",
+                 actual_tcp=actual.tolist(), position_error_m=position_error,
+                 rotation_error_deg=math.degrees(angle_error))
+
+    def execute(self, source, *, _startup=False):
         if not isinstance(source, str):
             raise ValueError("cell 源码必须是文本 Cell source must be text")
         with self._cell_lock:
             with self._state_lock:
                 if self.status != "running":
                     return {"status": "rejected", "reason": self.reason or "任务已结束 Task ended"}
-                exhausted = self.cell_count >= self.max_cells
-                if not exhausted:
+                exhausted = not _startup and self.cell_count >= self.max_cells
+                if not exhausted and not _startup:
                     self.cell_count += 1
-                cell_id = self.cell_count
+                cell_id = 0 if _startup else self.cell_count
             if exhausted:
                 self.abort("cell 调用次数用尽 Cell budget exhausted")
                 return {"status": "rejected", "reason": self.reason}
             prefix = f"cells/{cell_id:03d}"
             (self.directory / (prefix + ".py")).write_text(source, encoding="utf-8")
             self.log("cell_started", "开始执行 cell Cell started", cell_id=cell_id)
+            result = None
             try:
                 self.control.request("begin_cell", cell_id=cell_id)
-                result = self.worker.execute(source, cell_id, self.cell_timeout_s)
+                timeout = self.robot_config["startup"]["timeout_s"] if _startup else self.cell_timeout_s
+                result = self.worker.execute(source, cell_id, timeout)
                 control = self.control.request("cell_end")
                 interrupted = control.get("cell_interrupted", False)
                 result["control"] = self._settle_control(control)
@@ -145,8 +214,17 @@ class TaskSession:
                 if control["manual_hold_latched"]:
                     self.abort("人工位置保持 Manual position hold", status="manual_hold")
             except (WorkerUnavailable, OSError, EOFError, TimeoutError, RuntimeError) as exc:
-                self.abort(str(exc))
-                result = {"cell_id": cell_id, "status": "interrupted", "reason": str(exc)}
+                # 收尾可能在 worker 已返回之后失败。保留原来的 stdout、异常、调用
+                # 记录和最后控制快照，不能再用“保持未确认”覆盖起点变化等首发错误。
+                state_at_failure = self.control.last_state
+                result = result if result is not None else {"cell_id": cell_id}
+                result["execution_status"] = result.get("status", "interrupted")
+                result["control"] = state_at_failure
+                result["control_error"] = str(exc)
+                original = result.get("exception", "").strip().splitlines()
+                reason = ((original[-1] + "；收尾失败 Cleanup failed: ") if original else "") + str(exc)
+                self.abort(reason)
+                result.update(status="interrupted", reason=self.reason)
             # 竞争窗口内即使 worker 已算出结果，只要任务已终止就不能再报告 cell 正常完成。
             if self.status != "running":
                 result.update(status="interrupted", reason=self.reason)

@@ -7,15 +7,22 @@
 
 - 位置使用 m，角度及七轴关节使用 rad。`task` 是配置中 `task_from_base` 定义的固定坐标系。
 - 运动位置始终指向 L20 **拇指、食指闭合接触点**这个虚拟 TCP；它固定在工具上，开手也不重定义。
-- 主要进行近似 gripper 的 top-down 抓取。参考姿态来自标定，`yaw=0` 表示该参考姿态；
-  `top_down_pose(xyz, yaw)` 的旋转为 `Rz_task(yaw) @ R_reference`。yaw 是绕 task +Z 的增量，
-  不是法兰的绝对 RPY yaw，也不假设标定参考的 TCP X 恰好对齐 task X。
+- 主要进行近似 gripper 的 top-down 抓取。约定的初始抓取姿态：保留记录起始关节位姿的
+  法兰位置和法兰 yaw，将 roll/pitch 调整为标定中的示教参考倾角，再乘固定工具变换得到 TCP。
+- `top_down_pose(xyz, yaw)` 的旋转为 `Rz_task(yaw) @ R_initial_grasp`。
+  **yaw 是相对该初始抓取姿态、绕 task +Z 的增量，单位 rad；yaw=0 保持初始抓取朝向。**
+  不是法兰的绝对 RPY yaw，不是相对当前 cell 的姿态，也不要求 TCP X 对齐 task X。
+  标定内部为计算工具固定旋转补入的 yaw=0 不作为实际起始航向。
 - 工作区仅约束虚拟 TCP 的位置。当前规划含关节限位、IK、路径工作区与速度/加速度检查，
   没有场景碰撞、桌面接触或力控能力。动作需根据图像和任务几何明确选择。
 
 ## 注入对象 API
 
 Python globals 中预置 `robo`、`np`、`math`、`time`。
+本次冻结配置含 `start_joint_positions`、`initial_grasp_tcp` 和 `reference_tcp_rotation`。
+当 `startup_prepared=true` 时，宿主在启动 Codex 前已通过固定准备 cell 000 先回记录关节，
+再到初始抓取姿态，并检查反馈；不要重放该 cell。agent 仍应先读取真实状态并观察现场。
+准备失败、超时或人工 hold 时不启动 agent，不自动切换抓取参考或继续旧轨迹。
 
 | 调用 | 含义与结果 |
 | --- | --- |
@@ -36,7 +43,8 @@ top-down 任务优先使用 `top_down_pose` 构造目标，避免把法兰姿态
 ## 反馈与 cell 闭环 Feedback
 
 运动默认返回 `MotionResult`，查看 `.status`、`.reached`、`.reason`、`.actual_joints`。
-`planning_failed` 不下发运动；`completed/reached=True` 只表示关节反馈满足到位容差。
+`planning_failed` 不下发运动；`completed/reached=True` 表示轨迹结束后关节反馈满足到位容差，
+且按普通保持标准连续稳定至少 0.2 秒。它不是独立硬件停止确认。
 不能把到位、SDK 返回、手指关节反馈解释为抓布成功。第一版通过再次 `observe()` + `show()`，
 让模型查看实际图像判断抓布效果；没有专门抓布判定接口。
 

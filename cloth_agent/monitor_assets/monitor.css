@@ -1,0 +1,497 @@
+/* 本地静态页面，无 CDN、字体下载或构建依赖；窄屏时按阅读顺序纵向排列。 */
+:root {
+  color-scheme:light;
+  --bg:#f2f4f6;
+  --panel:#fff;
+  --ink:#1c2c3c;
+  --muted:#68798a;
+  --line:#dce3e9;
+  --blue:#215fbd;
+  --bad:#b72e3a;
+  --green:#1d7254;
+  --amber:#946319
+}
+* {
+  box-sizing:border-box
+}
+body {
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","Microsoft YaHei",sans-serif
+}
+/* 顶栏只显示监控连接状态，设备状态另标为启动快照。 */
+.topbar {
+  min-height:94px;
+  padding:19px 28px;
+  background:#172b3b;
+  color:#fff;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px
+}
+.eyebrow {
+  font-size:10px;
+  letter-spacing:2px;
+  color:#91bac8
+}
+h1 {
+  margin:3px 0 0;
+  font-size:23px;
+  font-weight:650
+}
+h1 span {
+  font-size:12px;
+  font-weight:400;
+  color:#aac0cc;
+  margin-left:15px
+}
+.top-actions {
+  display:flex;
+  align-items:center;
+  gap:12px
+}
+.readonly {
+  font-size:12px;
+  color:#c6dbe4;
+  border:1px solid #48616e;
+  border-radius:4px;
+  padding:3px 9px
+}
+main {
+  padding:18px 24px 12px;
+  max-width:2100px;
+  margin:auto
+}
+.summary {
+  display:grid;
+  grid-template-columns:1.2fr 1fr .65fr 1fr;
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:8px;
+  overflow:hidden
+}
+.summary>div {
+  padding:14px 19px;
+  border-right:1px solid var(--line);
+  min-width:0
+}
+.summary>div:last-child {
+  border:0
+}
+.label {
+  font-size:11px;
+  color:var(--muted);
+  letter-spacing:.4px;
+  display:block;
+  margin-bottom:3px
+}
+.summary strong {
+  display:block;
+  font-size:19px;
+  font-weight:650;
+  line-height:1.45
+}
+.hint {
+  color:var(--muted);
+  font-size:11px;
+  overflow-wrap:anywhere
+}
+.task-description {
+  margin:10px 0 14px;
+  padding:8px 12px;
+  border-left:3px solid #a3bcc9;
+  background:#eaf0f4;
+  font-size:12px;
+  border-radius:0 4px 4px 0
+}
+.task-description summary {
+  cursor:pointer;
+  color:#415769
+}
+.task-description p {
+  margin:9px 0 3px;
+  white-space:pre-wrap
+}
+/* 桌面三栏独立滚动；跟随开关控制时间线和当前步骤选择。 */
+.workspace {
+  display:grid;
+  grid-template-columns:minmax(230px,.85fr) minmax(350px,1.35fr) minmax(280px,1fr);
+  gap:14px;
+  height:calc(100vh - 295px);
+  min-height:480px
+}
+.panel {
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:8px;
+  display:flex;
+  flex-direction:column;
+  min-width:0;
+  overflow:hidden
+}
+.panel-heading {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:12px 14px;
+  min-height:51px;
+  border-bottom:1px solid var(--line);
+  gap:8px
+}
+.panel-heading h2 {
+  font-size:13px;
+  margin:0;
+  font-weight:650
+}
+.follow {
+  font-size:11px;
+  white-space:nowrap;
+  color:var(--muted);
+  cursor:pointer
+}
+.follow input {
+  accent-color:var(--blue);
+  vertical-align:middle;
+  margin-right:5px
+}
+.scroll {
+  overflow:auto;
+  min-height:0;
+  scrollbar-width:thin
+}
+.timeline {
+  padding:10px
+}
+.empty {
+  padding:32px 12px;
+  color:var(--muted);
+  font-size:12px;
+  text-align:center
+}
+.timeline-card {
+  border:1px solid var(--line);
+  border-radius:6px;
+  padding:10px 11px;
+  margin-bottom:9px;
+  overflow-wrap:anywhere;
+  background:#fff
+}
+.timeline-card.tool {
+  cursor:pointer;
+  border-left:3px solid #95a9c0
+}
+.timeline-card.tool:hover {
+  background:#f6f9fd
+}
+.timeline-card.selected {
+  border-color:#4c80c7;
+  background:#f1f6ff
+}
+.timeline-card.message {
+  background:#f6f8fa;
+  border-color:#e7ecf0
+}
+.timeline-card.problem {
+  border-left:3px solid var(--bad)
+}
+.card-top {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:5px;
+  font-size:11px;
+  color:var(--muted);
+  margin-bottom:5px
+}
+.card-text {
+  margin:0;
+  font-size:12px;
+  white-space:pre-wrap
+}
+.card-preview {
+  font:11px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;
+  white-space:pre-wrap;
+  margin:7px 0 0;
+  color:#41556c;
+  max-height:68px;
+  overflow:hidden
+}
+.badge {
+  display:inline-block;
+  padding:2px 7px;
+  border-radius:4px;
+  background:#eaf0f4;
+  color:#526677;
+  font-size:10px;
+  font-weight:600;
+  white-space:nowrap
+}
+.badge[data-tone=info] {
+  background:#e8f0fe;
+  color:var(--blue)
+}
+.badge[data-tone=bad] {
+  background:#fbe9eb;
+  color:var(--bad)
+}
+.badge[data-tone=good] {
+  background:#e4f2eb;
+  color:var(--green)
+}
+.badge[data-tone=warn] {
+  background:#fff1d9;
+  color:var(--amber)
+}
+/* 执行结果与机器人反馈分区，失败色只用于记录中明确的错误。 */
+.code-content,.image-content {
+  padding:13px
+}
+.source-code {
+  background:#152738;
+  color:#e0eaf3;
+  border-radius:5px;
+  padding:14px;
+  overflow:auto;
+  font:12px/1.8 ui-monospace,SFMono-Regular,Consolas,"Microsoft YaHei",monospace;
+  tab-size:4;
+  min-height:130px;
+  max-height:45vh;
+  margin:10px 0 18px
+}
+.result-heading {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:8px
+}
+.result-heading h3 {
+  font-size:13px;
+  margin:0 0 8px
+}
+h4 {
+  font-size:10px;
+  font-weight:600;
+  color:var(--muted);
+  margin:13px 0 5px
+}
+.console {
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  background:#f4f6f8;
+  border:1px solid #e9edf1;
+  border-radius:4px;
+  padding:9px 10px;
+  font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,"Microsoft YaHei",monospace;
+  margin:0;
+  max-height:320px;
+  overflow:auto
+}
+.errors {
+  color:var(--bad)
+}
+.outcome {
+  border-left:3px solid #91a7bd;
+  background:#f2f6fa;
+  padding:8px 10px;
+  font-size:12px;
+  margin-bottom:10px;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+.outcome[data-tone=bad] {
+  border-color:var(--bad);
+  background:#fff1f2;
+  color:#94333d
+}
+.robot-row {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:8px;
+  border-bottom:1px solid #edf0f3;
+  padding:7px 0;
+  font-size:11px
+}
+.robot-row span {
+  overflow-wrap:anywhere
+}
+.raw-details {
+  margin-top:14px;
+  font-size:11px;
+  color:var(--muted)
+}
+.raw-details summary,.diagnostics summary {
+  cursor:pointer
+}
+.raw-details pre {
+  margin-top:8px
+}
+select {
+  display:block;
+  width:100%;
+  border:1px solid var(--line);
+  border-radius:4px;
+  background:#fff;
+  color:var(--ink);
+  font:inherit;
+  font-size:11px;
+  padding:7px;
+  margin-top:5px
+}
+.image-context {
+  margin:10px 0 7px
+}
+/* canvas 展示原始快照或原图坐标裁剪；不作为实时视频播放器。 */
+.image-stage {
+  background:#e7ecf0;
+  border:1px solid var(--line);
+  border-radius:5px;
+  min-height:190px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden
+}
+.image-stage canvas {
+  display:block;
+  max-width:100%;
+  height:auto;
+  max-height:48vh;
+  object-fit:contain
+}
+.image-stage canvas[hidden] {
+  display:none
+}
+.image-meta {
+  display:grid;
+  grid-template-columns:67px minmax(0,1fr);
+  gap:6px 9px;
+  font-size:11px;
+  margin:14px 0
+}
+.image-meta dt {
+  color:var(--muted)
+}
+.image-meta dd {
+  margin:0;
+  overflow-wrap:anywhere;
+  font-family:ui-monospace,Consolas,monospace
+}
+#image-error {
+  font-size:12px;
+  margin-top:8px
+}
+.diagnostics {
+  margin-top:12px;
+  border:1px solid var(--line);
+  border-radius:6px;
+  background:#fff;
+  padding:8px 12px;
+  font-size:11px;
+  color:var(--muted)
+}
+.diagnostic-grid {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:14px
+}
+.diagnostic-grid pre {
+  max-height:230px
+}
+footer {
+  display:flex;
+  justify-content:space-between;
+  gap:14px;
+  color:var(--muted);
+  font-size:10px;
+  margin-top:10px;
+  overflow-wrap:anywhere
+}
+@media(min-width:1700px) {
+  .source-code,.console {
+    font-size:13px
+  }
+  .card-text {
+    font-size:13px
+  }
+}
+@media(max-width:1100px) {
+  main {
+    padding:12px
+  }
+  .workspace {
+    grid-template-columns:minmax(220px,.8fr) minmax(320px,1.2fr);
+    height:auto;
+    min-height:0
+  }
+  .timeline-panel,.code-panel {
+    height:650px
+  }
+  .image-panel {
+    grid-column:1/-1
+  }
+  .image-content {
+    max-height:650px
+  }
+  .image-stage canvas {
+    max-height:380px
+  }
+  .image-stage {
+    min-height:100px
+  }
+  .summary {
+    grid-template-columns:1fr 1fr
+  }
+  .summary>div:nth-child(2) {
+    border-right:0
+  }
+  .summary>div:nth-child(-n+2) {
+    border-bottom:1px solid var(--line)
+  }
+}
+@media(max-width:650px) {
+  .topbar {
+    padding:15px;
+    align-items:flex-start
+  }
+  h1 {
+    font-size:20px
+  }
+  h1 span {
+    display:none
+  }
+  .top-actions {
+    flex-direction:column;
+    align-items:flex-end;
+    gap:5px
+  }
+  .workspace {
+    display:flex;
+    flex-direction:column
+  }
+  .timeline-panel {
+    height:340px
+  }
+  .code-panel {
+    height:auto;
+    max-height:850px
+  }
+  .source-code {
+    max-height:360px
+  }
+  .diagnostic-grid {
+    grid-template-columns:1fr
+  }
+  .summary>div {
+    padding:11px
+  }
+  .summary strong {
+    font-size:16px
+  }
+  footer {
+    flex-direction:column;
+    gap:3px
+  }
+}

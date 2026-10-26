@@ -2,7 +2,10 @@
 
 主流程为 `codex exec + MCP + 独立持久 Python worker + 独立机器人控制进程`。
 本阶段接入右侧 Nero/L20 的基础 robo 接口、L515 RGB-D、内部运动规划与执行。
-按用户要求只做语法检查，没有运行测试、mock、MCP/Codex 联调或设备连接；以下命令未在本轮执行。
+初版仅做语法检查。2026-10-25 已在现场监护下执行真实控制进程的固定目标检查，
+在 JS 目标不变时复现下移，未进入后续 J7 小幅运动；该检查失败，不能作为抓取可用的证明。
+记录位于 `data/agent_runs/control-check-20261025-01/`。后续的超时保持修正已检查语法，
+尚未再次实机验证；当前仍使用 JS，没有切换成普通 move_joints。
 
 ## 阅读顺序
 
@@ -16,6 +19,7 @@
 | `cloth_agent/control.py` | 协调器管理 Pipe、worker 普通 Pipe、人工专用 Unix datagram；人工保持和普通 I/O 分开处理 |
 | `cloth_agent/mcp_server.py` | 临时 `python` / `finish` 工具；文字反馈与真正的 MCP ImageContent |
 | `cloth_agent/codex_exec.py` | 一次 Codex task；中英混合 prompt、固定操作说明与本次配置快照 |
+| `cloth_agent/monitor.py` / `monitor_assets/` | 独立只读 HTTP/SSE 观察页；时间线、cell 代码/结果和观测图片，不进入控制链路 |
 | `cloth_agent/robot_operations.md` | 启动时提供给 agent 的静态操作知识和 API 说明；代替 info 工具 |
 
 `geometry.py`、`planning.py`、`config.py` 复用已有几何、IK、TOPPRA 与标定文件。
@@ -27,9 +31,25 @@
 接口仅包括：`state`、`observe`、`show`、`pixel_to_task`、`top_down_pose`、`move_J`、`move_L`、
 `open_gripper`、`close_gripper`、`pause_and_hold`。不增加 info、公开 plan/execute、抓布判定或双臂接口。
 
-运动使用拇指/食指闭合接触点作为固定虚拟 TCP。参考姿态来自标定；top-down yaw 是绕 task +Z
-相对参考姿态的增量。内部逐点 IK / TOPPRA 与样条执行是近似路径，没有场景避碰或接触力控。
-控制进程复核关节/工作区/速度/加速度和实际起点，按配置周期下发目标，用实测关节判断到位。
+运动使用拇指/食指闭合接触点作为固定虚拟 TCP。初始抓取姿态保留记录起始位姿的法兰位置/yaw，
+roll/pitch 取标定的示教参考；规划 yaw 是相对该姿态绕 task +Z 的增量，单位 rad。
+`startup.enabled: true` 时，人工入口与记录就绪后，宿主用 worker 中的固定 cell 000 先执行
+`move_J` 回记录关节，再执行 `move_L` 到初始抓取位姿。等待到位、保持收尾并检查实际 TCP
+满足 IK 的位置/角度容差后才启动 MCP/Codex；失败/超时/人工停止则结束准备，不启动 agent。
+准备不占模型 cell 预算，源码/完整反馈保存在 `cells/000.py` / `000.json`，事件记录
+`startup_started` / `startup_prepared`。准备总超时由 `startup.timeout_s` 控制，默认 120 秒。
+已在记录关节容差内时跳过第一段，不为零位移下发多余运动。每段运动在终点反馈满足关节容差、
+并按普通保持标准稳定至少 0.2 秒后才返回 completed，之后才允许规划下一段。
+若 cell 收尾失败，仍保留原始 stdout、异常、robo 调用记录和最后控制快照；
+`execution_status` 记录 worker 原始状态，`control_error` 单独记录收尾错误。
+人工保持联调配置显式禁用 startup；不传 `--execute` 也不会准备或运动。
+内部逐点 IK / TOPPRA 与样条执行是近似路径，没有场景避碰或接触力控。
+控制进程复核关节/工作区/速度/加速度和实际起点，独立轨迹线程按配置周期下发目标，
+不受普通状态请求频率、图像保存或 L20 查询影响。agent 沿用 `NeroArm.move_js`；
+上层 `robo.move_J`/`move_L` 负责关节/虚拟 TCP 路径与 TOPPRA，最终以反馈判断到位。
+到位超时保留最后目标并报告失败，不重抓下坠后的反馈作为新目标。
+`control-samples.jsonl` 记录发送完成时间、间隔/耗时、目标关节、实测关节与对应 TCP，
+由普通线程消费内存队列后落盘；记录不是总线上逐帧 ACK。
 
 默认运动等待结果；`wait=False` 的句柄只在当前 cell 有效。cell 返回前会暂停遗留轨迹并等待
 固定目标附近的反馈稳定；不能确认时结束任务并报告失败。`pause_and_hold` 确认后展开调用栈，
@@ -51,7 +71,9 @@ Codex ↔ MCP / TaskSession ↔ 持久 Python worker（robo + 规划）
                │                         │ 普通数据 Pipe
                │ 管理 Pipe               ↓
                └──────────────────> 机器人控制进程
-                                     ├─ 普通 I/O：轨迹、相机、手部与落盘
+                                     ├─ 普通 I/O：请求、轨迹校验、图像与落盘
+                                     ├─ 轨迹线程：固定周期采样与关节位置下发
+                                     ├─ L20 查询：复用遥操作后台反馈线程
 人工 hold ── 独立 Unix datagram ──> └─ 主线程：锁定 → 捕获实测关节 → 持续位置保持
 ```
 
@@ -83,15 +105,20 @@ python -m cloth_agent run \
 
 # 机器人入口还需项目现有 Nero/L20 SDK；--execute 直接连接真实硬件，无交互确认。
 python -m pip install -e '.[agent,planning,vision]'
-python -m cloth_agent run --config configs/cloth_agent.yaml --execute \
-  --output-dir data/agent_runs/robot-01 \
+python -m cloth_agent run --execute \
   --task '先观察并展示抹布现场，再判断是否具备执行折叠的条件。'
 
 # 另一个本地终端；直接到控制进程，绕过 MCP/Codex。
-python -m cloth_agent hold data/agent_runs/robot-01/session.json
+python -m cloth_agent hold
 ```
 
 `--execute` 才允许连接配置中的右臂、右手与相机；硬件需由操作者预先使能，程序不会自动使能。
+CLI 默认使用 `configs/cloth_agent.yaml` 中的 `session.output_dir` 作为本轮记录目录，
+相对路径以配置文件所在目录为基准。每轮测试前修改一次，本轮运行期间不改；旧记录不覆盖。
+`run` / `serve` / `monitor` / `hold` / `hold-status` / `release-hold` 共用此目录；
+人工命令自动补上 `session.json`。使用其他配置时，各命令加同一个 `--config`。
+`--output-dir`、monitor 的目录位置参数、人工命令的 session 文件位置参数仍可显式覆盖。
+目录解析位于轻量的 `paths.py`，仅读取 YAML，不计算标定/FK、不创建进程或连接硬件。
 只传 `--config` 会加载标定用于几何计算，但不会连接设备；`state` 明确报告未连接，动作与观测拒绝。
 不传配置时仍注入 robo，纯计算可用，设备能力拒绝。`serve` 支持相同参数，供外部 MCP client 使用；
 外部 client 需自行提供机器人操作说明和本次 `robot_config.json`，不会自动启动 Codex 注入 prompt。
@@ -101,6 +128,9 @@ python -m cloth_agent hold data/agent_runs/robot-01/session.json
 本轮没有安装/更新依赖，也没有执行上述命令。
 
 ## 记录与验证边界
+
+运行中可在另一个终端执行 `python -m cloth_agent monitor`（或显式传入历史任务目录），
+打开终端打印的本地地址查看实时记录；也可回看旧任务。详细用法见 [观察页说明](cloth_monitor.md)。
 
 任务目录包含 `session.json`、`robot_config.json`、`events.jsonl`、`control-events.jsonl`、
 `cells/*.py` / `*.json`、`result.json`。真实观察保存在 `observations/`（PNG、米制深度 NPY、元数据）；

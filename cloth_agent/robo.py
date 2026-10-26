@@ -137,7 +137,7 @@ class Robo:
                                     task_from_camera=observation.task_from_camera))
 
     def top_down_pose(self, xyz, yaw=0.):
-        """构造固定虚拟 TCP 的 top-down 位姿；yaw 是绕 task +Z 的参考姿态增量，rad。"""
+        """构造虚拟 TCP 位姿；yaw 为相对初始抓取朝向绕 task +Z 的增量，rad。"""
         if self._config is None:
             raise RuntimeError("尚未加载 TCP 标定 Robot calibration not loaded")
         point = np.asarray(xyz, dtype=float)

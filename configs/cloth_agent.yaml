@@ -5,10 +5,19 @@
 # Workspace: 0.9 m cube at nero_start_pose.yaml FK + calibrated TCP; fixed in base.
 # 仅标定后的右臂 Only calibrated right arm; no mock device backend.
 backend: hardware
+session:
+  # 每轮测试前仅修改此处；所有 CLI 默认共用它。相对配置文件目录 configs/。
+  # run/serve 不覆盖旧记录；运行期间保持此值不变，下一轮再换新目录。
+  output_dir: ../data/agent_runs/robot-grasp-03
 control_hz: 20
+# agent 任务前自动准备：先回记录关节位姿，再调整到约定的初始抓取姿态。
+# yaw 零点保留记录位姿的法兰航向；roll/pitch 使用标定中的示教参考值。
+startup:
+  enabled: true
+  timeout_s: 120.0
 calibration:
   # Paths are relative to this config directory, or may be absolute.
-  file: ../data/calibration/pinch-01/calibration_candidate.yaml
+  file: ../data/calibration/pinch-01/calibration.yaml
   arm: right
 motion:
   max_ik_step_rad: 0.3345329252

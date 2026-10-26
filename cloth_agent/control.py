@@ -1,6 +1,7 @@
 """独立控制进程：普通服务与人工位置保持分别使用通道和处理路径。
 
-普通 Pipe 由一个服务线程处理；主线程接人工命令并独立周期下发固定保持目标。
+普通 Pipe 由一个服务线程处理；普通轨迹由独立线程按固定周期执行。
+主线程接人工命令并独立周期下发固定保持目标。
 生成源码不在这里执行。worker 只能发有限 robo 数据请求，不能发送任意函数。
 """
 
@@ -47,6 +48,27 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                 return
             finished = Event()
             notifications = SimpleQueue()
+            control_samples = SimpleQueue()
+            motion_shutdown = Event()
+            robot.on_control_sample = control_samples.put
+
+            def run_motion():
+                # 轨迹时钟只由 monotonic 定时器驱动，不能由 Pipe 请求唤醒次数
+                # 决定。此线程不查询 L20、不压缩图像、不验证整条轨迹、不写文件。
+                previous = next_tick = time.monotonic()
+                while not motion_shutdown.is_set() and not released.is_set():
+                    now = time.monotonic()
+                    try:
+                        robot.tick(now - previous)
+                    except Exception as exc:
+                        robot.fail(f"设备执行故障 Device execution failed: {exc}")
+                    previous = now
+                    next_tick += robot.period
+                    now = time.monotonic()
+                    if next_tick < now:
+                        # 超时跳过已错过的时隙，不集中补发多个关节目标。
+                        next_tick += (int((now - next_tick) / robot.period) + 1) * robot.period
+                    motion_shutdown.wait(max(0., next_tick - time.monotonic()))
 
             def record(description, **values):
                 # 仅普通线程落盘，人工停止保持接收路径只入内存队列，不等待日志写入。
@@ -56,24 +78,28 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                                             ensure_ascii=False) + "\n")
 
             def serve_ordinary():
-                previous = time.monotonic()
                 try:
-                    with selectors.DefaultSelector() as selector:
+                    with selectors.DefaultSelector() as selector, (
+                        Path(directory) / "control-samples.jsonl"
+                    ).open("a", encoding="utf-8", buffering=1) as samples_file:
                         selector.register(owner_connection.fileno(), selectors.EVENT_READ, True)
                         selector.register(worker_connection.fileno(), selectors.EVENT_READ, False)
                         while not released.is_set():
-                            now = time.monotonic()
-                            try:
-                                robot.tick(now - previous)
-                            except Exception as exc:
-                                robot.fail(f"设备执行故障 Device execution failed: {exc}")
-                            previous = now
+                            # 轨迹线程只提交内存快照；磁盘慢也不能拖长 JS 发送间隔。
+                            while True:
+                                try:
+                                    sample = control_samples.get_nowait()
+                                except Empty:
+                                    break
+                                samples_file.write(json.dumps({
+                                    "description": "关节控制采样 Joint control sample", **sample
+                                }, ensure_ascii=False) + "\n")
                             while True:
                                 try:
                                     record("人工停止保持反馈 Manual hold report", report=notifications.get_nowait())
                                 except Empty:
                                     break
-                            ready = selector.select(max(0., robot.period - (time.monotonic() - now)))
+                            ready = selector.select(.05)
                             # 协调器的 cell_end/end_task 优先于旧 worker 迟到的普通请求。
                             ready.sort(key=lambda item: not item[0].data)
                             for key, _ in ready:
@@ -115,6 +141,8 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                 "pid": os.getpid(), "manual_socket": endpoint,
                 "manual_protocol": "position-hold-v1", **robot.snapshot()}})
             ordinary = Thread(target=serve_ordinary, name="cloth-control-io", daemon=True)
+            motion_thread = Thread(target=run_motion, name="cloth-motion", daemon=True)
+            motion_thread.start()
             ordinary.start()
             try:
                 next_hold_at = time.monotonic()
@@ -166,6 +194,8 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                         except OSError:
                             pass  # 操作者端退出不撤销人工保持。
             finally:
+                motion_shutdown.set()
+                motion_thread.join(2)
                 ordinary.join(2)
                 try:
                     if robot.motion and robot.motion["status"] == "running" and not manual_hold.is_set():
