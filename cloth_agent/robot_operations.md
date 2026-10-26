@@ -20,8 +20,9 @@
 
 Python globals 中预置 `robo`、`np`、`math`、`time`。
 本次冻结配置含 `start_joint_positions`、`initial_grasp_tcp` 和 `reference_tcp_rotation`。
-当 `startup_prepared=true` 时，宿主在启动 Codex 前已通过固定准备 cell 000 先回记录关节，
-再到初始抓取姿态，并检查反馈；不要重放该 cell。agent 仍应先读取真实状态并观察现场。
+当 `startup_prepared=true` 时，宿主在启动 Codex 前已通过固定准备 cell 000 先以 PTP
+回记录关节，再以 PTP 到初始抓取姿态，并检查反馈；每段只发送一次最终关节目标，
+启动第二段不要求 TCP 直线运动。不要重放该 cell。agent 仍应先读取真实状态并观察现场。
 准备失败、超时或人工 hold 时不启动 agent，不自动切换抓取参考或继续旧轨迹。
 
 | 调用 | 含义与结果 |

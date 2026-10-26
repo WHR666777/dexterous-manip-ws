@@ -52,8 +52,12 @@ J7 0.01 rad 往返、虚拟 TCP +Z 5 mm 分段运动（FK 抬升约 4.70 mm）�
 
 运动使用拇指/食指闭合接触点作为固定虚拟 TCP。初始抓取姿态保留记录起始位姿的法兰位置/yaw，
 roll/pitch 取标定的示教参考；规划 yaw 是相对该姿态绕 task +Z 的增量，单位 rad。
-`startup.enabled: true` 时，人工入口与记录就绪后，宿主用 worker 中的固定 cell 000 先执行
-`move_J` 回记录关节，再执行 `move_L` 到初始抓取位姿。等待到位、保持收尾并检查实际 TCP
+`startup.enabled: true` 时，人工入口与记录就绪后，宿主用 worker 中的固定 cell 000 先以
+PTP 回记录关节，再对初始抓取位姿求一次最终 IK 并执行 PTP。每段仅通过普通 J 下发一次
+最终关节目标，由固件平滑；不下发中间点，不进行 TCP 直线插值或 TOPPRA 时间规划。
+启动专用辅助函数 `startup_move_ptp` 仅在 cell 000 中注入，之后删除，不新增 agent API。
+整体关节变化上限与 teleop 回记录位姿一致，为 2π rad；限位、起点、反馈和工作区检查保留。
+插值检查点仅用于工作区复核，不代表固件实际路径或场景避碰。等待到位、保持收尾并检查实际 TCP
 满足 IK 的位置/角度容差后才启动 MCP/Codex；失败/超时/人工停止则结束准备，不启动 agent。
 准备不占模型 cell 预算，源码/完整反馈保存在 `cells/000.py` / `000.json`，事件记录
 `startup_started` / `startup_prepared`。准备总超时由 `startup.timeout_s` 控制，默认 120 秒。

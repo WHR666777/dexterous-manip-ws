@@ -201,7 +201,14 @@ class RobotController:
         with self._arm_send_lock:
             if not self.manual_stop.is_set():
                 started = time.monotonic()
-                self.arm.move_joints(q, speed_percent=self.motion_settings["joint_speed_percent"])
+                # 固定启动 PTP 沿用 teleop 的整体回位上限。任务中的普通分段
+                # 继续使用原有单步限制，不能因支持启动回位而全局放宽。
+                from .planning import STARTUP_PTP_MAX_JOINT_DELTA_RAD
+
+                startup_ptp = self.motion is not None and self.motion["plan"].mode == "startup_ptp"
+                self.arm.move_joints(q, speed_percent=self.motion_settings["joint_speed_percent"],
+                                     max_joint_delta=(STARTUP_PTP_MAX_JOINT_DELTA_RAD
+                                                      if startup_ptp else None))
                 sent_at = time.monotonic()
                 if self.on_control_sample is not None:
                     self.on_control_sample({
@@ -400,21 +407,32 @@ class RobotController:
         self.failed.set()
 
     def _start_motion(self, cell_id, payload):
-        from .planning import MotionPlan
+        from .planning import MotionPlan, STARTUP_PTP_MAX_JOINT_DELTA_RAD
 
         self._require_hardware()
         plan = MotionPlan.from_dict(payload)
         if plan.arm != "right":
             raise ValueError("第一版只允许右臂 Only right arm is enabled")
-        if plan.mode not in {"joint", "cartesian"} or plan.joint_waypoints is None:
+        if plan.mode not in {"joint", "cartesian", "startup_ptp"} or plan.joint_waypoints is None:
             raise ValueError("普通 J 执行需要几何分段点 Joint executor requires geometric waypoints")
+        startup_ptp = plan.mode == "startup_ptp"
+        if startup_ptp and (cell_id != 0 or not self.config.get("startup", {}).get("enabled", False)
+                            or len(plan.joint_waypoints) != 2):
+            raise ValueError("PTP 只允许固定启动 cell 的单目标 Startup PTP requires cell 000 and two endpoints")
         # 发送的是真正的几何分段点，不是计时样本。这里仅复核
         # 每段关节插值的限位/工作区和最大跨度；不把固件内部路径当作已知曲线。
         self.validator._check_path("right", plan.joint_waypoints)
         starts, ends = plan.joint_waypoints[:-1], plan.joint_waypoints[1:]
-        if np.max(np.abs(ends - starts)) > self.motion_settings["max_ik_step_rad"]:
+        delta_limit = (STARTUP_PTP_MAX_JOINT_DELTA_RAD if startup_ptp
+                       else self.motion_settings["max_ik_step_rad"])
+        if np.max(np.abs(ends - starts)) > delta_limit:
             raise ValueError("J 分段跨度过大 Joint waypoint step exceeded")
-        segments = np.linspace(starts, ends, 10, axis=1).reshape(-1, 7)
+        # PTP 整体跨度可能大于任务分段；按 joint_step_rad 生成只读检查点，
+        # 保留路径工作区检查的密度。执行数据仍只有起点/终点，不发送检查点。
+        count = (max(10, int(np.ceil(np.max(np.abs(ends - starts))
+                                    / self.motion_settings["joint_step_rad"])) + 1)
+                 if startup_ptp else 10)
+        segments = np.linspace(starts, ends, count, axis=1).reshape(-1, 7)
         self.validator._check_path("right", segments)
         # 普通 J 不执行 TOPPRA 的计时样本和样条，设备进程只复核实际下发的
         # 几何目标及分段。密集样条仍由 worker 在规划时检查，不能在这里用

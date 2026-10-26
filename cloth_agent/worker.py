@@ -103,7 +103,14 @@ def _worker_main(connection, workspace, robot_connection, config):
             if message["operation"] == "close":
                 return
             robo._begin_cell(message["cell_id"])
-            result = _execute(message["source"], namespace, message["cell_id"])
+            # 只有宿主生成的启动 cell 000 能看到此内部辅助函数。执行结束即
+            # 删除，后续模型 cell 仍只使用原有 robo API；无需放开私有属性访问。
+            if message["cell_id"] == 0:
+                namespace["startup_move_ptp"] = robo._startup_move_ptp
+            try:
+                result = _execute(message["source"], namespace, message["cell_id"])
+            finally:
+                namespace.pop("startup_move_ptp", None)
             # 文件路径和 crop 元数据只交给宿主附图；不把整幅 RGB-D 转成文本日志。
             result["images"] = robo._shows
             result["robot_calls"] = robo._calls

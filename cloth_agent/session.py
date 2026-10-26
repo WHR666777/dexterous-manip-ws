@@ -128,18 +128,19 @@ class TaskSession:
         return state
 
     def _prepare_robot(self):
-        """固定宿主流程，先回记录关节再到初始抓取姿态；完成前不会启动 Codex。"""
+        """固定宿主流程，两次 PTP 回记录关节/初始抓取姿态；完成前不会启动 Codex。"""
         startup = (self.robot_config or {}).get("startup", {})
         if not self.control.ready["hardware_connected"] or not startup.get("enabled", False):
             return
         settings = self.robot_config["arms"]["right"]
-        self.log("startup_started", "准备初始抓取姿态 Preparing initial grasp pose",
+        self.log("startup_started", "PTP 准备初始抓取姿态 Preparing initial grasp pose with PTP",
                  start_joints=settings["start_joint_positions"],
                  initial_grasp_tcp=settings["initial_grasp_tcp"],
                  reference_flange_yaw_rad=settings["reference_flange_yaw_rad"])
         print(json.dumps({"description": "即将自动准备初始抓取姿态 Preparing robot before agent; hold is available",
                           "session_file": str(self.directory / "session.json")}, ensure_ascii=False), flush=True)
-        # 使用固定 cell 000 复用现有 robo、IK/TOPPRA、轨迹复核、到位与暂停收尾。
+        # 固定 cell 000 使用内部 PTP 辅助函数，复用轨迹复核、到位与暂停收尾。
+        # 每段只下发一个最终关节目标；第二段只求最终姿态 IK，不做直线插值或 TOPPRA。
         # 源码由宿主构造，不由模型决定；不新增公开回零工具，也不占 agent 的 cell 预算。
         # 第一段只回记录关节，第二段到保持记录法兰位置/yaw 的示教抓取倾角。
         source = (
@@ -149,14 +150,14 @@ class TaskSession:
             "startup_state = robo.state()\n"
             "if np.max(np.abs(np.array(startup_state['joints']) - startup_joints)) > "
             + repr(self.robot_config["motion"]["joint_tolerance_rad"]) + ":\n"
-            "    startup_joint_result = robo.move_J(startup_joints.tolist())\n"
-            "    print('记录关节位姿反馈 Recorded joint pose:', startup_joint_result)\n"
+            "    startup_joint_result = startup_move_ptp(target_joints=startup_joints.tolist())\n"
+            "    print('PTP 回记录关节反馈 Recorded joint PTP:', startup_joint_result)\n"
             "    if startup_joint_result.status != 'completed' or not startup_joint_result.reached:\n"
             "        raise RuntimeError('回记录关节位姿失败 Recorded joint move failed: ' + repr(startup_joint_result))\n"
             "else:\n"
-            "    print('已在记录关节位姿，跳过原地运动 Already at recorded joint pose; skip move_J')\n"
-            "startup_grasp_result = robo.move_L(" + repr(settings["initial_grasp_tcp"]) + ")\n"
-            "print('初始抓取位姿反馈 Initial grasp pose:', startup_grasp_result)\n"
+            "    print('已在记录关节位姿，跳过原地运动 Already at recorded joint pose; skip PTP')\n"
+            "startup_grasp_result = startup_move_ptp(target_tcp=" + repr(settings["initial_grasp_tcp"]) + ")\n"
+            "print('PTP 初始抓取位姿反馈 Initial grasp PTP:', startup_grasp_result)\n"
             "if startup_grasp_result.status != 'completed' or not startup_grasp_result.reached:\n"
             "    raise RuntimeError('初始抓取姿态准备失败 Initial grasp move failed: ' + repr(startup_grasp_result))\n"
         )

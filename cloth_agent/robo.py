@@ -150,7 +150,13 @@ class Robo:
                            @ np.asarray(self._config["arms"]["right"]["reference_tcp_rotation"]))
         return pose
 
-    def _move(self, *, target_joints=None, target_tcp=None, wait=True):
+    def _startup_move_ptp(self, *, target_joints=None, target_tcp=None):
+        """仅供宿主固定 cell 000 调用，不增加 agent 公开运动 API。"""
+        if self._cell_id != 0:
+            raise RuntimeError("PTP 仅用于启动准备 Startup PTP requires cell 000")
+        return self._move(target_joints=target_joints, target_tcp=target_tcp, startup_ptp=True)
+
+    def _move(self, *, target_joints=None, target_tcp=None, wait=True, startup_ptp=False):
         if not isinstance(wait, bool):
             raise ValueError("wait 必须为布尔值 wait must be bool")
         state = self.state()
@@ -165,9 +171,13 @@ class Robo:
         try:
             # IK/TOPPRA 在 worker 内计算；计算期间不占住设备进程的人工停止保持路径。
             # 执行时控制进程仍会复核起点、限位和轨迹，不把持久 globals 当成现场真值。
-            plan = self._planner.plan("right", state["joints"], target_joints=target_joints,
-                                      waypoints=[transform(target_tcp)] if target_tcp is not None else None,
-                                      mode="cartesian" if target_tcp is not None else "joint")
+            if startup_ptp:
+                plan = self._planner.plan_startup_ptp(state["joints"], target_joints=target_joints,
+                                                     target_tcp=target_tcp)
+            else:
+                plan = self._planner.plan("right", state["joints"], target_joints=target_joints,
+                                          waypoints=[transform(target_tcp)] if target_tcp is not None else None,
+                                          mode="cartesian" if target_tcp is not None else "joint")
         except PlanningError as exc:
             return MotionResult("planning_failed", False, str(exc), diagnostics=exc.as_dict())
         started = self._call("start_motion", plan=plan.as_dict())
