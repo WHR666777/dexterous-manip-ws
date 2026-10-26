@@ -23,6 +23,7 @@ class RobotController:
         self.config, self.directory = config, Path(directory)
         self.manual_stop, self.failed = manual_stop, failed
         self.arm = self.hand = self.camera = self.validator = None
+        self.can_trace = None
         self.hand_feedback = None
         self._feedback_ik = None
         self._feedback_fk_lock = Lock()
@@ -89,7 +90,12 @@ class RobotController:
         self._feedback_ik = NeroIK()
         self.arm = NeroArm(can_channel=self.settings["can_channel"],
                            max_joint_delta=self.motion_settings["max_ik_step_rad"])
+        from .can_trace import ArmCanTrace
+
+        # 在 SDK 连接之前开始被动抓包，覆盖启动准备运动；不发送任何指令。
+        self.can_trace = ArmCanTrace(self.settings["can_channel"], self.directory)
         self.arm.connect()
+        self.arm.observe_can_send(self.can_trace.sent)
         # connect() 只启动 SDK 后台 CAN 接收线程，不保证低速驱动状态已经到齐。
         # 官方 get_joint_enable_status() 把“尚无反馈”也表示为 False，所以使能
         # 确认必须与关节/位姿反馈一起等待，不能刚连接就认定物理机械臂未使能。
@@ -242,20 +248,20 @@ class RobotController:
         with self._arm_send_lock:
             if not self.manual_stop.is_set():
                 started = time.monotonic()
-                # 固定启动 PTP 沿用 teleop 的整体回位上限。任务中的普通分段
-                # 继续使用原有单步限制，不能因支持启动回位而全局放宽。
-                from .planning import STARTUP_PTP_MAX_JOINT_DELTA_RAD
+                # move_J 与固定启动 PTP 使用整体回位上限。move_L 的普通
+                # 分段继续使用原有单步限制，不把 PTP 上限全局套到连续路径。
+                from .planning import PTP_MAX_JOINT_DELTA_RAD
 
-                startup_ptp = self.motion is not None and self.motion["plan"].mode == "startup_ptp"
+                ptp = self.motion is not None and self.motion["plan"].mode in {"ptp", "startup_ptp"}
                 self.arm.move_joints(q, speed_percent=self.motion_settings["joint_speed_percent"],
-                                     max_joint_delta=(STARTUP_PTP_MAX_JOINT_DELTA_RAD
-                                                      if startup_ptp else None))
+                                     max_joint_delta=PTP_MAX_JOINT_DELTA_RAD if ptp else None)
                 sent_at = time.monotonic()
                 self._last_send_wall_at = time.time()
                 if self.on_control_sample is not None:
                     self.on_control_sample({
                         "sent_at": sent_at, "command_sent": True,
                         "sent_at_unix": self._last_send_wall_at,
+                        "send_started_at_unix": self._last_send_wall_at - (sent_at - started),
                         "arm_status_before_send": deepcopy(self._arm_status),
                         "waypoint_index": self.motion["waypoint_index"] if self.motion else None,
                         "send_interval_s": (None if self._last_send_at is None
@@ -481,23 +487,25 @@ class RobotController:
         self.failed.set()
 
     def _start_motion(self, cell_id, payload):
-        from .planning import MotionPlan, STARTUP_PTP_MAX_JOINT_DELTA_RAD
+        from .planning import MotionPlan, PTP_MAX_JOINT_DELTA_RAD
 
         self._require_hardware()
         plan = MotionPlan.from_dict(payload)
         if plan.arm != "right":
             raise ValueError("第一版只允许右臂 Only right arm is enabled")
-        if plan.mode not in {"joint", "cartesian", "startup_ptp"} or plan.joint_waypoints is None:
+        if plan.mode not in {"joint", "cartesian", "ptp", "startup_ptp"} or plan.joint_waypoints is None:
             raise ValueError("普通 J 执行需要几何分段点 Joint executor requires geometric waypoints")
         startup_ptp = plan.mode == "startup_ptp"
-        if startup_ptp and (cell_id != 0 or not self.config.get("startup", {}).get("enabled", False)
-                            or len(plan.joint_waypoints) != 2):
-            raise ValueError("PTP 只允许固定启动 cell 的单目标 Startup PTP requires cell 000 and two endpoints")
+        ptp = plan.mode in {"ptp", "startup_ptp"}
+        if ptp and len(plan.joint_waypoints) != 2:
+            raise ValueError("PTP 仅接受起点和单个终点 PTP requires two endpoints")
+        if startup_ptp and (cell_id != 0 or not self.config.get("startup", {}).get("enabled", False)):
+            raise ValueError("启动 PTP 只允许固定准备 cell Startup PTP requires cell 000")
         # 发送的是真正的几何分段点，不是计时样本。这里仅复核
         # 每段关节插值的限位/工作区和最大跨度；不把固件内部路径当作已知曲线。
         self.validator._check_path("right", plan.joint_waypoints)
         starts, ends = plan.joint_waypoints[:-1], plan.joint_waypoints[1:]
-        delta_limit = (STARTUP_PTP_MAX_JOINT_DELTA_RAD if startup_ptp
+        delta_limit = (PTP_MAX_JOINT_DELTA_RAD if ptp
                        else self.motion_settings["max_ik_step_rad"])
         if np.max(np.abs(ends - starts)) > delta_limit:
             raise ValueError("J 分段跨度过大 Joint waypoint step exceeded")
@@ -505,7 +513,7 @@ class RobotController:
         # 保留路径工作区检查的密度。执行数据仍只有起点/终点，不发送检查点。
         count = (max(10, int(np.ceil(np.max(np.abs(ends - starts))
                                     / self.motion_settings["joint_step_rad"])) + 1)
-                 if startup_ptp else 10)
+                 if ptp else 10)
         segments = np.linspace(starts, ends, count, axis=1).reshape(-1, 7)
         self.validator._check_path("right", segments)
         # 普通 J 不执行 TOPPRA 的计时样本和样条，设备进程只复核实际下发的
@@ -641,5 +649,8 @@ class RobotController:
                     getattr(device, operation)()
                 except Exception as exc:
                     errors.append(str(exc))
+        # 设备断开后再关闭抓包，保留收尾阶段的帧与最终接口统计。
+        if self.can_trace is not None:
+            self.can_trace.close()
         if errors:
             raise RuntimeError("设备清理失败 Device cleanup failed: " + "; ".join(errors))

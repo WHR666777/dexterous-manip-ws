@@ -108,6 +108,12 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
     with path.open() as stream:
         config = yaml.safe_load(stream)
     config["config_dir"] = str(path.parent)
+    # 模型参数只交给 Codex，不影响机器人控制。允许 null 沿用本机设置；
+    # 不在这里硬编码模型列表或各模型支持的强度，具体支持情况由 Codex 校验。
+    for name in ("model", "model_reasoning_effort"):
+        value = config.setdefault(name, None)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{name} 必须为非空字符串或 null Must be a non-empty string or null")
     if config["backend"] not in ("mock", "hardware"):
         raise ValueError("backend must be mock or hardware.")
     positive(config["control_hz"], "control_hz")

@@ -92,8 +92,12 @@ L20 不自动松手/reset。agent 无权触发人工释放或复位。
 
 TCP 固定于工具，开手后也不随指尖位置重定义。已有轴定义：参考姿态下 Z 向下、X 沿法兰旋转轴的水平投影、Y = Z × X，之后固定在工具上。张开手型来自官方预设，闭合手型来自 replay 标定。
 
-第一版只公开 `move_J(target_joints, wait=True)` 与 `move_L(target_tcp, wait=True)`。
-不提供独立 plan/execute；规划在 move 内完成。`top_down_pose(xyz, yaw)` 用标定参考姿态构造目标，
+第一版只公开 `move_J(target_tcp, wait=True)` 与 `move_L(target_tcp, wait=True)`，
+两者都接收 task 系虚拟 TCP 位姿（4×4 SE(3) 或 xyz-rpy，m/rad），不要求 agent 提供关节角。
+`move_J` 读取当前关节，转换 TCP 为法兰目标并求一次 IK，再发送一次最终关节 PTP 目标；
+不保证 TCP 中途直线。`move_L` 沿 TCP 路径插值求 IK，由普通 J 分段近似执行。
+不提供独立 IK 或 plan/execute；规划在 move 内完成。启动回记录关节保留内部关节入口。
+`top_down_pose(xyz, yaw)` 用标定参考姿态构造目标，
 旋转为 `Rz_task(yaw) @ R_initial_grasp`；yaw 是相对约定初始抓取姿态绕 task +Z 的增量，单位 rad，
 不是绝对法兰 yaw，也不随当前 cell 重新锚定。初始抓取姿态保留记录起始关节位姿的法兰位置/yaw，
 roll/pitch 采用标定的示教参考。开启 `startup.enabled` 后，宿主先回记录关节，再到该抓取姿态，

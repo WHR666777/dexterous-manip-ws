@@ -14,7 +14,7 @@ def main(argv=None):
     run = commands.add_parser("run", help="启动一次 Codex exec task")
     run.add_argument("--task", required=True, help="交给 agent 的本次任务 Task description")
     run.add_argument("--codex", default="codex", help="本机 Codex executable")
-    run.add_argument("--model", default=None, help="省略时沿用 Codex 模型设置")
+    run.add_argument("--model", default=None, help="覆盖配置中的 model；两者均省略时沿用本机 Codex 设置")
     serve = commands.add_parser("serve", help="仅启动 MCP 与两个子进程，等待外部 MCP client")
     monitor = commands.add_parser("monitor", help="只读浏览器监控，不连接机器人、不启动 Codex")
     monitor.add_argument("directory", nargs="?", help="覆盖配置中的本轮目录；也可指定历史任务")

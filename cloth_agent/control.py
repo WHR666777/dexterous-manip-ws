@@ -95,6 +95,16 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                                 samples_file.write(json.dumps({
                                     "description": "关节控制采样 Joint control sample", **sample
                                 }, ensure_ascii=False) + "\n")
+                                if sample.get("command_sent"):
+                                    # 每次真正切换目标才输出，20 Hz 反馈仍只存文件。
+                                    # 打印在普通 I/O 线程，不占用运动/人工保持发送锁。
+                                    print(json.dumps({"description": "J 目标已调用 SDK Joint target submitted",
+                                                      "motion_id": sample["motion_id"],
+                                                      "waypoint_index": sample["waypoint_index"],
+                                                      "target_joints": sample["target_joints"],
+                                                      "send_duration_s": sample["send_duration_s"],
+                                                      "note": "SDK returned != robot ACK"},
+                                                     ensure_ascii=False), flush=True)
                             while True:
                                 try:
                                     record("人工停止保持反馈 Manual hold report", report=notifications.get_nowait())

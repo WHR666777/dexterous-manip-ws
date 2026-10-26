@@ -32,18 +32,25 @@ Python globals 中预置 `robo`、`np`、`math`、`time`。
 | `robo.show(obs, crop=None)` | 将 RGB 作为本 cell 返回的 MCP 图片；可选 `[u0,v0,u1,v1]` 原图坐标，右/下边界不包含 |
 | `robo.pixel_to_task(obs, [u,v])` | 使用该快照同一像素深度反投影为 task XYZ；原图整数坐标，零/无效深度直接报错 |
 | `robo.top_down_pose(xyz, yaw=0.0)` | 构造 task 系虚拟 TCP 的 4×4 位姿，不发动作 |
-| `robo.move_J(target_joints, wait=True)` | 七轴关节目标；普通 J 分段发送、反馈确认到位 Joint position control |
+| `robo.move_J(target_tcp, wait=True)` | task 系虚拟 TCP 目标；内部一次 IK，再发送一次关节 PTP 目标 Single-target joint PTP |
 | `robo.move_L(target_tcp, wait=True)` | 虚拟 TCP 直线/姿态插值及 IK；普通 J 逐段近似执行，规划失败不跳过 |
 | `robo.open_gripper()` / `robo.close_gripper()` | 只发送拇指/食指的配置预设；其余三指不发位置命令 |
 | `robo.pause_and_hold(reason)` | 暂停轨迹、使用反馈作固定保持目标；确认后结束当前 cell，返回 status=paused |
 
-`move_L` 的目标可用 4×4 SE(3)，或 `[x,y,z,roll,pitch,yaw]`（scipy 外旋 xyz）。
+`move_J` 和 `move_L` 都接收 task 系虚拟 TCP 位姿：4×4 SE(3)，或
+`[x,y,z,roll,pitch,yaw]`（m/rad，scipy 外旋 xyz），不接收七轴关节角。
 top-down 任务优先使用 `top_down_pose` 构造目标，避免把法兰姿态当成 TCP 姿态。
-它用采样 IK 和普通 J 分段实现近似直线，中间点满足关节容差并收到新的固件到位反馈后推进，
+例如 `robo.move_J(robo.top_down_pose([x, y, z], yaw=0.0))`。
+`move_J` 以当前实测关节为参考，把 TCP 目标转换成法兰目标并求一次 IK，
+只下发一次最终关节目标，由固件平滑；不要求 agent 求 IK 或提供关节角。
+PTP 整体关节变化上限为 2π rad，并检查限位、工作区与实际起点；中途 TCP 路径不保证直线或避碰。
+IK 失败返回 `planning_failed`，不下发运动。关节目标只保留在宿主启动回位的内部入口。
+`move_L` 用采样 IK 和普通 J 分段实现近似直线，中间点满足关节容差并收到新的固件到位反馈后推进，
 无额外固定停稳等待；不承诺连续空间
 的精确直线或避碰。底层不使用 JS，不将 TOPPRA 密集点连续灌入普通 J。
-固件速度由 `motion.joint_speed_percent` 指定（默认 10%），不是 rad/s。TOPPRA 仍用于
-数值规划/检查，不再决定固件执行时间，不能据此声称实际速度/加速度已被精确限制。
+固件速度由 `motion.joint_speed_percent` 指定（默认 10%），不是 rad/s。`move_J` 不做
+TOPPRA 时间规划；`move_L` 的 TOPPRA 仍用于数值规划/检查，不决定固件执行时间，
+不能据此声称实际速度/加速度已被精确限制。
 
 ## 反馈与 cell 闭环 Feedback
 

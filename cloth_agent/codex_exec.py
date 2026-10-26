@@ -1,7 +1,7 @@
 """一次 codex exec 对应一个任务，cell 的后续调用由 Codex 自己组织。
 
 本模块只组装 prompt、配置 MCP 并保存 CLI 事件，不调用 app-server 或模型 HTTP API。
-不硬编码模型名称；默认沿用操作者本机 Codex 的登录和模型配置。
+不硬编码模型名称；模型与推理强度可在任务配置中指定，null 沿用本机 Codex 设置。
 """
 
 from __future__ import annotations
@@ -66,8 +66,15 @@ def build_command(session, mcp_url, *, executable="codex", model=None):
                "-c", "mcp_servers.cloth_agent.required=true",
                "-c", "mcp_servers.cloth_agent.default_tools_approval_mode=\"approve\"",
                "-c", f"mcp_servers.cloth_agent.tool_timeout_sec={int(session.cell_timeout_s) + 10}"]
+    # 优先级：显式 --model > 本轮 YAML > 本机 Codex 配置。推理强度从
+    # 冻结后的 YAML 读取，用本次进程的 -c 覆盖，不修改 ~/.codex/config.toml。
+    settings = session.robot_config or {}
+    model = model if model is not None else settings.get("model")
+    effort = settings.get("model_reasoning_effort")
     if model:
         command.extend(["--model", model])
+    if effort is not None:
+        command.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
     command.append("-")
     return command
 

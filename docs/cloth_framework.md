@@ -82,7 +82,12 @@ PTP 回记录关节，再对初始抓取位姿求一次最终 IK 并执行 PTP�
 若 cell 收尾失败，仍保留原始 stdout、异常、robo 调用记录和最后控制快照；
 `execution_status` 记录 worker 原始状态，`control_error` 单独记录收尾错误。
 人工保持联调配置显式禁用 startup；不传 `--execute` 也不会准备或运动。
-内部逐点 IK 与普通 J 几何分段是近似路径，没有场景避碰或接触力控。
+公开 `move_J(target_tcp, wait=True)` 与 `move_L(target_tcp, wait=True)` 都接收 task 系虚拟
+TCP 位姿（4×4 SE(3) 或 xyz-rpy，m/rad）。`move_J` 以实测关节为参考，对目标法兰位姿
+求一次 IK，生成 `mode=ptp` 的两个端点；普通 J 仅发送一次终点，由固件完成 PTP 平滑，
+不做 TOPPRA，不保证中途 TCP 直线。PTP 复用启动回位的 2π rad 整体变化上限，
+保留关节限位、工作区、起点与到位检查。agent 无需自行求 IK，IK 失败不发动作。
+内部逐点 IK 与普通 J 几何分段仅用于 `move_L` 等路径规划，没有场景避碰或接触力控。
 `MotionPlan.joint_waypoints` 保存原始几何分段点；控制进程复核这些点、分段关节插值的
 限位/工作区/最大跨度和实际起点。TOPPRA 样条数值检查留在 worker，
 控制进程不重复检查并未执行的密集样条，避免计算占用拖慢 CAN 接收。
@@ -96,6 +101,18 @@ TOPPRA 时间不再驱动执行；规划 rad/s、rad/s² 约束不等于实际�
 到位超时保留最后目标并报告失败，不重抓下坠后的反馈作为新目标。
 `control-samples.jsonl` 记录命令发送事件（`command_sent=true`）及每个监督周期的目标/实测关节与 TCP，
 由普通线程消费内存队列后落盘；记录不是总线上逐帧 ACK。
+实机连接另存 `arm-can.jsonl`：SDK 的每帧 Bus.send 返回/异常、独立 SocketCAN
+接收到的模式/七轴目标 local echo、原始状态及关节反馈，以及每秒接口累计统计。
+用时间戳关联目标与原始帧，用本轮前后 `tx_dropped` 差值判断新增丢包；
+local echo 不代表机械臂已经接收或执行整条目标。抓包线程不发送、不重试、不改队列。
+SDK 发送 socket 为此开启本机回环，自己的 SDK 接收仍不接收自身发送帧。
+仅检查上升时可直接运行 `python scripts/nero/check_agent_lift.py`：使用本轮配置目录，
+不启动 Codex/MCP、不执行启动 PTP，保持当前 TCP 方向上升 4 cm，不操作手指或自动下降。
+复现已知失败时优先使用 `python scripts/nero/replay_agent_motion.py <历史 motions/id.json>
+--output-dir <新目录>`。它读取当轮冻结配置，先以单次 PTP 回历史起点，再将原始
+MotionPlan 送入正式控制进程，不重新求 IK 或改变关节分段；人工 hold 使用该目录
+下的 `session.json`。它不恢复手部动作、抓布负载及当时的线程调度时序，因此相同
+轨迹仍可能需要重复对照，单次成功不表示原问题已经修复。
 
 默认运动等待结果；`wait=False` 的句柄只在当前 cell 有效。cell 返回前会暂停遗留轨迹并等待
 固定目标附近的反馈稳定；不能确认时结束任务并报告失败。`pause_and_hold` 确认后展开调用栈，
@@ -169,7 +186,10 @@ CLI 默认使用 `configs/cloth_agent.yaml` 中的 `session.output_dir` 作为�
 不传配置时仍注入 robo，纯计算可用，设备能力拒绝。`serve` 支持相同参数，供外部 MCP client 使用；
 外部 client 需自行提供机器人操作说明和本次 `robot_config.json`，不会自动启动 Codex 注入 prompt。
 
-`run` 默认使用本机已登录的 Codex，不指定模型；可传 `--codex` / `--model`。
+`run` 使用本机已登录的 Codex，可在 YAML 顶层配置 `model` 和 `model_reasoning_effort`。
+两项默认 `null`，沿用本机 Codex 设置；例如填入所需模型名称及 `model_reasoning_effort: high`。
+模型和推理强度的具体支持情况由 Codex 校验。`--model` 优先于 YAML 的 `model`，
+`--codex` 可指定可执行文件；配置只覆盖本轮启动参数，不修改全局 Codex 配置。
 默认 cell 60 秒、任务 900 秒、40 个 cell；长运动需在启动时明确调整 `--cell-timeout`。
 本轮没有安装/更新依赖，也没有执行上述命令。
 

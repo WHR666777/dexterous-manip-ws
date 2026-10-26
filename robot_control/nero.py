@@ -76,6 +76,8 @@ class NeroArm:
             )
             driver = sdk.AgxArmFactory.create_arm(config)
         self._driver = driver
+        self._observed_send_bus = None
+        self._original_bus_send = None
         self._can_channel = can_channel
         self._max_joint_delta = self._validate_delta_setting(max_joint_delta)
         self._driver.set_joint_limits_enabled(True)
@@ -134,6 +136,43 @@ class NeroArm:
         ``is_connected()`` 已为假也让 Driver 清理其内部资源。
         """
         self._driver.disconnect()
+        if self._observed_send_bus is not None:
+            self._observed_send_bus.send = self._original_bus_send
+            self._observed_send_bus = self._original_bus_send = None
+
+    def observe_can_send(self, observer) -> None:
+        """为 agent 排障记录实际 Bus.send 的逐帧返回/异常，不改变发送语义。
+
+        SDK 的 CanComm.send 会吞下 ENOBUFS/ENETDOWN，last_error 又可能被
+        下一帧成功发送或接收清除。因此需要在 python-can 边界记录异常，
+        不能只在七轴目标发送结束时读取一次 get_comm_error()。
+        observer 只允许内存入队；本方法不重试、不延时、不设置总线参数。
+        """
+        import socket
+
+        bus = self._driver.get_context().get_comm().send_bus
+        # SDK 默认 local_loopback=False，独立抓包 socket 因此看不到本机
+        # 目标帧。仅对此 SDK socket 开启内核回环，不改变机器人协议或接口
+        # 队列；SDK 自身 receive_own_messages=False，不会把自己的目标当反馈。
+        bus.socket.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_LOOPBACK, 1)
+        original = bus.send
+        self._observed_send_bus, self._original_bus_send = bus, original
+
+        def send(message, *args, **kwargs):
+            started = time.time()
+            error = None
+            try:
+                return original(message, *args, **kwargs)
+            except Exception as exc:
+                error = {"type": type(exc).__name__, "message": str(exc),
+                         "error_code": getattr(exc, "error_code", None)}
+                raise  # 仍交给 SDK 原有处理；本轮只增加观测，不偷偷改变运动。
+            finally:
+                observer(send_started_unix=started, send_finished_unix=time.time(),
+                         can_id=f"0x{message.arbitration_id:03X}",
+                         data=bytes(message.data).hex(), error=error)
+
+        bus.send = send
 
     def is_connected(self) -> bool:
         """返回官方 Driver 报告的 CAN 连接状态。

@@ -156,7 +156,7 @@ class Robo:
             raise RuntimeError("PTP 仅用于启动准备 Startup PTP requires cell 000")
         return self._move(target_joints=target_joints, target_tcp=target_tcp, startup_ptp=True)
 
-    def _move(self, *, target_joints=None, target_tcp=None, wait=True, startup_ptp=False):
+    def _move(self, *, target_joints=None, target_tcp=None, wait=True, startup_ptp=False, ptp=False):
         if not isinstance(wait, bool):
             raise ValueError("wait 必须为布尔值 wait must be bool")
         state = self.state()
@@ -174,6 +174,10 @@ class Robo:
             if startup_ptp:
                 plan = self._planner.plan_startup_ptp(state["joints"], target_joints=target_joints,
                                                      target_tcp=target_tcp)
+            elif ptp:
+                # agent 只给 task 系虚拟 TCP 位姿。规划器内部转换到法兰、
+                # 求一次最终 IK；执行器只发送一个关节目标，不沿途分段下发。
+                plan = self._planner.plan_ptp(state["joints"], target_tcp=target_tcp)
             else:
                 plan = self._planner.plan("right", state["joints"], target_joints=target_joints,
                                           waypoints=[transform(target_tcp)] if target_tcp is not None else None,
@@ -184,9 +188,9 @@ class Robo:
         handle = MotionHandle(self, started["motion_id"], self._cell_id)
         return handle.wait() if wait else handle
 
-    def move_J(self, target_joints, wait=True):
-        """七轴关节目标，rad；几何分段以普通 J 逐段到位 Joint point-to-point."""
-        return self._move(target_joints=target_joints, wait=wait)
+    def move_J(self, target_tcp, wait=True):
+        """task 系虚拟 TCP 位姿；一次 IK + 关节 PTP，SE(3)/xyz-rpy，m/rad。"""
+        return self._move(target_tcp=transform(target_tcp), wait=wait, ptp=True)
 
     def move_L(self, target_tcp, wait=True):
         """task 系虚拟 TCP 直线插值，普通 J 分段近似；SE(3)/xyz-rpy，m/rad；规划失败停止。"""

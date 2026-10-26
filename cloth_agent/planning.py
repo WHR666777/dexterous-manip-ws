@@ -15,7 +15,7 @@ from .geometry import interpolate_poses, tcp_to_flange, transform
 
 # 与 teleop 的启动回记录位姿一致：PTP 允许较大的整体变化量，不能套用
 # 连续 IK/分段运动的单步限制；官方关节限位仍会独立检查。
-STARTUP_PTP_MAX_JOINT_DELTA_RAD = float(2 * np.pi)
+PTP_MAX_JOINT_DELTA_RAD = float(2 * np.pi)
 
 
 class PlanningError(ValueError):
@@ -102,27 +102,34 @@ class Planner:
         self._lock = Lock()  # Pinocchio model data are mutable.
 
     def plan_startup_ptp(self, seed, *, target_joints=None, target_tcp=None):
-        """固定启动流程专用：只生成起点/终点，固件负责 PTP 平滑，不做 TOPPRA。"""
+        """保留固定启动流程的内部关节入口，不向 agent 公开关节目标。"""
+        return self.plan_ptp(seed, target_joints=target_joints, target_tcp=target_tcp,
+                             mode="startup_ptp")
+
+    def plan_ptp(self, seed, *, target_joints=None, target_tcp=None, mode="ptp"):
+        """只生成起点/终点；TCP 目标求一次 IK，固件负责 PTP 平滑，不做 TOPPRA。"""
+        if mode not in {"ptp", "startup_ptp"}:
+            raise PlanningError("PTP 运动类型无效 Invalid PTP mode")
         with self._lock:
-            seed = joint_vector(seed, "startup seed")
+            seed = joint_vector(seed, "PTP seed")
             if (target_joints is None) == (target_tcp is None):
-                raise PlanningError("启动 PTP 必须提供一个目标 Provide one startup PTP target")
+                raise PlanningError("PTP 必须提供一个目标 Provide one PTP target")
             if target_tcp is not None:
                 settings = self.arms["right"]
                 flange = tcp_to_flange(target_tcp, settings["task_from_base"],
                                        settings["flange_from_tcp"])
-                # 一次求解最终姿态，以回位后的实测关节为参考选择相近的解；
+                # 一次求解最终姿态，以当前实测关节为参考选择相近的解；
                 # 不再沿 TCP 直线逐点求 IK。使用 PTP 上限，避免把整体调整
                 # 误判为连续 IK 的单周期跳变；IK 的限位与 FK 精度检查不变。
-                solver = NeroIK(max_joint_delta_rad=STARTUP_PTP_MAX_JOINT_DELTA_RAD)
+                solver = NeroIK(max_joint_delta_rad=PTP_MAX_JOINT_DELTA_RAD)
                 target = solver.solve(flange, seed)
                 if target is None:
-                    raise PlanningError("初始抓取姿态 IK 失败 Startup PTP IK failed",
+                    raise PlanningError("目标位姿 IK 失败 PTP IK failed",
                                         diagnostics=solver.last_diagnostics.copy())
             else:
-                target = joint_vector(target_joints, "startup target")
-            if np.max(np.abs(target - seed)) > STARTUP_PTP_MAX_JOINT_DELTA_RAD:
-                raise PlanningError("启动 PTP 关节变化过大 Startup PTP joint delta exceeded")
+                target = joint_vector(target_joints, "PTP target")
+            if np.max(np.abs(target - seed)) > PTP_MAX_JOINT_DELTA_RAD:
+                raise PlanningError("PTP 关节变化过大 PTP joint delta exceeded")
             # 插值点只检查关节限位与 TCP 工作区，绝不下发给机器人。
             # 这不是固件实际路径预测，也没有场景避碰保证。
             checked = [seed.copy()]
@@ -132,7 +139,7 @@ class Planner:
             # 复用现有 MotionPlan/到位监督协议。时间字段仅满足存储格式，
             # 不代表 PTP 用时或速度；执行器只发送 endpoints[1] 一次。
             return MotionPlan("right", [0, 1 / self.config["control_hz"]],
-                              endpoints, np.zeros((2, 7)), "startup_ptp",
+                              endpoints, np.zeros((2, 7)), mode,
                               joint_waypoints=endpoints)
 
     def plan(self, arm, seed, *, waypoints=None, mode="cartesian", target_joints=None):
