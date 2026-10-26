@@ -372,7 +372,7 @@ python -m cloth_agent hold-status
 临时覆盖仍可使用 `run/serve --output-dir 目录`、`monitor 目录` 或 `hold/hold-status/release-hold 路径/session.json`，显式参数优先于配置。
 需要改测试目标时修改 `--task`；仅手动使用外部 MCP client 时才使用 `serve`。
 
-`robo` 提供状态、RGB-D、附图、像素反投影、top-down 位姿、`move_J` / `move_L`、拇指/食指开合及普通暂停；固定知识随启动 prompt 注入，没有 info、公开 plan/execute 或抓布判定接口。操作约定见 [robot_operations.md](cloth_agent/robot_operations.md)。人工 `hold` 绕过 MCP/Codex，锁定动作后持续发送固定关节目标，agent 结束后保持进程仍运行。只有机械臂已安全落座或获得外部支撑后，操作者才能 `release-hold`。旧 `estop` 已禁用：Nero 阻尼急停现场出现下落，不用于悬停。人工静止保持已由操作者现场验证，记录见 `data/agent_runs/estop-idle-02/`，其中已连接真实设备、发送固定关节目标且记录的关节误差为 0；该记录没有执行运动 cell，不代替本次视觉抓取与运动中停止验证。保持操作见 [人工保持说明](docs/cloth_estop_test.md)。
+`robo` 提供状态、RGB-D、附图、像素反投影、top-down 位姿、`move_J` / `move_L`、拇指/食指开合及普通暂停；固定知识随启动 prompt 注入，没有 info、公开 plan/execute 或抓布判定接口。操作约定见 [robot_operations.md](cloth_agent/robot_operations.md)。人工 `hold` 绕过 MCP/Codex，锁定动作后发送一次普通 J 固定关节目标并持续监督反馈，agent 结束后保持进程仍运行。只有机械臂已安全落座或获得外部支撑后，操作者才能 `release-hold`。旧 `estop` 已禁用：Nero 阻尼急停现场出现下落，不用于悬停。人工静止保持已由操作者现场验证，记录见 `data/agent_runs/estop-idle-02/`，其中已连接真实设备、发送固定关节目标且记录的关节误差为 0；该记录没有执行运动 cell，不代替本次视觉抓取与运动中停止验证。保持操作见 [人工保持说明](docs/cloth_estop_test.md)。
 
 在另一个终端启动只读观察页，默认读取同一配置中的本轮目录：
 

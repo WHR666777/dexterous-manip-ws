@@ -62,7 +62,7 @@ def main(argv=None):
                         configured_output_dir(args.config or DEFAULT_CONFIG) / "session.json")
         supported = False
         if args.command == "release-hold":
-            # 这是停止持续位置下发，之后是否继续保持取决于硬件状态，不能假定。
+            # 这是结束位置保持监督与设备连接，之后是否继续保持取决于硬件，不能假定。
             # 让现场操作者在机械臂已安全落座/外部支撑后明确确认；不自动 reset/失能。
             supported = input("结束保持可能失去支撑。确认机械臂已安全落座或获得外部支撑，"
                               "输入 SUPPORTED 确认 Release hold: ").strip() == "SUPPORTED"

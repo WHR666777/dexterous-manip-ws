@@ -1,8 +1,8 @@
 """控制进程内的右臂设备与运动执行。
 
-普通 I/O、轨迹检查、图像保存运行在普通服务线程；独立轨迹线程保持固定发送周期。
+普通 I/O、轨迹检查、图像保存运行在普通服务线程；独立轨迹线程定期读取反馈。
 人工停止由控制主线程独立锁定，
-读取一次实测关节作为固定目标，并周期性发送 JS 位置保持；不调用电子阻尼急停。
+读取一次实测关节作为固定目标，发送普通 J 位置保持并监督；不调用电子阻尼急停。
 SDK 已经执行中的调用不能撤回；软件保持不构成硬件停止时限或失电保持保证。
 """
 
@@ -49,6 +49,7 @@ class RobotController:
         self._sampled_at = None
         self._hand_read_at = None
         self._hold = None
+        self._hold_sent = False
         self._stable_since = None
         self._hold_feedback = None
         self._hold_confirmed = False
@@ -59,6 +60,7 @@ class RobotController:
         self._manual_feedback = None
         self._manual_stable_since = None
         self._manual_confirmed = False
+        self._manual_sent = False
         self.settings = (config or {}).get("arms", {}).get("right", {})
         self.motion_settings = (config or {}).get("motion", {})
         self.period = 1. / (config or {}).get("control_hz", 20.)
@@ -115,7 +117,7 @@ class RobotController:
         if self.settings.get("hand_speed") is not None:
             self.hand.set_speed(self.settings["hand_speed"])
         # 与已正常工作的遥操作复用相同的反馈轮询器。L20 的 fresh=True 会
-        # 发请求并等待，不能放到机械臂 JS 目标发送的周期里。
+        # 发请求并等待，不能放到机械臂的反馈监督周期里。
         self.hand_feedback = HandFeedbackPoller(self.hand, poll_hz=4., max_age_s=1.)
         self.hand_feedback.start()
         # 相机封装独立后台采集；普通请求只取最新完整快照，不阻塞人工请求接收。
@@ -170,6 +172,7 @@ class RobotController:
                              "read_at": self._hand_read_at, "freshness": "unknown",
                              "error": self._hand_error},
                     "motion": self._motion_result(), "fault": self.fault,
+                    "executor": "joint_position_J",
                     "manual_hold_latched": self.manual_stop.is_set(),
                     "manual_hold_report": deepcopy(self.manual_hold_report),
                     "manual_hold_target": (self._manual_target.tolist()
@@ -198,11 +201,11 @@ class RobotController:
         with self._arm_send_lock:
             if not self.manual_stop.is_set():
                 started = time.monotonic()
-                self.arm.move_js(q)
+                self.arm.move_joints(q, speed_percent=self.motion_settings["joint_speed_percent"])
                 sent_at = time.monotonic()
                 if self.on_control_sample is not None:
                     self.on_control_sample({
-                        "sent_at": sent_at,
+                        "sent_at": sent_at, "command_sent": True,
                         "send_interval_s": (None if self._last_send_at is None
                                             else sent_at - self._last_send_at),
                         "send_duration_s": sent_at - started,
@@ -212,6 +215,9 @@ class RobotController:
                         "motion_id": self.motion["motion_id"] if self.motion else None,
                     })
                 self._last_send_at = sent_at
+                self._hold_sent = True
+                return True
+        return False
 
     def pause(self, reason):
         with self._trajectory_lock:
@@ -227,6 +233,7 @@ class RobotController:
             # 读真实反馈作为新的固定目标；不继续原轨迹，也不松开 L20。
             q = self.arm.get_joint_positions()
             self._hold = q.copy()
+            self._hold_sent = False
             self._hold_confirmed = False
             self._stable_since = None
             self._hold_feedback = None
@@ -245,7 +252,7 @@ class RobotController:
         if not first_request:
             return self.snapshot()  # 幂等：保留第一次的目标及诊断，不重新捕获当前位置。
         report = {"requested_at": time.monotonic(), "reason": reason,
-                  "right": "not_connected", "mode": "fixed_joint_position",
+                  "right": "not_connected", "mode": "fixed_joint_position_J",
                   "stop_confirmed": False, "l20": "no_release_or_reset_command"}
         if self.connected:
             try:
@@ -262,14 +269,18 @@ class RobotController:
         return self.snapshot()
 
     def manual_hold_tick(self):
-        """独立人工路径持续重发同一目标，并记录有限的关节反馈稳定证据。"""
+        """独立人工路径发送一次普通 J 保持目标，再持续监督关节反馈。"""
         if not self.manual_stop.is_set() or self._manual_target is None:
             return
         try:
-            # 普通 I/O 故障或 worker/Codex 退出也不停止此路径。move_js 仍校验
+            # 普通 I/O 故障或 worker/Codex 退出也不停止此路径。位置发送仍校验
             # 使能/限位/反馈及 CAN 错误；不会自动使能、清错或放开电机。
-            with self._arm_send_lock:
-                self.arm.move_js(self._manual_target)
+            if not self._manual_sent:
+                with self._arm_send_lock:
+                    self.arm.move_joints(self._manual_target,
+                                         speed_percent=self.motion_settings["joint_speed_percent"])
+                self._manual_sent = True
+                self.manual_hold_report["last_send_at"] = time.monotonic()
             q = self.arm.get_joint_positions()
             tcp = self._feedback_tcp(q)
             error = float(np.max(np.abs(q - self._manual_target)))
@@ -285,10 +296,11 @@ class RobotController:
             with self._lock:
                 self._joints, self._tcp, self._sampled_at = q.copy(), tcp.tolist(), now
                 self.manual_hold_report.update(right="hold_target_sent", error=None,
-                                               joint_error_rad=error, last_send_at=now)
+                                               joint_error_rad=error, last_feedback_at=now)
         except Exception as exc:
             # 反馈失效/使能丢失/CAN 故障时不能声称悬停。保留固定目标供下周期
-            # 重试；绝不退化调用 electronic_emergency_stop，也不追随下落重抓目标。
+            # 重试未成功的发送；已成功发送后不因反馈偏差反复覆盖固件目标。
+            # 绝不退化调用 electronic_emergency_stop，也不追随下落重抓目标。
             self._manual_stable_since, self._manual_confirmed = None, False
             with self._lock:
                 self.manual_hold_report.update(right="hold_failed", error=str(exc))
@@ -302,31 +314,56 @@ class RobotController:
         if not self.connected or self.manual_stop.is_set():
             return
         self._measure()
+        if self.on_control_sample is not None:
+            # J 目标之间不会连续发命令，仍保存每个监督周期的真实反馈，便于
+            # 区分固件运动过程、目标下发时刻及停稳后的误差。
+            self.on_control_sample({"command_sent": False, "sent_at": None,
+                                    "sampled_at": self._sampled_at,
+                                    "actual_joints": self._joints.tolist(),
+                                    "tcp": deepcopy(self._tcp),
+                                    "target_joints": (self._hold.tolist()
+                                                      if self._hold is not None else None)})
         motion = self.motion
         if motion and motion["status"] == "running" and not self.fault:
-            motion["elapsed"] += min(delta, self.period)  # 慢周期延长轨迹，不突发补发。
-            self._hold = motion["plan"].sample(motion["elapsed"])
-            self._send(self._hold)
-            if motion["elapsed"] >= motion["plan"].duration:
-                error = float(np.max(np.abs(self._joints - motion["plan"].positions[-1])))
-                # 轨迹时间结束不等于机械臂已稳定。终点保持连续确认后才完成句柄，
-                # 避免下一段使用仍在变化的反馈作为规划起点。
+            if not motion["target_sent"]:
+                self._hold = motion["plan"].joint_waypoints[motion["waypoint_index"]].copy()
+                self._hold_sent = False
+                self._hold_confirmed, self._stable_since, self._hold_feedback = False, None, None
+                if not self._send(self._hold):
+                    return  # 人工线程已锁定；不再推进普通目标。
+                motion["target_sent"], motion["target_sent_at"] = True, time.monotonic()
+            error = float(np.max(np.abs(self._joints - self._hold)))
+            final_waypoint = motion["waypoint_index"] == len(motion["plan"].joint_waypoints) - 1
+            if final_waypoint:
+                # 整条运动结束才确认反馈稳定，避免提前向 cell 报告 completed。
                 self._confirm_hold(error)
-                if self._hold_confirmed:
+                reached = self._hold_confirmed
+            else:
+                # 中间点达到关节容差即推进，不再为每段额外等待 0.2 秒稳定。
+                # 保留实际到位条件；此处不改变 J 模式或改为按时间连续发送。
+                reached = error <= self.motion_settings["joint_tolerance_rad"]
+            if reached:
+                if final_waypoint:
                     with self._lock:
                         if not self.manual_stop.is_set() and motion["status"] == "running":
                             motion.update(status="completed", reached=True, joint_error_rad=error,
                                           actual_joints=self._joints.tolist())
-                elif motion["elapsed"] > motion["plan"].duration + self.motion_settings["completion_timeout_s"]:
-                    # 超时只报告失败并停止推进，持续保持原终点；不把下坠后的
-                    # 实测位置重新捕获为目标，避免再次向下迁移保持点。
-                    self.cell_paused = True
-                    with self._lock:
-                        if not self.manual_stop.is_set():
-                            motion.update(status="failed", reason="机械臂到位超时 Motion arrival timed out",
-                                          joint_error_rad=error)
+                else:
+                    # 下一监督周期发送下一个几何目标，不插入停稳等待。
+                    # 密集 TOPPRA 样本仍只用于规划检查。
+                    motion["waypoint_index"] += 1
+                    motion["target_sent"] = False
+            elif time.monotonic() - motion["target_sent_at"] > self.motion_settings["completion_timeout_s"]:
+                self.cell_paused = True
+                with self._lock:
+                    if not self.manual_stop.is_set():
+                        motion.update(status="failed", reason="机械臂分段到位超时 Joint waypoint arrival timed out",
+                                      joint_error_rad=error, actual_joints=self._joints.tolist())
         elif self._hold is not None:
-            self._send(self._hold)
+            # 普通 J 成功接收目标后由固件保持；不能像 JS 那样每周期重复发，
+            # 否则可能反复覆盖内部运动。仅未成功发送的固定目标会再次尝试。
+            if not self._hold_sent:
+                self._send(self._hold)
             error = float(np.max(np.abs(self._joints - self._hold)))
             self._confirm_hold(error)
 
@@ -352,6 +389,7 @@ class RobotController:
                 self.cell_paused = True
                 if self.connected and self._hold is None:
                     self._hold = self.arm.get_joint_positions().copy()
+                    self._hold_sent = False
             except Exception as exc:
                 reason += f"；保持请求失败 Hold request failed: {exc}"
             with self._lock:
@@ -368,13 +406,19 @@ class RobotController:
         plan = MotionPlan.from_dict(payload)
         if plan.arm != "right":
             raise ValueError("第一版只允许右臂 Only right arm is enabled")
-        self.validator._check_path("right", plan.positions)
-        sampled = plan.sample(np.linspace(0, plan.duration, max(100, len(plan.times) * 2)))
-        self.validator._check_path("right", sampled)
-        velocity, acceleration = plan.peak_rates()
-        if (np.any(velocity > np.asarray(self.settings["velocity_limits"]) * 1.00001)
-                or np.any(acceleration > np.asarray(self.settings["acceleration_limits"]) * 1.00001)):
-            raise ValueError("轨迹超过配置上限 Trajectory exceeds configured limits")
+        if plan.mode not in {"joint", "cartesian"} or plan.joint_waypoints is None:
+            raise ValueError("普通 J 执行需要几何分段点 Joint executor requires geometric waypoints")
+        # 发送的是真正的几何分段点，不是计时样本。这里仅复核
+        # 每段关节插值的限位/工作区和最大跨度；不把固件内部路径当作已知曲线。
+        self.validator._check_path("right", plan.joint_waypoints)
+        starts, ends = plan.joint_waypoints[:-1], plan.joint_waypoints[1:]
+        if np.max(np.abs(ends - starts)) > self.motion_settings["max_ik_step_rad"]:
+            raise ValueError("J 分段跨度过大 Joint waypoint step exceeded")
+        segments = np.linspace(starts, ends, 10, axis=1).reshape(-1, 7)
+        self.validator._check_path("right", segments)
+        # 普通 J 不执行 TOPPRA 的计时样本和样条，设备进程只复核实际下发的
+        # 几何目标及分段。密集样条仍由 worker 在规划时检查，不能在这里用
+        # 无关的重复计算拖慢 CAN 接收，也不能将样条限速误称为固件限速。
         motion_id = uuid.uuid4().hex
         plans = self.directory / "motions"
         plans.mkdir(exist_ok=True)
@@ -396,7 +440,8 @@ class RobotController:
                     raise ValueError("已有运动正在执行 A motion is already running")
                 self._hold_confirmed, self._stable_since = False, None
                 self._hold_feedback = None
-                self.motion = {"plan": plan, "elapsed": 0., "status": "running", "reached": False,
+                self.motion = {"plan": plan, "waypoint_index": 1, "target_sent": False,
+                               "target_sent_at": None, "status": "running", "reached": False,
                                "motion_id": motion_id, "reason": "", "joint_error_rad": None,
                                "actual_joints": q.tolist()}
                 return self._motion_result()

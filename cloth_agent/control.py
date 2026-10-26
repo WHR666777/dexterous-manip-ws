@@ -1,7 +1,7 @@
 """独立控制进程：普通服务与人工位置保持分别使用通道和处理路径。
 
 普通 Pipe 由一个服务线程处理；普通轨迹由独立线程按固定周期执行。
-主线程接人工命令并独立周期下发固定保持目标。
+主线程接人工命令，独立发送一次普通 J 保持目标并周期监督反馈。
 生成源码不在这里执行。worker 只能发有限 robo 数据请求，不能发送任意函数。
 """
 
@@ -53,8 +53,9 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
             robot.on_control_sample = control_samples.put
 
             def run_motion():
-                # 轨迹时钟只由 monotonic 定时器驱动，不能由 Pipe 请求唤醒次数
-                # 决定。此线程不查询 L20、不压缩图像、不验证整条轨迹、不写文件。
+                # 反馈监督只由 monotonic 定时器驱动，不能由 Pipe 请求唤醒次数
+                # 决定。普通 J 仅在分段切换时发送；此线程不查询 L20、不压缩
+                # 图像、不验证整条轨迹、不写文件。
                 previous = next_tick = time.monotonic()
                 while not motion_shutdown.is_set() and not released.is_set():
                     now = time.monotonic()
@@ -85,7 +86,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                         selector.register(owner_connection.fileno(), selectors.EVENT_READ, True)
                         selector.register(worker_connection.fileno(), selectors.EVENT_READ, False)
                         while not released.is_set():
-                            # 轨迹线程只提交内存快照；磁盘慢也不能拖长 JS 发送间隔。
+                            # 轨迹线程只提交内存快照；磁盘慢也不能拖长关节反馈监督周期。
                             while True:
                                 try:
                                     sample = control_samples.get_nowait()
@@ -110,7 +111,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                                 except EOFError:
                                     if manual_hold.is_set():
                                         # 人工停止会结束 worker；这个预期 EOF 不能带走
-                                        # 位置保持进程或设备连接。保留其余仍有效的通道。
+                                        # 位置保持监督进程或设备连接。保留其余仍有效的通道。
                                         selector.unregister(connection.fileno())
                                         continue
                                     raise
@@ -139,7 +140,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
             # 启动信息只包含固定 PID/入口和当前设备连接状态，不复制 SDK 对象到其他进程。
             owner_connection.send({"ok": True, "result": {
                 "pid": os.getpid(), "manual_socket": endpoint,
-                "manual_protocol": "position-hold-v1", **robot.snapshot()}})
+                "manual_protocol": "position-hold-J-v2", **robot.snapshot()}})
             ordinary = Thread(target=serve_ordinary, name="cloth-control-io", daemon=True)
             motion_thread = Thread(target=run_motion, name="cloth-motion", daemon=True)
             motion_thread.start()
@@ -167,7 +168,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                         continue
                     try:
                         request = json.loads(data)
-                        if request["protocol"] != "position-hold-v1":
+                        if request["protocol"] != "position-hold-J-v2":
                             raise ValueError("人工接口版本不匹配 Manual protocol mismatch")
                         operation = request["operation"]
                         if operation == "hold":
@@ -210,10 +211,10 @@ def request_manual(session_file, operation, reason="操作者请求位置保持 
                    *, supported=False, timeout_s=2.):
     """人工入口直接发往新控制进程；拒绝旧会话，防止误触阻尼急停。"""
     metadata = json.loads(Path(session_file).read_text())
-    if metadata.get("manual_protocol") != "position-hold-v1":
+    if metadata.get("manual_protocol") != "position-hold-J-v2":
         raise ValueError("旧会话不支持位置保持 Restart the server with the updated code")
     endpoint = metadata["manual_socket"]
-    payload = json.dumps({"protocol": "position-hold-v1", "operation": operation,
+    payload = json.dumps({"protocol": "position-hold-J-v2", "operation": operation,
                           "reason": reason, "supported": supported}, ensure_ascii=False).encode()
     if len(payload) > 4096:
         raise ValueError("人工请求过长 Manual request too long")

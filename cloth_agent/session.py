@@ -117,7 +117,7 @@ class TaskSession:
                     "description": "机器人任务会话 Robot task session; task outcome needs visual evidence"}
 
     def _settle_control(self, state):
-        # 控制进程在普通线程持续发送固定保持目标；宿主只做短查询等待确认。
+        # 控制进程发送普通 J 固定保持目标并监督反馈；宿主只做短查询等待确认。
         # 不等到位时不把 cell 结果交给模型，人工停止/故障则立即终止本次任务。
         deadline = time.monotonic() + 3
         while not state["quiescent"]:
@@ -144,7 +144,7 @@ class TaskSession:
         # 第一段只回记录关节，第二段到保持记录法兰位置/yaw 的示教抓取倾角。
         source = (
             # 与 teleop 回记录位姿一致：已在容差内就跳过第一段，避免为原地
-            # 等待构造一条零位移轨迹、无必要地切换到 JS 并立刻开始下一段。
+            # 等待构造一条零位移轨迹、无必要地下发目标并立刻开始下一段。
             "startup_joints = np.array(" + repr(settings["start_joint_positions"]) + ", dtype=float)\n"
             "startup_state = robo.state()\n"
             "if np.max(np.abs(np.array(startup_state['joints']) - startup_joints)) > "
@@ -311,7 +311,15 @@ class TaskSession:
                 if not self.control.process.is_alive():
                     self.abort("控制进程退出 Control process exited", status="failed")
                 elif self.control.failed.is_set():
-                    self.abort("控制进程报告设备故障 Control process reported a device/communication fault", status="failed")
+                    # Event 只表示故障存在，具体首发错误由控制快照携带。
+                    # 不能让监视线程抢先用泛化描述结束任务，掩盖 worker 已收到的
+                    # stale feedback/CAN 故障；保留原因供终端和 result.json review。
+                    try:
+                        state = self.control.request("status")
+                        detail = state.get("fault") or "故障细节缺失 Device fault detail unavailable"
+                    except (OSError, EOFError, TimeoutError, RuntimeError) as exc:
+                        detail = str(exc)
+                    self.abort("控制设备故障 Device/control fault: " + detail, status="failed")
                 elif not self.worker.process.is_alive():
                     self.abort("worker 退出 Python worker exited", status="failed")
                 elif time.monotonic() - self._started_at >= self.task_timeout_s:

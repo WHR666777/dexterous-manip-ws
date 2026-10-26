@@ -175,11 +175,11 @@ class Robo:
         return handle.wait() if wait else handle
 
     def move_J(self, target_joints, wait=True):
-        """七轴关节目标，rad；内部关节规划与 TOPPRA；默认等待 Joint point-to-point."""
+        """七轴关节目标，rad；几何分段以普通 J 逐段到位 Joint point-to-point."""
         return self._move(target_joints=target_joints, wait=wait)
 
     def move_L(self, target_tcp, wait=True):
-        """task 系虚拟 TCP 直线运动；SE(3) 或 xyz/rpy，m/rad；失败不降级为关节路径。"""
+        """task 系虚拟 TCP 直线插值，普通 J 分段近似；SE(3)/xyz-rpy，m/rad；规划失败停止。"""
         return self._move(target_tcp=target_tcp, wait=wait)
 
     def open_gripper(self):

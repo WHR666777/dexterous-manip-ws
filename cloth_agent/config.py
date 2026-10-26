@@ -115,8 +115,13 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
     for name in ("max_ik_step_rad", "position_step_m", "rotation_step_rad", "joint_step_rad"):
         positive(config["motion"][name], name)
     # 反馈到位与暂停收尾仍由设备执行层判断；默认值只补到内存，不改写现场标定文件。
-    for name, default in (("joint_tolerance_rad", .02), ("completion_timeout_s", 30.)):
+    for name, default in (("joint_tolerance_rad", .003), ("completion_timeout_s", 30.)):
         config["motion"][name] = positive(config["motion"].get(name, default), name)
+    # 普通 J 的固件速度百分比，与 TOPPRA 使用的 rad/s 上限不是同一物理量。
+    # 使用本次实机单目标检查已验证的 10%；不由 agent cell 临时覆盖。
+    speed = config["motion"].setdefault("joint_speed_percent", 10)
+    if isinstance(speed, bool) or not isinstance(speed, int) or not 1 <= speed <= 100:
+        raise ValueError("motion.joint_speed_percent must be an integer in [1, 100].")
     if not config["arms"] or any(name not in ("left", "right") for name in config["arms"]):
         raise ValueError("Configure left and/or right arms.")
     _load_calibration(config)

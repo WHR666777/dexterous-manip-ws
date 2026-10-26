@@ -31,6 +31,9 @@ class MotionPlan:
     positions: np.ndarray
     velocities: np.ndarray
     mode: str
+    # 保留 IK/关节插值产生的几何分段点。普通 J 执行器逐点发送、等待到位，
+    # 不能把 TOPPRA 的 10 ms 密集采样误当作固件的连续位置伺服接口。
+    joint_waypoints: np.ndarray | None = None
     _spline: CubicHermiteSpline = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -45,6 +48,14 @@ class MotionPlan:
                            (self.times, self.positions, self.velocities))):
             raise ValueError("Invalid timed joint trajectory.")
         self._spline = CubicHermiteSpline(self.times, self.positions, self.velocities)
+        if self.joint_waypoints is not None:
+            self.joint_waypoints = np.asarray(self.joint_waypoints, dtype=float).copy()
+            if (self.joint_waypoints.ndim != 2 or self.joint_waypoints.shape[1] != 7
+                    or len(self.joint_waypoints) < 2
+                    or not np.isfinite(self.joint_waypoints).all()
+                    or not np.allclose(self.joint_waypoints[0], self.positions[0], atol=1e-8, rtol=0)
+                    or not np.allclose(self.joint_waypoints[-1], self.positions[-1], atol=1e-8, rtol=0)):
+                raise ValueError("Invalid geometric joint waypoints.")
 
     @property
     def duration(self):
@@ -56,7 +67,8 @@ class MotionPlan:
     def as_dict(self):
         return {"arm": self.arm, "times": self.times.tolist(),
                 "positions": self.positions.tolist(), "velocities": self.velocities.tolist(),
-                "mode": self.mode}
+                "mode": self.mode, "joint_waypoints": (None if self.joint_waypoints is None
+                                                        else self.joint_waypoints.tolist())}
 
     def peak_rates(self):
         """Exact velocity/acceleration extrema of the stored cubic pieces."""
@@ -137,27 +149,40 @@ class Planner:
 
     def _check_path(self, arm, points):
         solver, settings = self.ik[arm], self.arms[arm]
+        points = np.asarray(points, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 7:
+            raise PlanningError("Path must contain seven-joint vectors.")
+        # 批量做数值/限位判断；固定标定矩阵与工作区只校验一次。原先逐点
+        # 重复 transform() 会为每个点反复做 allclose/det，长启动路径约需
+        # 半秒，挤占同一设备进程中的 CAN 接收线程，触发真实反馈过期保护。
+        valid = (np.isfinite(points).all(axis=1)
+                 & (points >= solver.limits[:, 0]).all(axis=1)
+                 & (points <= solver.limits[:, 1]).all(axis=1))
+        if not valid.all():
+            raise PlanningError("Path violates joint limits.", index=int(np.flatnonzero(~valid)[0]))
+        if settings["workspace"] is None:
+            return
+        bounds = np.asarray(settings["workspace"], dtype=float)
+        if bounds.shape != (2, 3) or not np.isfinite(bounds).all() or np.any(bounds[0] >= bounds[1]):
+            raise PlanningError("workspace must be [minimum_xyz, maximum_xyz].")
+        task_base = transform(settings["task_from_base"])
+        flange_tcp = transform(settings["flange_from_tcp"])
         for index, q in enumerate(points):
-            if not solver.in_limits(q):
-                raise PlanningError("Path violates joint limits.", index=index)
-            if settings["workspace"] is not None:
-                tcp = (transform(settings["task_from_base"]) @ solver.forward(q)
-                       @ transform(settings["flange_from_tcp"]))[:3, 3]
-                bounds = np.asarray(settings["workspace"], dtype=float)
-                if bounds.shape != (2, 3) or not np.isfinite(bounds).all() or np.any(bounds[0] >= bounds[1]):
-                    raise PlanningError("workspace must be [minimum_xyz, maximum_xyz].")
-                if np.any(tcp < bounds[0]) or np.any(tcp > bounds[1]):
-                    raise PlanningError("TCP leaves the configured task workspace.", index=index)
+            tcp = (task_base @ solver.forward(q) @ flange_tcp)[:3, 3]
+            if np.any(tcp < bounds[0]) or np.any(tcp > bounds[1]):
+                raise PlanningError("TCP leaves the configured task workspace.", index=index)
 
     def _retime(self, arm, points, mode):
         import toppra as ta
         from toppra import algorithm, constraint
 
+        # 只删除真正相同的点；不能按到位容差删除细小笛卡尔位移。
         keep = np.r_[True, np.max(np.abs(np.diff(points, axis=0)), axis=1) > 1e-10]
         points = points[keep]
         if len(points) == 1:
             return MotionPlan(arm, [0, 1 / self.config["control_hz"]],
-                              np.repeat(points, 2, axis=0), np.zeros((2, 7)), mode)
+                              np.repeat(points, 2, axis=0), np.zeros((2, 7)), mode,
+                              joint_waypoints=np.repeat(points, 2, axis=0))
         settings = self.arms[arm]
         velocity = joint_vector(settings["velocity_limits"], "velocity_limits")
         acceleration = joint_vector(settings["acceleration_limits"], "acceleration_limits")
@@ -178,7 +203,7 @@ class Planner:
         duration = float(trajectory.duration) * scale
         times = np.linspace(0, duration, max(3, int(np.ceil(duration / .01)) + 1))
         plan = MotionPlan(arm, times, trajectory(times / scale),
-                          trajectory(times / scale, 1) / scale, mode)
+                          trajectory(times / scale, 1) / scale, mode, joint_waypoints=points)
         # Retiming interpolation can introduce small extrema. Slow the final
         # stored cubic by its exact extrema, rather than claiming TOPPRA's
         # constraints also bound a different interpolation automatically.
@@ -187,5 +212,5 @@ class Planner:
                          float(np.sqrt(np.max(peak_a / acceleration)))) * 1.001
         if correction > 1:
             plan = MotionPlan(arm, times * correction, plan.positions,
-                              plan.velocities / correction, mode)
+                              plan.velocities / correction, mode, joint_waypoints=plan.joint_waypoints)
         return plan

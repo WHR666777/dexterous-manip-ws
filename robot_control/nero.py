@@ -841,6 +841,12 @@ class NeroArm:
             self._driver.set_speed_percent(speed)
         self._driver.move_j(command.tolist())
 
+        # 与 JS 路径相同：固定 SDK 会缓存部分 CAN 发送错误而不抛异常，
+        # 普通 J 单次下发也必须将该故障报告给调用方。
+        error = self._driver.get_comm_error()
+        if error is not None:
+            raise RuntimeError(f"Nero joint send failed on {self._can_channel}: {error}")
+
     def move_js(self, joints: Any) -> None:
         """验证后以 JS（Follower）模式非阻塞地发送七轴关节目标。
 

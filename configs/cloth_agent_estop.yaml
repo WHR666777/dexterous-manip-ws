@@ -11,14 +11,16 @@ control_hz: 20
 startup:
   enabled: false
 calibration:
-  file: ../data/calibration/pinch-01/calibration_candidate.yaml
+  file: ../data/calibration/pinch-01/calibration.yaml
   arm: right
 motion:
+  # 普通 J 每段发送一次，反馈确认到位；百分比不是 rad/s。
+  joint_speed_percent: 10
   max_ik_step_rad: 0.3345329252
   joint_step_rad: 0.08
   position_step_m: 0.005
   rotation_step_rad: 0.034906585
-  joint_tolerance_rad: 0.02
+  joint_tolerance_rad: 0.003
   completion_timeout_s: 30.0
 observations:
   task_from_camera: null
