@@ -41,8 +41,10 @@ class RobotController:
         self._trajectory_lock = RLock()
         self.on_control_sample = None  # 控制进程注入内存队列入口；周期内不写磁盘。
         self._last_send_at = None
+        self._last_send_wall_at = None
         self._joints = None
         self._tcp = None
+        self._arm_status = None
         self._hand_feedback = None
         self._hand_error = "手部未连接 Hand not connected"
         self._hand_target = None
@@ -100,6 +102,7 @@ class RobotController:
                                        "SDK also returns False when feedback is missing")
                 q = self.arm.get_joint_positions()
                 sdk_pose = transform(self.arm.get_flange_pose())
+                arm_status = self._read_arm_status()  # 后续 J 到位监督也依赖状态帧，启动时一并等待。
                 break
             except RuntimeError as exc:
                 if time.monotonic() >= deadline:
@@ -109,6 +112,9 @@ class RobotController:
                         f"CAN={self.settings['can_channel']}; last feedback: {exc}"
                     ) from exc
                 time.sleep(.05)
+        # 已收到新鲜状态帧后立即解释固件故障，不把真实故障混成“反馈等待
+        # 超时”，也不先连接 L20/相机再报错。此时尚未发任何机械臂运动目标。
+        self._check_arm_status(arm_status, phase="连接预检 Startup preflight")
         position_error, angle_error = pose_error(self.validator.ik["right"].forward(q), sdk_pose)
         if position_error > .01 or angle_error > np.deg2rad(5):
             raise RuntimeError(f"FK/SDK 预检不一致 Preflight mismatch: {position_error} m, {angle_error} rad")
@@ -132,6 +138,7 @@ class RobotController:
     def _measure(self):
         if not self.connected:
             return
+        arm_status = self._read_arm_status()
         q = self.arm.get_joint_positions()
         tcp = self._feedback_tcp(q)
         now = time.monotonic()
@@ -146,7 +153,40 @@ class RobotController:
             hand_feedback, hand_error = None, str(exc)
         with self._lock:
             self._joints, self._tcp, self._sampled_at = q.copy(), tcp.tolist(), now
+            self._arm_status = arm_status
             self._hand_feedback, self._hand_error = hand_feedback, hand_error
+        self._check_arm_status(arm_status, phase="反馈监督 Motion supervision")
+
+    @staticmethod
+    def _check_arm_status(status, *, phase):
+        """固件状态与 Python IK 结果分开解释；保留异常，交现场操作流程恢复。"""
+        if status["arm_status"] == 0:
+            return
+        # NO_SOLUTION 在连接时就可能存在，不能推断是本次尚未执行的初始
+        # 回位失败，也不能仅凭 motion_status=0 就把整个控制器认定为正常。
+        detail = ("无解 NO_SOLUTION；这是固件状态，不是本次 Python IK 的返回值"
+                  if status["arm_status"] == 2 else status["arm_status_name"])
+        raise RuntimeError(
+            f"Nero 固件报告异常 Firmware arm fault during {phase}: {detail}; "
+            f"status={status}；请通过现场操作流程排查并恢复正常状态后重新启动 "
+            "Operator recovery required; no automatic reset/enable"
+        )
+
+    def _read_arm_status(self):
+        """读取 CAN 状态帧；到位判定必须使用新鲜反馈，不能沿用上一段的缓存。"""
+        from robot_control.nero import NERO_MOTOR_FEEDBACK_MAX_AGE_S
+
+        message = self.arm.get_raw_arm_status()
+        # 与电机反馈相同，SDK 的接收时间戳是 Unix 秒。此时间要与命令
+        # 下发的 time.time() 比较，不能与日志使用的 monotonic 混用。
+        received_at = float(message.timestamp)
+        if (not np.isfinite(received_at) or received_at <= 0
+                or time.time() - received_at > NERO_MOTOR_FEEDBACK_MAX_AGE_S):
+            raise RuntimeError(f"Nero 状态帧失效 Firmware status unavailable/stale: {received_at}")
+        return {name: int(getattr(message.msg, name)) for name in
+                ("ctrl_mode", "arm_status", "mode_feedback", "motion_status")} | {
+                    "received_at_unix": received_at,
+                    "arm_status_name": getattr(message.msg.arm_status, "name", "UNKNOWN")}
 
     def _feedback_tcp(self, q):
         from .geometry import transform
@@ -160,7 +200,7 @@ class RobotController:
         if self.motion is None:
             return None
         return {name: deepcopy(self.motion[name]) for name in
-                ("status", "reached", "reason", "motion_id", "joint_error_rad", "actual_joints")}
+                ("status", "reached", "reason", "motion_id", "joint_error_rad", "actual_joints", "diagnostics")}
 
     def snapshot(self):
         with self._lock:
@@ -172,6 +212,7 @@ class RobotController:
                              "read_at": self._hand_read_at, "freshness": "unknown",
                              "error": self._hand_error},
                     "motion": self._motion_result(), "fault": self.fault,
+                    "arm_status": deepcopy(self._arm_status),
                     "executor": "joint_position_J",
                     "manual_hold_latched": self.manual_stop.is_set(),
                     "manual_hold_report": deepcopy(self.manual_hold_report),
@@ -210,9 +251,13 @@ class RobotController:
                                      max_joint_delta=(STARTUP_PTP_MAX_JOINT_DELTA_RAD
                                                       if startup_ptp else None))
                 sent_at = time.monotonic()
+                self._last_send_wall_at = time.time()
                 if self.on_control_sample is not None:
                     self.on_control_sample({
                         "sent_at": sent_at, "command_sent": True,
+                        "sent_at_unix": self._last_send_wall_at,
+                        "arm_status_before_send": deepcopy(self._arm_status),
+                        "waypoint_index": self.motion["waypoint_index"] if self.motion else None,
                         "send_interval_s": (None if self._last_send_at is None
                                             else sent_at - self._last_send_at),
                         "send_duration_s": sent_at - started,
@@ -326,6 +371,9 @@ class RobotController:
             # 区分固件运动过程、目标下发时刻及停稳后的误差。
             self.on_control_sample({"command_sent": False, "sent_at": None,
                                     "sampled_at": self._sampled_at,
+                                    "arm_status": deepcopy(self._arm_status),
+                                    "motion_id": self.motion["motion_id"] if self.motion else None,
+                                    "waypoint_index": self.motion["waypoint_index"] if self.motion else None,
                                     "actual_joints": self._joints.tolist(),
                                     "tcp": deepcopy(self._tcp),
                                     "target_joints": (self._hold.tolist()
@@ -339,16 +387,25 @@ class RobotController:
                 if not self._send(self._hold):
                     return  # 人工线程已锁定；不再推进普通目标。
                 motion["target_sent"], motion["target_sent_at"] = True, time.monotonic()
+                motion["target_sent_wall_at"] = self._last_send_wall_at
             error = float(np.max(np.abs(self._joints - self._hold)))
+            # 普通 J 自带运动规划。“进入我们设定的 0.003 rad 容差”并不等于
+            # 固件已经完成上一目标；此前在此时立刻覆盖目标，实机出现新目标
+            # 下发后仍停在旧目标的问题。现在同时要求新的固件状态帧报告
+            # MOVE J（1）且已到位（0），再允许推进，不添加固定停留或重发。
+            # 此标志不是命令 ACK，所以仍必须同时核对实测关节与当前目标。
+            firmware_reached = (self._arm_status["received_at_unix"] > motion["target_sent_wall_at"]
+                                and self._arm_status["mode_feedback"] == 1
+                                and self._arm_status["motion_status"] == 0)
             final_waypoint = motion["waypoint_index"] == len(motion["plan"].joint_waypoints) - 1
             if final_waypoint:
                 # 整条运动结束才确认反馈稳定，避免提前向 cell 报告 completed。
-                self._confirm_hold(error)
+                self._confirm_hold(error if firmware_reached else float("inf"))
                 reached = self._hold_confirmed
             else:
-                # 中间点达到关节容差即推进，不再为每段额外等待 0.2 秒稳定。
+                # 中间点满足关节容差及固件到位即推进，不额外等待 0.2 秒稳定。
                 # 保留实际到位条件；此处不改变 J 模式或改为按时间连续发送。
-                reached = error <= self.motion_settings["joint_tolerance_rad"]
+                reached = error <= self.motion_settings["joint_tolerance_rad"] and firmware_reached
             if reached:
                 if final_waypoint:
                     with self._lock:
@@ -362,10 +419,27 @@ class RobotController:
                     motion["target_sent"] = False
             elif time.monotonic() - motion["target_sent_at"] > self.motion_settings["completion_timeout_s"]:
                 self.cell_paused = True
+                index = motion["waypoint_index"]
+                diagnostics = {
+                    "waypoint_index": index,
+                    "waypoint_count": len(motion["plan"].joint_waypoints) - 1,
+                    "target_joints": self._hold.tolist(),
+                    "actual_joints": self._joints.tolist(),
+                    "joint_errors_rad": (self._joints - self._hold).tolist(),
+                    "arm_status": deepcopy(self._arm_status),
+                    "target_sent_at_unix": motion["target_sent_wall_at"],
+                    "firmware_reached": firmware_reached,
+                }
                 with self._lock:
                     if not self.manual_stop.is_set():
-                        motion.update(status="failed", reason="机械臂分段到位超时 Joint waypoint arrival timed out",
-                                      joint_error_rad=error, actual_joints=self._joints.tolist())
+                        motion.update(status="failed", reason=(
+                            "机械臂分段到位超时 Joint waypoint arrival timed out; "
+                            f"waypoint={index}/{diagnostics['waypoint_count']}, "
+                            f"joint_error_rad={error:.6f}, "
+                            f"firmware_motion_status={self._arm_status['motion_status']}, "
+                            f"firmware_mode={self._arm_status['mode_feedback']}"),
+                            joint_error_rad=error, actual_joints=self._joints.tolist(),
+                            diagnostics=diagnostics)
         elif self._hold is not None:
             # 普通 J 成功接收目标后由固件保持；不能像 JS 那样每周期重复发，
             # 否则可能反复覆盖内部运动。仅未成功发送的固定目标会再次尝试。
@@ -459,7 +533,8 @@ class RobotController:
                 self._hold_confirmed, self._stable_since = False, None
                 self._hold_feedback = None
                 self.motion = {"plan": plan, "waypoint_index": 1, "target_sent": False,
-                               "target_sent_at": None, "status": "running", "reached": False,
+                               "target_sent_at": None, "target_sent_wall_at": None,
+                               "status": "running", "reached": False, "diagnostics": {},
                                "motion_id": motion_id, "reason": "", "joint_error_rad": None,
                                "actual_joints": q.tolist()}
                 return self._motion_result()

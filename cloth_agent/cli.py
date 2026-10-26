@@ -18,7 +18,7 @@ def main(argv=None):
     serve = commands.add_parser("serve", help="仅启动 MCP 与两个子进程，等待外部 MCP client")
     monitor = commands.add_parser("monitor", help="只读浏览器监控，不连接机器人、不启动 Codex")
     monitor.add_argument("directory", nargs="?", help="覆盖配置中的本轮目录；也可指定历史任务")
-    monitor.add_argument("--port", type=int, default=8765, help="本地 HTTP 端口；0 为系统分配")
+    monitor.add_argument("--port", type=int, default=8760, help="本地 HTTP 端口；0 为系统分配")
     command_parsers = [run, serve, monitor]
     for command in (run, serve):
         command.add_argument("--execute", action="store_true", help="连接右臂、右手及配置相机并允许执行动作")

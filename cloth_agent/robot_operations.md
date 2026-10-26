@@ -27,7 +27,7 @@ Python globals 中预置 `robo`、`np`、`math`、`time`。
 
 | 调用 | 含义与结果 |
 | --- | --- |
-| `robo.state()` | dict：实测 joints、task 系 TCP 4×4、手反馈、运动、fault、manual_hold_latched、hold_confirmed 等 |
+| `robo.state()` | dict：实测 joints、task 系 TCP 4×4、arm_status 固件反馈、手反馈、运动、fault、manual_hold_latched、hold_confirmed 等 |
 | `obs = robo.observe()` | 固定 RGB-D 快照，含 id、rgb、depth_m、intrinsics、task_from_camera、timestamps、关联 state |
 | `robo.show(obs, crop=None)` | 将 RGB 作为本 cell 返回的 MCP 图片；可选 `[u0,v0,u1,v1]` 原图坐标，右/下边界不包含 |
 | `robo.pixel_to_task(obs, [u,v])` | 使用该快照同一像素深度反投影为 task XYZ；原图整数坐标，零/无效深度直接报错 |
@@ -39,7 +39,8 @@ Python globals 中预置 `robo`、`np`、`math`、`time`。
 
 `move_L` 的目标可用 4×4 SE(3)，或 `[x,y,z,roll,pitch,yaw]`（scipy 外旋 xyz）。
 top-down 任务优先使用 `top_down_pose` 构造目标，避免把法兰姿态当成 TCP 姿态。
-它用采样 IK 和普通 J 分段实现近似直线，中间点达到关节容差即推进，无额外停稳等待；不承诺连续空间
+它用采样 IK 和普通 J 分段实现近似直线，中间点满足关节容差并收到新的固件到位反馈后推进，
+无额外固定停稳等待；不承诺连续空间
 的精确直线或避碰。底层不使用 JS，不将 TOPPRA 密集点连续灌入普通 J。
 固件速度由 `motion.joint_speed_percent` 指定（默认 10%），不是 rad/s。TOPPRA 仍用于
 数值规划/检查，不再决定固件执行时间，不能据此声称实际速度/加速度已被精确限制。
@@ -47,7 +48,8 @@ top-down 任务优先使用 `top_down_pose` 构造目标，避免把法兰姿态
 ## 反馈与 cell 闭环 Feedback
 
 运动默认返回 `MotionResult`，查看 `.status`、`.reached`、`.reason`、`.actual_joints`。
-`planning_failed` 不下发运动；`completed/reached=True` 表示轨迹结束后关节反馈满足到位容差，
+超时的 `.diagnostics` 含点号、目标/实测关节、逐轴误差和固件状态；失败后停止并报告，不自动重发。
+`planning_failed` 不下发运动；`completed/reached=True` 表示固件反馈到位，且关节反馈满足到位容差，
 且按普通保持标准连续稳定至少 0.2 秒。它不是独立硬件停止确认。
 不能把到位、SDK 返回、手指关节反馈解释为抓布成功。第一版通过再次 `observe()` + `show()`，
 让模型查看实际图像判断抓布效果；没有专门抓布判定接口。
