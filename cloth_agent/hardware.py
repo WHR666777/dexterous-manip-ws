@@ -344,10 +344,10 @@ class RobotController:
             tcp = self._feedback_tcp(q)
             error = float(np.max(np.abs(q - self._manual_target)))
             stable = (self._manual_feedback is not None
-                      and np.max(np.abs(q - self._manual_feedback)) <= .002)
+                      and np.max(np.abs(q - self._manual_feedback)) <= .005)
             self._manual_feedback = q.copy()
             now = time.monotonic()
-            if error <= self.motion_settings["joint_tolerance_rad"] and stable:
+            if error <= self.motion_settings["joint_arrival_tolerance_rad"] and stable:
                 self._manual_stable_since = self._manual_stable_since or now
                 self._manual_confirmed = now - self._manual_stable_since >= .2
             else:
@@ -396,74 +396,91 @@ class RobotController:
                 motion["target_sent"], motion["target_sent_at"] = True, time.monotonic()
                 motion["target_sent_wall_at"] = self._last_send_wall_at
             error = float(np.max(np.abs(self._joints - self._hold)))
-            # 普通 J 自带运动规划。“进入我们设定的 0.003 rad 容差”并不等于
-            # 固件已经完成上一目标；此前在此时立刻覆盖目标，实机出现新目标
-            # 下发后仍停在旧目标的问题。现在同时要求新的固件状态帧报告
-            # MOVE J（1）且已到位（0），再允许推进，不添加固定停留或重发。
-            # 此标志不是命令 ACK，所以仍必须同时核对实测关节与当前目标。
+            # 信任固件到位状态：要求命令发出后的新鲜状态帧报告 MOVE J（1）
+            # 且已到位（0）。固件报到位后机械臂不再主动调整，此时做一次性
+            # 关节误差检查即可，不做终点稳定窗口。
             firmware_reached = (self._arm_status["received_at_unix"] > motion["target_sent_wall_at"]
                                 and self._arm_status["mode_feedback"] == 1
                                 and self._arm_status["motion_status"] == 0)
+            arrival_tol = self.motion_settings["joint_arrival_tolerance_rad"]
+            warn_tol = self.motion_settings["joint_tolerance_rad"]
             final_waypoint = motion["waypoint_index"] == len(motion["plan"].joint_waypoints) - 1
-            if final_waypoint:
-                # 整条运动结束才确认反馈稳定，避免提前向 cell 报告 completed。
-                self._confirm_hold(error if firmware_reached else float("inf"))
-                reached = self._hold_confirmed
-            else:
-                # 中间点满足关节容差及固件到位即推进，不额外等待 0.2 秒稳定。
-                # 保留实际到位条件；此处不改变 J 模式或改为按时间连续发送。
-                reached = error <= self.motion_settings["joint_tolerance_rad"] and firmware_reached
-            if reached:
-                if final_waypoint:
+            if firmware_reached:
+                if error > arrival_tol:
+                    # 固件报到位但关节偏差超过失败阈值，立即终止。
+                    self.cell_paused = True
+                    index = motion["waypoint_index"]
                     with self._lock:
-                        if not self.manual_stop.is_set() and motion["status"] == "running":
-                            motion.update(status="completed", reached=True, joint_error_rad=error,
-                                          actual_joints=self._joints.tolist())
+                        if not self.manual_stop.is_set():
+                            motion.update(status="failed", reason=(
+                                "固件报到位但关节偏差过大 Firmware arrived but joint error exceeded; "
+                                f"waypoint={index}/{len(motion['plan'].joint_waypoints) - 1}, "
+                                f"joint_error_rad={error:.6f}, "
+                                f"arrival_tolerance_rad={arrival_tol}"),
+                                joint_error_rad=error, actual_joints=self._joints.tolist(),
+                                diagnostics={
+                                    "waypoint_index": index,
+                                    "waypoint_count": len(motion["plan"].joint_waypoints) - 1,
+                                    "target_joints": self._hold.tolist(),
+                                    "actual_joints": self._joints.tolist(),
+                                    "joint_errors_rad": (self._joints - self._hold).tolist(),
+                                    "arm_status": deepcopy(self._arm_status),
+                                    "target_sent_at_unix": motion["target_sent_wall_at"],
+                                    "firmware_reached": True})
                 else:
-                    # 下一监督周期发送下一个几何目标，不插入停稳等待。
-                    # 密集 TOPPRA 样本仍只用于规划检查。
-                    motion["waypoint_index"] += 1
-                    motion["target_sent"] = False
+                    if error > warn_tol and self.on_control_sample is not None:
+                        self.on_control_sample({
+                            "command_sent": False, "executor": "joint_position_J",
+                            "description": "到位警告 Arrival warning: error > tolerance",
+                            "waypoint_index": motion["waypoint_index"],
+                            "joint_error_rad": error, "warn_tolerance_rad": warn_tol})
+                    if final_waypoint:
+                        self._hold_confirmed = True
+                        with self._lock:
+                            if not self.manual_stop.is_set() and motion["status"] == "running":
+                                motion.update(status="completed", reached=True, joint_error_rad=error,
+                                              actual_joints=self._joints.tolist())
+                    else:
+                        motion["waypoint_index"] += 1
+                        motion["target_sent"] = False
             elif time.monotonic() - motion["target_sent_at"] > self.motion_settings["completion_timeout_s"]:
                 self.cell_paused = True
                 index = motion["waypoint_index"]
-                diagnostics = {
-                    "waypoint_index": index,
-                    "waypoint_count": len(motion["plan"].joint_waypoints) - 1,
-                    "target_joints": self._hold.tolist(),
-                    "actual_joints": self._joints.tolist(),
-                    "joint_errors_rad": (self._joints - self._hold).tolist(),
-                    "arm_status": deepcopy(self._arm_status),
-                    "target_sent_at_unix": motion["target_sent_wall_at"],
-                    "firmware_reached": firmware_reached,
-                }
                 with self._lock:
                     if not self.manual_stop.is_set():
                         motion.update(status="failed", reason=(
-                            "机械臂分段到位超时 Joint waypoint arrival timed out; "
-                            f"waypoint={index}/{diagnostics['waypoint_count']}, "
+                            "固件未报到位超时 Firmware did not report arrival; "
+                            f"waypoint={index}/{len(motion['plan'].joint_waypoints) - 1}, "
                             f"joint_error_rad={error:.6f}, "
                             f"firmware_motion_status={self._arm_status['motion_status']}, "
                             f"firmware_mode={self._arm_status['mode_feedback']}"),
                             joint_error_rad=error, actual_joints=self._joints.tolist(),
-                            diagnostics=diagnostics)
+                            diagnostics={
+                                "waypoint_index": index,
+                                "waypoint_count": len(motion["plan"].joint_waypoints) - 1,
+                                "target_joints": self._hold.tolist(),
+                                "actual_joints": self._joints.tolist(),
+                                "joint_errors_rad": (self._joints - self._hold).tolist(),
+                                "arm_status": deepcopy(self._arm_status),
+                                "target_sent_at_unix": motion["target_sent_wall_at"],
+                                "firmware_reached": False})
         elif self._hold is not None:
-            # 普通 J 成功接收目标后由固件保持；不能像 JS 那样每周期重复发，
-            # 否则可能反复覆盖内部运动。仅未成功发送的固定目标会再次尝试。
+            # 普通 J 成功接收目标后由固件保持；仅未成功发送的固定目标会再次尝试。
             if not self._hold_sent:
                 self._send(self._hold)
             error = float(np.max(np.abs(self._joints - self._hold)))
             self._confirm_hold(error)
 
     def _confirm_hold(self, error):
-        """统一确认终点到位与普通保持；只用反馈，不放宽既有关节/稳定容差。"""
+        """确认普通保持到位（用于 quiescent 判定）。使用放宽的到位容差。"""
+        arrival_tol = self.motion_settings["joint_arrival_tolerance_rad"]
         stable = (self._hold_feedback is not None
-                  and np.max(np.abs(self._joints - self._hold_feedback)) <= .002)
+                  and np.max(np.abs(self._joints - self._hold_feedback)) <= .005)
         self._hold_feedback = self._joints.copy()
         with self._lock:
             if self.manual_stop.is_set():
                 return
-            if error <= self.motion_settings["joint_tolerance_rad"] and stable:
+            if error <= arrival_tol and stable:
                 self._stable_since = self._stable_since or time.monotonic()
                 self._hold_confirmed = time.monotonic() - self._stable_since >= .2
             else:
@@ -529,10 +546,10 @@ class RobotController:
             # 轨迹线程不能在复核与发布之间继续推进上一段运动。
             q = self.arm.get_joint_positions()
             seed_error = float(np.max(np.abs(q - plan.positions[0])))
-            if seed_error > self.motion_settings["joint_tolerance_rad"]:
+            if seed_error > self.motion_settings["joint_arrival_tolerance_rad"]:
                 raise ValueError(
                     "轨迹起点已变化 Recompute motion from current feedback; "
-                    f"max_error_rad={seed_error}, tolerance_rad={self.motion_settings['joint_tolerance_rad']}, "
+                    f"max_error_rad={seed_error}, tolerance_rad={self.motion_settings['joint_arrival_tolerance_rad']}, "
                     f"planned_start={plan.positions[0].tolist()}, actual_joints={q.tolist()}"
                 )
             with self._lock:

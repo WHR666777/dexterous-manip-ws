@@ -45,8 +45,8 @@ top-down 任务优先使用 `top_down_pose` 构造目标，避免把法兰姿态
 只下发一次最终关节目标，由固件平滑；不要求 agent 求 IK 或提供关节角。
 PTP 整体关节变化上限为 2π rad，并检查限位、工作区与实际起点；中途 TCP 路径不保证直线或避碰。
 IK 失败返回 `planning_failed`，不下发运动。关节目标只保留在宿主启动回位的内部入口。
-`move_L` 用采样 IK 和普通 J 分段实现近似直线，中间点满足关节容差并收到新的固件到位反馈后推进，
-无额外固定停稳等待；不承诺连续空间
+`move_L` 用采样 IK 和普通 J 分段实现近似直线，中间点在固件报到位后推进（不另做停稳等待），
+超过警告容差 `joint_tolerance_rad` 记录 warning，超过失败容差 `joint_arrival_tolerance_rad` 立即终止；不承诺连续空间
 的精确直线或避碰。底层不使用 JS，不将 TOPPRA 密集点连续灌入普通 J。
 固件速度由 `motion.joint_speed_percent` 指定（默认 10%），不是 rad/s。`move_J` 不做
 TOPPRA 时间规划；`move_L` 的 TOPPRA 仍用于数值规划/检查，不决定固件执行时间，
@@ -56,8 +56,10 @@ TOPPRA 时间规划；`move_L` 的 TOPPRA 仍用于数值规划/检查，不决�
 
 运动默认返回 `MotionResult`，查看 `.status`、`.reached`、`.reason`、`.actual_joints`。
 超时的 `.diagnostics` 含点号、目标/实测关节、逐轴误差和固件状态；失败后停止并报告，不自动重发。
-`planning_failed` 不下发运动；`completed/reached=True` 表示固件反馈到位，且关节反馈满足到位容差，
-且按普通保持标准连续稳定至少 0.2 秒。它不是独立硬件停止确认。
+`planning_failed` 不下发运动；`completed/reached=True` 表示固件反馈到位且关节偏差在
+`joint_arrival_tolerance_rad`（默认 0.015 rad）以内。偏差超过 `joint_tolerance_rad`（默认 0.005 rad）
+会记录 warning 但不影响完成；偏差超过 `joint_arrival_tolerance_rad` 立即终止并报 failed。
+运动到位判定不使用停稳窗口；保持到位（quiescent）仍要求 0.2 秒稳定。
 不能把到位、SDK 返回、手指关节反馈解释为抓布成功。第一版通过再次 `observe()` + `show()`，
 让模型查看实际图像判断抓布效果；没有专门抓布判定接口。
 
