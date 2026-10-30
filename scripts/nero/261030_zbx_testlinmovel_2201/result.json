@@ -1,0 +1,83 @@
+{
+  "description": "笛卡尔移动可靠性检查 mode=ik_j axis=y",
+  "mode": "ik_j",
+  "axis": "y",
+  "distance_m": 0.2,
+  "speed_percent": 10,
+  "passed": false,
+  "trials": [
+    {
+      "trial": 1,
+      "leg": "+y",
+      "pos_err_mm": 0.1905095145559307,
+      "ang_err_deg": 0.06051963567602877,
+      "passed": true
+    },
+    {
+      "trial": 1,
+      "leg": "-y",
+      "pos_err_mm": 0.5780082365868948,
+      "ang_err_deg": 0.08346189794892817,
+      "passed": true
+    },
+    {
+      "trial": 2,
+      "leg": "+y",
+      "pos_err_mm": 0.33826612347083607,
+      "ang_err_deg": 0.07574288711187073,
+      "passed": true
+    },
+    {
+      "trial": 2,
+      "leg": "-y",
+      "pos_err_mm": 0.26917720724382926,
+      "ang_err_deg": 0.057269851254447654,
+      "passed": true
+    },
+    {
+      "trial": 3,
+      "leg": "+y",
+      "pos_err_mm": 0.7696824969045745,
+      "ang_err_deg": 0.12075883937570878,
+      "passed": true
+    },
+    {
+      "trial": 3,
+      "leg": "-y",
+      "pos_err_mm": 0.2856347886250939,
+      "ang_err_deg": 0.0442766051299423,
+      "passed": true
+    },
+    {
+      "trial": 4,
+      "leg": "+y",
+      "pos_err_mm": 0.6072849513112637,
+      "ang_err_deg": 0.12562415259514387,
+      "passed": true
+    },
+    {
+      "trial": 4,
+      "leg": "-y",
+      "pos_err_mm": 1.1411616767330082,
+      "ang_err_deg": 0.13074111044029552,
+      "passed": true
+    },
+    {
+      "trial": 5,
+      "leg": "+y",
+      "pos_err_mm": 0.6179320935746639,
+      "ang_err_deg": 0.13141026094256295,
+      "passed": true
+    },
+    {
+      "trial": 5,
+      "leg": "-y",
+      "pos_err_mm": 0.43458442501923267,
+      "ang_err_deg": 0.048874498137219155,
+      "passed": true
+    }
+  ],
+  "pid": 2539633,
+  "error": "TimeoutError: 关节到位超时 T6→+0.2m wp3/40: error=0.0229rad firmware={'ctrl_mode': 1, 'arm_status': 0, 'mode_feedback': 1, 'motion_status': 0, 'received_at_unix': 1793368409.787062}",
+  "duration_s": 1274.7393936789595
+}

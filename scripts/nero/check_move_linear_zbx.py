@@ -36,6 +36,9 @@ ANGLE_TOL_RAD = np.deg2rad(2)
 JOINT_TOL_RAD = 0.02
 STABLE_WINDOW_S = 0.2
 ARRIVAL_TIMEOUT_S = 30.0
+MOVEL_CONFIRM_TIMEOUT_S = 1.0
+MOVEL_MAX_RETRIES = 3
+MOVEL_PRE_IDLE_TIMEOUT_S = 10.0
 
 # ---------------------------------------------------------------------------
 # 全局状态（信号处理器需要访问）
@@ -95,8 +98,8 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=("native_l", "ik_j"), required=True,
                         help="native_l: 厂家 move_l；ik_j: IK + move_j 逐点执行")
-    parser.add_argument("--axis", choices=("x", "y"), default="x",
-                        help="task 空间来回移动的轴方向 (default: x)")
+    parser.add_argument("--axis", choices=("x", "y", "z"), default="y",
+                        help="task 空间来回移动的轴方向 (default: y)")
     parser.add_argument("--distance", type=float, default=0.20,
                         help="单方向移动距离 m (default: 0.20)")
     parser.add_argument("--speed-percent", type=int, default=10,
@@ -118,7 +121,11 @@ def main():
     task_base = transform(task_from_base)
     flange_tcp = transform(flange_from_tcp)
     speed = args.speed_percent
-    axis_index = 0 if args.axis == "x" else 1
+    axis_index = {"x": 0, "y": 1, "z": 2}[args.axis]
+
+    if axis_index == 2 and args.distance > 0.11:
+        parser.error("Z-minus will be too low!")
+        exit()
 
     directory = Path(args.output_dir).resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -139,22 +146,39 @@ def main():
     }
     started = time.monotonic()
     command_sent = False
+    prev_motion_status = None
 
     with (directory / "feedback.jsonl").open("w", encoding="utf-8", buffering=1) as log:
 
         # -- 反馈读取 -------------------------------------------------------
         def read(phase: str) -> dict:
+            nonlocal prev_motion_status
             q = arm.get_joint_positions()
             tcp = _tcp_from_joints(q, ik, task_base, flange_tcp)
             status = _read_arm_status(arm)
             row = {"phase": phase, "t": time.monotonic() - started,
                    "joints": q.tolist(), "tcp": tcp.tolist(), "arm_status": status}
             log.write(json.dumps(row, ensure_ascii=False) + "\n")
+            ms = status["motion_status"]
+            if prev_motion_status is not None and ms != prev_motion_status:
+                label = ("开始运动" if ms == 1
+                         else "运动完成" if ms == 0
+                         else f"未知状态{ms}")
+                print(f"  [motion_status {prev_motion_status}→{ms}] "
+                      f"t={row['t']:.3f}s phase={phase} "
+                      f"mode_fb={status['mode_feedback']} ({label})",
+                      flush=True)
+            prev_motion_status = ms
             return row
 
         # -- 到位等待（TCP 精度） -------------------------------------------
-        def wait_tcp_arrived(target_tcp, phase, timeout=ARRIVAL_TIMEOUT_S):
-            """轮询关节反馈 → FK → pose_error，直到到位+稳定或超时。"""
+        def wait_tcp_arrived(target_tcp, phase, timeout=ARRIVAL_TIMEOUT_S,
+                             sent_wall=None):
+            """轮询关节反馈 → FK → pose_error，直到到位+稳定+固件确认或超时。
+
+            sent_wall 非 None 时额外要求固件状态帧确认：
+            received_at > sent_wall、mode_feedback == 2 (L)、motion_status == 0。
+            """
             deadline = time.monotonic() + timeout
             stable_since = None
             prev_q = None
@@ -164,9 +188,15 @@ def main():
                 actual_tcp = np.asarray(row["tcp"])
                 p_err, a_err = pose_error(actual_tcp, target_tcp)
                 stable = (prev_q is not None
-                          and np.max(np.abs(q - prev_q)) <= 0.002)
+                          and bool(np.max(np.abs(q - prev_q)) <= 0.002))
                 prev_q = q.copy()
-                if p_err <= POSITION_TOL_M and a_err <= ANGLE_TOL_RAD and stable:
+                status = row["arm_status"]
+                firmware_ok = (sent_wall is None
+                               or (status["received_at_unix"] > sent_wall
+                                   and status["mode_feedback"] == 2
+                                   and status["motion_status"] == 0))
+                if (p_err <= POSITION_TOL_M and a_err <= ANGLE_TOL_RAD
+                        and stable and firmware_ok):
                     stable_since = stable_since or time.monotonic()
                     if time.monotonic() - stable_since >= STABLE_WINDOW_S:
                         return p_err, a_err
@@ -175,7 +205,8 @@ def main():
                 if time.monotonic() > deadline:
                     raise TimeoutError(
                         f"到位超时 {phase}: pos={p_err*1000:.1f}mm "
-                        f"ang={np.rad2deg(a_err):.2f}deg")
+                        f"ang={np.rad2deg(a_err):.2f}deg "
+                        f"firmware={status}")
                 time.sleep(0.05)
 
         # -- 到位等待（关节精度，用于 ik_j 中间点） -------------------------
@@ -203,9 +234,53 @@ def main():
         def move_native_l(target_tcp, phase):
             nonlocal command_sent
             pose = _flange_pose_from_tcp(target_tcp, task_from_base, flange_from_tcp)
-            arm.move_linear(pose, speed_percent=speed)
-            command_sent = True
-            p_err, a_err = wait_tcp_arrived(target_tcp, phase)
+
+            # B: 发送前等待 motion_status == 0（固件空闲）
+            pre_deadline = time.monotonic() + MOVEL_PRE_IDLE_TIMEOUT_S
+            while True:
+                row = read(f"{phase}:wait_idle")
+                if row["arm_status"]["motion_status"] == 0:
+                    break
+                if time.monotonic() > pre_deadline:
+                    raise TimeoutError(
+                        f"move_native_l 发送前等待 motion_status==0 超时 "
+                        f"{phase}: firmware={row['arm_status']}")
+                time.sleep(0.05)
+
+            # C: 发送 + 等待固件确认 (motion_status 0→1)，超时则重试
+            sent_wall = None
+            for attempt in range(1, MOVEL_MAX_RETRIES + 1):
+                sent_wall = time.time()
+                arm.move_linear(pose, speed_percent=speed)
+                command_sent = True
+                print(f"  move_l 已发送 {phase} (attempt {attempt})",
+                      flush=True)
+
+                confirm_deadline = time.monotonic() + MOVEL_CONFIRM_TIMEOUT_S
+                confirmed = False
+                while time.monotonic() < confirm_deadline:
+                    row = read(f"{phase}:confirm_start")
+                    if row["arm_status"]["motion_status"] == 1:
+                        confirmed = True
+                        break
+                    time.sleep(0.05)
+
+                if confirmed:
+                    break
+
+                if attempt < MOVEL_MAX_RETRIES:
+                    print(f"  ⚠ move_l 发送后 {MOVEL_CONFIRM_TIMEOUT_S}s "
+                          f"无 motion_status 0→1 "
+                          f"(attempt {attempt}/{MOVEL_MAX_RETRIES})，"
+                          f"重试发送 {phase}", flush=True)
+                else:
+                    print(f"  ⚠ move_l 发送后 {MOVEL_CONFIRM_TIMEOUT_S}s "
+                          f"无 motion_status 0→1 "
+                          f"(attempt {attempt}/{MOVEL_MAX_RETRIES})，"
+                          f"放弃重试，继续等待到位 {phase}", flush=True)
+
+            p_err, a_err = wait_tcp_arrived(target_tcp, phase,
+                                            sent_wall=sent_wall)
             return p_err, a_err
 
         # -- 移动：ik_j -----------------------------------------------------
@@ -293,7 +368,7 @@ def main():
                 p, a, q = move_to(target_plus, f"T{trial_num}→+{dist}m", q)
                 trial = {"trial": trial_num, "leg": f"+{args.axis}",
                          "pos_err_mm": p * 1000, "ang_err_deg": np.rad2deg(a),
-                         "passed": p <= POSITION_TOL_M and a <= ANGLE_TOL_RAD}
+                         "passed": bool(p <= POSITION_TOL_M and a <= ANGLE_TOL_RAD)}
                 report["trials"].append(trial)
                 print(f"Trial {trial_num} +{args.axis}: "
                       f"pos={p*1000:.2f}mm ang={np.rad2deg(a):.2f}deg "
@@ -308,12 +383,12 @@ def main():
                 target_minus = make_tcp(-dist)
                 p, a, q = move_to(target_minus, f"T{trial_num}→-{dist}m", q)
                 trial = {"trial": trial_num, "leg": f"-{args.axis}",
-                         "pos_err_mm": p * 1000, "ang_err_deg": np.rad2deg(a),
-                         "passed": p <= POSITION_TOL_M and a <= ANGLE_TOL_RAD}
+                        "pos_err_mm": p * 1000, "ang_err_deg": np.rad2deg(a),
+                        "passed": bool(p <= POSITION_TOL_M and a <= ANGLE_TOL_RAD)}
                 report["trials"].append(trial)
                 print(f"Trial {trial_num} -{args.axis}: "
-                      f"pos={p*1000:.2f}mm ang={np.rad2deg(a):.2f}deg "
-                      f"{'PASS' if trial['passed'] else 'FAIL'}", flush=True)
+                    f"pos={p*1000:.2f}mm ang={np.rad2deg(a):.2f}deg "
+                    f"{'PASS' if trial['passed'] else 'FAIL'}", flush=True)
                 if not trial["passed"]:
                     raise RuntimeError(f"Trial {trial_num} -{args.axis} 精度不合格")
 
@@ -351,7 +426,7 @@ def main():
                 json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             arm.disconnect()
 
-    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    # print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return 0 if report["passed"] else 1
 
 
