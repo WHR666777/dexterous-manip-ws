@@ -32,12 +32,18 @@
           <pre id="code" class="source-code"># 等待 Python cell</pre>
           <div class="result-heading"><h3>执行反馈</h3><span id="duration" class="hint"></span></div>
           <div id="outcome" class="outcome" hidden></div>
+          <details id="error-section" class="raw-details" hidden><summary>错误详情 / traceback</summary><pre id="errors" class="console errors"></pre></details>
           <div id="robot-results" class="robot-results"></div>
           <p id="buffer-note" class="hint">stdout 和运动反馈在 cell 返回后更新。</p>
-          <h4>stdout</h4><pre id="stdout" class="console">暂无输出</pre>
-          <h4>返回值</h4><pre id="value" class="console">—</pre>
-          <div id="error-section" hidden><h4>错误 / stderr</h4><pre id="errors" class="console errors"></pre></div>
+          <h4>程序输出 · print()</h4><pre id="stdout" class="console">暂无输出</pre>
+          <div id="value-section" hidden><h4>最后一行表达式的返回值</h4><pre id="value" class="console">—</pre></div>
+          <details id="request-details" class="raw-details" hidden>
+            <summary id="request-heading">内部通信记录</summary>
+            <p class="hint">同类请求已合并。查询运动进度不会重复发送运动目标；以下时长是请求往返时间，不是机械臂运动时长。</p>
+            <div id="request-groups"></div>
+          </details>
           <details class="raw-details"><summary>原始结构化结果</summary><pre id="raw" class="console">暂无结果</pre></details>
+          <details id="call-details" class="raw-details" hidden><summary>Codex 内部调用信息</summary><pre id="call-info" class="console"></pre></details>
         </div>
       </section>
       <section class="panel image-panel">

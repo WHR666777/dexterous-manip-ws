@@ -140,16 +140,21 @@ class NeroArm:
             self._observed_send_bus.send = self._original_bus_send
             self._observed_send_bus = self._original_bus_send = None
 
-    def observe_can_send(self, observer) -> None:
-        """为 agent 排障记录实际 Bus.send 的逐帧返回/异常，不改变发送语义。
+    def configure_can_sender(self, observer, *, joint_frame_interval_s=0.) -> None:
+        """记录实际 Bus.send；可为七轴目标的四个 CAN 帧设置最小帧间隔。
 
         SDK 的 CanComm.send 会吞下 ENOBUFS/ENETDOWN，last_error 又可能被
         下一帧成功发送或接收清除。因此需要在 python-can 边界记录异常，
         不能只在七轴目标发送结束时读取一次 get_comm_error()。
-        observer 只允许内存入队；本方法不重试、不延时、不设置总线参数。
+        observer 只允许内存入队。主机发送间隔只作用于 0x155/156/157/170，
+        不重发目标、不修改字节/总线设置，也不在两个几何分段之间添加停稳等待。
+        默认 0 保留原发送节奏；agent 实机对照可显式配置这个间隔。
         """
         import socket
 
+        interval = float(joint_frame_interval_s)
+        if not np.isfinite(interval) or interval < 0:
+            raise ValueError("joint_frame_interval_s must be finite and nonnegative")
         bus = self._driver.get_context().get_comm().send_bus
         # SDK 默认 local_loopback=False，独立抓包 socket 因此看不到本机
         # 目标帧。仅对此 SDK socket 开启内核回环，不改变机器人协议或接口
@@ -157,8 +162,19 @@ class NeroArm:
         bus.socket.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_LOOPBACK, 1)
         original = bus.send
         self._observed_send_bus, self._original_bus_send = bus, original
+        last_joint_frame_at = None
 
         def send(message, *args, **kwargs):
+            nonlocal last_joint_frame_at
+            joint_frame = message.arbitration_id in (0x155, 0x156, 0x157, 0x170)
+            pacing_wait = 0.
+            if joint_frame and last_joint_frame_at is not None and interval:
+                # 控制主机 Bus.send 调用的间隔；不是硬实时总线时间保证。
+                # 仅在当前四帧发送组内做毫秒级节拍；完整目标仍受控制
+                # 进程的单次发送锁保护，人工目标不会插进普通目标的四帧之间。
+                pacing_wait = max(0., interval - (time.monotonic() - last_joint_frame_at))
+                if pacing_wait:
+                    time.sleep(pacing_wait)
             started = time.time()
             error = None
             try:
@@ -166,11 +182,13 @@ class NeroArm:
             except Exception as exc:
                 error = {"type": type(exc).__name__, "message": str(exc),
                          "error_code": getattr(exc, "error_code", None)}
-                raise  # 仍交给 SDK 原有处理；本轮只增加观测，不偷偷改变运动。
+                raise  # 异常原样交给 SDK，不因节拍处理而吞掉异常或重发帧。
             finally:
+                if joint_frame:
+                    last_joint_frame_at = time.monotonic()
                 observer(send_started_unix=started, send_finished_unix=time.time(),
                          can_id=f"0x{message.arbitration_id:03X}",
-                         data=bytes(message.data).hex(), error=error)
+                         data=bytes(message.data).hex(), pacing_wait_s=pacing_wait, error=error)
 
         bus.send = send
 

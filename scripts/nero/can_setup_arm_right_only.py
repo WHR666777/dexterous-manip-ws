@@ -19,6 +19,15 @@ def setup_arm_can(channel: str):
         robot.set_normal_mode()
         time.sleep(0.01)
 
+    robot.clear_joint_error()
+    time.sleep(0.5)
+    robot.reset()
+    time.sleep(0.5)
+
+    while not robot.enable():
+        robot.set_normal_mode()
+        time.sleep(0.01)
+
     # robot.clear_joint_error()
     # time.sleep(0.01)
     # robot.reset()

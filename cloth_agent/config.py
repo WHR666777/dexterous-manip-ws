@@ -128,6 +128,12 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
     speed = config["motion"].setdefault("joint_speed_percent", 10)
     if isinstance(speed, bool) or not isinstance(speed, int) or not 1 <= speed <= 100:
         raise ValueError("motion.joint_speed_percent must be an integer in [1, 100].")
+    # Nero 1.11 的实机对照使用 1 ms 主机帧节拍，避免七轴目标的四帧集中
+    # 下发后整组目标被忽略。0 仅供反向对照；它不是几何分段停稳时间。
+    gap = float(config["motion"].get("joint_frame_interval_s", .001))
+    if not np.isfinite(gap) or gap < 0:
+        raise ValueError("motion.joint_frame_interval_s must be finite and nonnegative.")
+    config["motion"]["joint_frame_interval_s"] = gap
     if not config["arms"] or any(name not in ("left", "right") for name in config["arms"]):
         raise ValueError("Configure left and/or right arms.")
     _load_calibration(config)

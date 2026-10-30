@@ -12,7 +12,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Cloth agent：Codex / MCP / persistent Python / robo")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="启动一次 Codex exec task")
-    run.add_argument("--task", required=True, help="交给 agent 的本次任务 Task description")
+    run.add_argument("--task", help="交给 agent 的本次任务 Task description")
+    run.add_argument("--task-file", help="交给 agent 的本次任务 Task description 文件")
     run.add_argument("--codex", default="codex", help="本机 Codex executable")
     run.add_argument("--model", default=None, help="覆盖配置中的 model；两者均省略时沿用本机 Codex 设置")
     serve = commands.add_parser("serve", help="仅启动 MCP 与两个子进程，等待外部 MCP client")
@@ -100,7 +101,13 @@ def main(argv=None):
             if args.command == "run":
                 from .codex_exec import run_codex
 
-                result = run_codex(session, url, args.task, executable=args.codex, model=args.model)
+                if args.task_file is not None:
+                    with open(args.task_file, 'r') as task_file:
+                        task_content = task_file.read()
+                else:
+                    task_content = args.task
+
+                result = run_codex(session, url, task_content, executable=args.codex, model=args.model)
             else:
                 session.ended.wait()
                 result = session.summary()

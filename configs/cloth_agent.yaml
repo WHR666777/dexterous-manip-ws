@@ -27,6 +27,9 @@ calibration:
 motion:
   # 普通 J 每段发送一次，反馈确认到位；百分比不是 rad/s。
   joint_speed_percent: 10
+  # 七轴目标的四个 CAN 帧在主机发送时至少间隔 1 ms；非分段停稳等待。
+  # Nero 1.11 实机复现使用；0 只用于诊断对照，不建议用于任务。
+  joint_frame_interval_s: 0.001
   max_ik_step_rad: 0.3345329252
   joint_step_rad: 0.08
   position_step_m: 0.005
@@ -56,7 +59,7 @@ arms:
     acceleration_limits: [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
     workspace:
       start_pose_file: nero_start_pose.yaml
-      cube_side_m: 0.9
+      cube_side_m: 10.0
     hand_poses:
       open: [255, 255, 255, 255, 255, 255, 10, 100, 180, 240, 245, 255, 255, 255, 255, 255, 255, 255, 255, 255]
     hand_speed: [160, 160, 160, 160, 160]

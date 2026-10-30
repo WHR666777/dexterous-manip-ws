@@ -95,7 +95,8 @@ class RobotController:
         # 在 SDK 连接之前开始被动抓包，覆盖启动准备运动；不发送任何指令。
         self.can_trace = ArmCanTrace(self.settings["can_channel"], self.directory)
         self.arm.connect()
-        self.arm.observe_can_send(self.can_trace.sent)
+        self.arm.configure_can_sender(self.can_trace.sent,
+                                      joint_frame_interval_s=self.motion_settings.get("joint_frame_interval_s", .001))
         # connect() 只启动 SDK 后台 CAN 接收线程，不保证低速驱动状态已经到齐。
         # 官方 get_joint_enable_status() 把“尚无反馈”也表示为 False，所以使能
         # 确认必须与关节/位姿反馈一起等待，不能刚连接就认定物理机械臂未使能。

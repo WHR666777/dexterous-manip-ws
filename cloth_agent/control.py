@@ -23,7 +23,7 @@ from .hardware import RobotController
 
 
 def _control_main(owner_connection, worker_connection, manual_hold, released, failed,
-                  config, directory, allow_hardware):
+                  config, directory, allow_hardware, controller_type=RobotController):
     # 终端 Ctrl+C 不应连保持进程一起杀掉。正常退出由管理通道执行；人工保持
     # 必须在机械臂已获外部支撑后，由独立 release-hold 命令明确结束。
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -33,7 +33,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
             emergency.bind(endpoint)
             emergency.settimeout(.05)
             try:
-                robot = RobotController(config, directory, manual_hold, failed, allow_hardware)
+                robot = controller_type(config, directory, manual_hold, failed, allow_hardware)
             except Exception as exc:
                 # 设备初始化可能因反馈超时或标定预检失败而退出。把具体原因通过
                 # 启动握手交还父进程，避免只暴露 Pipe EOFError、丢失真正的故障信息。
@@ -239,7 +239,10 @@ def request_manual(session_file, operation, reason="操作者请求位置保持 
 class ControlProcess:
     """协调器拥有管理 Pipe；worker 拿到另一个普通 Pipe，不获得管理操作权限。"""
 
-    def __init__(self, config=None, directory=None, *, allow_hardware=False):
+    def __init__(self, config=None, directory=None, *, allow_hardware=False,
+                 _controller_type=RobotController):
+        # 可信宿主的独立设备检查可提供控制器子类，复用人工 hold/进程收尾。
+        # 此参数不进入 worker/MCP 请求；正式 agent 始终使用默认控制器。
         context = mp.get_context("spawn")
         self.manual_hold, self.released, self.failed = context.Event(), context.Event(), context.Event()
         self.connection, owner_child = context.Pipe()
@@ -247,7 +250,7 @@ class ControlProcess:
         self._request_lock = Lock()
         self.process = context.Process(target=_control_main,
                                        args=(owner_child, worker_child, self.manual_hold, self.released, self.failed,
-                                             config, str(directory), allow_hardware),
+                                             config, str(directory), allow_hardware, _controller_type),
                                        name="cloth-robot-control")
         self.process.start()
         owner_child.close()

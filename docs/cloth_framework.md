@@ -97,6 +97,10 @@ TCP 位姿（4×4 SE(3) 或 xyz-rpy，m/rad）。`move_J` 以实测关节为参�
 仅整条运动的最终终点和保持确认保留稳定检查，不把密集计时样本灌入普通 J。
 `joint_speed_percent` 默认 10，到位容差默认 0.003 rad。固件执行自己的位置运动处理，
 TOPPRA 时间不再驱动执行；规划 rad/s、rad/s² 约束不等于实际速度/加速度保证。
+`joint_frame_interval_s` 默认 0.001：七轴目标的 `0x155/156/157/170` 四帧
+在主机相邻发送调用之间保留至少 1 ms，避免集中下发时实机出现停在上一目标的现象。
+每个几何目标仍只发送一次，不放宽到位条件、不做超时重发，也不增加分段停稳等待。
+节拍只在 agent 控制连接的单组发送锁内运行，不通过 Codex/MCP 调度；遥操作不启用此发送配置。
 `move_L` 仍按虚拟 TCP 直线和姿态插值做 IK，由普通 J 分段近似，不保证连续严格直线。
 到位超时保留最后目标并报告失败，不重抓下坠后的反馈作为新目标。
 `control-samples.jsonl` 记录命令发送事件（`command_sent=true`）及每个监督周期的目标/实测关节与 TCP，
@@ -108,6 +112,9 @@ local echo 不代表机械臂已经接收或执行整条目标。抓包线程不
 SDK 发送 socket 为此开启本机回环，自己的 SDK 接收仍不接收自身发送帧。
 仅检查上升时可直接运行 `python scripts/nero/check_agent_lift.py`：使用本轮配置目录，
 不启动 Codex/MCP、不执行启动 PTP，保持当前 TCP 方向上升 4 cm，不操作手指或自动下降。
+加 `--repeat 10 --output-dir <新目录>` 可在同一 worker/控制进程内执行 10 轮
+上升和返回；所有轮次使用第一轮捕获的固定起点/终点，任何一段失败立即停止，
+不会继续返回或重试失败动作。测试不修改配置中的日常任务目录。
 复现已知失败时优先使用 `python scripts/nero/replay_agent_motion.py <历史 motions/id.json>
 --output-dir <新目录>`。它读取当轮冻结配置，先以单次 PTP 回历史起点，再将原始
 MotionPlan 送入正式控制进程，不重新求 IK 或改变关节分段；人工 hold 使用该目录

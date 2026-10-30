@@ -1,0 +1,12 @@
+{
+  "description": "笛卡尔移动可靠性检查 mode=ik_j axis=y",
+  "mode": "ik_j",
+  "axis": "y",
+  "distance_m": 0.2,
+  "speed_percent": 10,
+  "passed": false,
+  "trials": [],
+  "pid": 2521792,
+  "error": "TimeoutError: 关节到位超时 上升4cm→测试原点 wp2/9: error=0.0128rad firmware={'ctrl_mode': 1, 'arm_status': 0, 'mode_feedback': 1, 'motion_status': 0, 'received_at_unix': 1793364820.7579389}",
+  "duration_s": 52.50255085108802
+}

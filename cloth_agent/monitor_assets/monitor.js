@@ -55,10 +55,28 @@ function toolResult(item) {
 function cellForItem(item) {
   const result = toolResult(item);
   if (Number.isInteger(result?.cell_id)) return model.cells.get(result.cell_id);
-  // 运行中尚无 cell_id 时，只在源码唯一匹配时关联；不猜测重复调用的编号。
+  // 运行中尚无 cell_id 时，用源码关联；已被其他完成回执明确占用的 cell
+  // 不再作为候选。重复源码仍有多个未关联候选时保留未知，不凭 item 数字猜编号。
   const code = item?.arguments?.code;
-  const matches = [...model.cells.values()].filter((value) => code && value.code === code);
+  const claimed = new Set([...model.items.values()].filter((value) => value.id !== item?.id)
+    .map((value) => toolResult(value)?.cell_id).filter(Number.isInteger));
+  const matches = [...model.cells.values()].filter((value) =>
+    value.id !== 0 && !claimed.has(value.id) && code && value.code === code);
   return matches.length === 1 ? matches[0] : null;
+}
+function executionView(item, local = cellForItem(item)) {
+  // Codex 的工具结束事件可能尚未落盘，尤其在 cell 被中断后。已有 cell 终态
+  // 优先于旧的 in_progress；完成回执中的附图错误仍保留，避免遗漏 MCP 包装反馈。
+  const parsed = toolResult(item);
+  const result = local?.result ? {...parsed, ...local.result,
+    image_errors: parsed?.image_errors || local.result.image_errors} : parsed;
+  const status = local?.result?.status || (local?.end !== undefined ? local.status : null)
+    || parsed?.status || local?.status || item?.status || "in_progress";
+  return {item, local, result, status,
+    code: local?.code || item?.arguments?.code || pretty(item?.arguments || item?.command || "")};
+}
+function cellTitle(id) {
+  return id === 0 ? "启动准备 · Cell #0" : `Cell #${id}`;
 }
 function consume(message) {
   const {source, data} = message;
@@ -128,18 +146,11 @@ function consume(message) {
 function selectedView() {
   if (model.selected?.kind === "tool") {
     const item = model.items.get(model.selected.id);
-    const local = cellForItem(item);
-    const parsed = toolResult(item);
-    return {item, local, result: parsed || local?.result,
-      code: item?.arguments?.code || pretty(item?.arguments || item?.command || ""),
-      status: parsed?.status || local?.status || item?.status || "in_progress"};
+    return executionView(item);
   }
   const local = model.cells.get(model.selected?.id);
   const item = [...model.items.values()].find((value) => cellForItem(value)?.id === local?.id && local);
-  // MCP 包装后的结果可能额外包含附图错误，优先展示实际回给模型的结果。
-  const parsed = item && toolResult(item);
-  return {local, item, result: parsed || local?.result, code: local?.code || "",
-    status: parsed?.status || local?.status || "running"};
+  return executionView(item, local);
 }
 
 function renderSummary() {
@@ -149,11 +160,13 @@ function renderSummary() {
     taskStatus ? statusLabel(taskStatus) : model.start !== null ? "运行中 · 按任务记录" : "等待记录";
   $("task-state").style.color = taskStatus ? (badStatuses.has(taskStatus) ? "var(--bad)" : "var(--ink)") : "var(--ink)";
   $("reason").textContent = model.result?.reason || model.codexError || "";
-  const pending = [...model.items.values()].find((item) => item.status === "in_progress");
+  const pending = [...model.items.values()].find((item) =>
+    ["mcp_tool_call", "command_execution"].includes(item.type)
+    && ["in_progress", "running"].includes(executionView(item).status));
   $("phase").textContent = taskStatus ? (taskStatus === "manual_hold" ? "任务已撤权 · 保持状态见独立入口" : "任务已结束") :
-    running.length ? `执行 Cell #${running.at(-1).id}` : pending ? `等待 ${pending.tool || "工具"} 返回` :
+    running.length ? `执行 ${cellTitle(running.at(-1).id)}` : pending ? `等待 ${pending.tool || "工具"} 返回` :
     model.turnComplete ? "等待任务收尾" : model.start !== null ? "等待 agent 输出 / 下一步" : "等待任务启动";
-  $("cell-count").textContent = `${model.cells.size} 个 cell 已记录`;
+  $("cell-count").textContent = `${[...model.cells.keys()].filter((id) => id !== 0).length} 个 agent cell 已记录${model.cells.has(0) ? " · 含启动准备" : ""}`;
   const connected = model.metadata?.hardware_connected;
   $("hardware").textContent = connected === true ? "已连接（启动时）" : connected === false ? "未连接（启动时）" : "尚无记录";
   $("task-summary").textContent = model.task ? `本次任务 · ${model.task.slice(0, 90)}${model.task.length > 90 ? "…" : ""}` : "本次任务 · 暂无描述";
@@ -173,16 +186,40 @@ function renderTimeline() {
   const container = $("timeline");
   const oldScroll = container.scrollTop;
   const nodes = [];
-  for (const item of model.items.values()) {
+  const entries = [...model.items.values()].map((item) => ({item, local: cellForItem(item)}));
+  // 启动准备没有 Codex item，必须放在最前；其余缺少 item 的 cell 按编号插入
+  // 已关联 cell 之前，而不是统一补到列表底部。Codex 文字/调用仍保留原始顺序。
+  const linked = new Set(entries.filter((entry) => entry.local).map((entry) => entry.local.id));
+  for (const local of [...model.cells.values()].sort((a, b) => a.id - b.id)) {
+    if (linked.has(local.id)) continue;
+    const index = local.id === 0 ? 0 : entries.findIndex((entry) => entry.local && entry.local.id > local.id);
+    entries.splice(index < 0 ? entries.length : index, 0, {local});
+  }
+  for (const {item, local} of entries) {
+    if (!item) {
+      const node = element("article", "timeline-card tool");
+      const row = element("div", "card-top");
+      row.append(element("span", "", local.id === 0 ? "系统启动准备" : "Python cell"),
+        badge(statusLabel(local.result?.status || local.status), tone(local.result?.status || local.status)));
+      node.append(row, element("p", "card-text", cellTitle(local.id)),
+        element("pre", "card-preview", local.code || "等待源码记录"));
+      if (model.selected?.kind === "cell" && model.selected.id === local.id) node.classList.add("selected");
+      node.addEventListener("click", () => {
+        $("follow").checked = false;
+        model.selected = {kind: "cell", id: local.id};
+        model.imageKey = null;
+        scheduleRender();
+      });
+      nodes.push(node);
+      continue;
+    }
     const isTool = item.type === "mcp_tool_call" || item.type === "command_execution";
     const node = element("article", `timeline-card ${isTool ? "tool" : "message"}`);
     const row = element("div", "card-top");
     row.append(element("span", "", isTool ? `${item.server || "Codex"} / ${item.tool || "command"}` : "Agent 公开输出"));
     if (isTool) {
-      const result = toolResult(item);
-      const status = result?.status || item.status;
+      const {result, status} = executionView(item, local);
       row.append(badge(statusLabel(status), tone(status)));
-      const local = cellForItem(item);
       const selected = model.selected?.kind === "tool" ? model.selected.id === item.id :
         local && model.selected?.id === local.id;
       if (selected) node.classList.add("selected");
@@ -192,7 +229,9 @@ function renderTimeline() {
         model.imageKey = null;  // 回看步骤时同步选择该 cell 的附图。
         scheduleRender();
       });
-      node.append(row, element("p", "card-text", result?.cell_id ? `Cell #${result.cell_id}` : item.id),
+      const id = local?.id ?? result?.cell_id;
+      node.append(row, element("p", "card-text", Number.isInteger(id) ? cellTitle(id) :
+        item.tool === "python" ? "Python cell · 等待编号关联" : `${item.tool || "命令"}调用`),
         element("pre", "card-preview", item.arguments?.code || pretty(item.arguments || item.command || "")));
       if (item.error) node.append(element("p", "card-text errors", pretty(item.error)));
     } else {
@@ -200,71 +239,101 @@ function renderTimeline() {
     }
     nodes.push(node);
   }
-  // serve + 外部 MCP client 没有 Codex 事件，仍可从 cell 文件回看执行过程。
-  for (const local of [...model.cells.values()].sort((a, b) => a.id - b.id)) {
-    if ([...model.items.values()].some((item) => cellForItem(item)?.id === local.id)) continue;
-    const node = element("article", "timeline-card tool");
-    const row = element("div", "card-top");
-    row.append(element("span", "", `Python / Cell #${local.id}`), badge(statusLabel(local.status), tone(local.status)));
-    node.append(row, element("pre", "card-preview", local.code || "等待源码记录"));
-    node.addEventListener("click", () => {
-      $("follow").checked = false;
-      model.selected = {kind: "cell", id: local.id};
-      model.imageKey = null;
-      scheduleRender();
-    });
-    nodes.push(node);
-  }
   container.replaceChildren(...(nodes.length ? nodes : [element("p", "empty", "等待 agent 输出或 cell 记录")]));
   container.scrollTop = $("follow").checked ? container.scrollHeight : oldScroll;
 }
 
-function robotRow(label, text, color) {
+function robotRow(label, text, color, target = $("robot-results")) {
   const row = element("div", "robot-row");
   row.append(element("span", "", label), badge(text, color));
-  $("robot-results").append(row);
+  target.append(row);
 }
+
+function renderRequests(calls) {
+  // 高频轮询属于程序内部通信，默认收起并按操作合并；完整顺序仍保留在原始 JSON。
+  // ok 只表示这次请求有正常回复，不把它翻译为运动成功，也不将查询次数算成动作次数。
+  const names = {state: "读取机器人状态", start_motion: "提交运动计划",
+    motion_status: "查询运动进度", set_gripper: "发送手部指令",
+    observe: "获取现场观测", pause: "请求暂停保持"};
+  const groups = new Map();
+  for (const call of calls) {
+    const group = groups.get(call.operation) || {count: 0, failed: 0, seconds: 0};
+    group.count += 1;
+    group.failed += call.ok ? 0 : 1;
+    group.seconds += Number(call.elapsed_s || 0);
+    groups.set(call.operation, group);
+    // 失败不能因为默认折叠而被隐藏，主反馈区仍明确列出失败的请求与原因。
+    if (!call.ok) {
+      robotRow(names[call.operation] || call.operation, "请求失败", "bad");
+      if (call.reason) $("robot-results").append(element("p", "hint errors", call.reason));
+    }
+  }
+  $("request-details").hidden = calls.length === 0;
+  const queries = groups.get("motion_status")?.count || 0;
+  $("request-heading").textContent = `内部通信记录 · ${calls.length} 次请求${queries ? `，其中 ${queries} 次运动进度查询` : ""}`;
+  $("request-groups").replaceChildren();
+  for (const [operation, group] of groups) {
+    robotRow(`${names[operation] || operation} · ${group.count} 次`,
+      `累计往返 ${group.seconds.toFixed(3)} s${group.failed ? ` · ${group.failed} 次失败` : ""}`,
+      group.failed ? "bad" : "muted", $("request-groups"));
+  }
+}
+
 function renderSelected() {
   const view = selectedView();
   const result = view.result;
-  const number = result?.cell_id || view.local?.id;
-  $("selected-title").textContent = number ? `Python · Cell #${number}` : view.item ? `工具 · ${view.item.tool || view.item.type}` : "Python cell";
-  setBadge("cell-badge", model.selected ? statusLabel(view.status) : "待执行", tone(view.status));
-  $("selected-note").textContent = view.item ? `调用 ${view.item.id} · ${view.item.server || "Codex"}` :
-    number ? `Cell #${number} · 源码在执行前保存` : "提交工具调用后即可查看代码";
+  const number = view.local?.id ?? result?.cell_id;
+  const hasCell = Number.isInteger(number);
+  $("selected-title").textContent = hasCell ? cellTitle(number) : view.item ? `工具 · ${view.item.tool || view.item.type}` : "Python cell";
+  const codeStatus = {completed: "代码执行完毕", error: "代码异常中止", running: "代码执行中",
+    interrupted: "代码已中断", paused: "代码已暂停"}[view.status] || statusLabel(view.status);
+  setBadge("cell-badge", model.selected ? codeStatus : "待执行", tone(view.status));
+  $("selected-note").textContent = number === 0 ? "系统预先编写的启动准备代码，不属于 agent 生成代码" :
+    view.item ? `来自 ${view.item.server || "Codex"} · ${view.item.tool || view.item.type}` :
+    hasCell ? `${cellTitle(number)} · 源码在执行前保存` : "提交工具调用后即可查看代码";
   const code = view.code || "# 等待 Python cell";
   if ($("code").textContent !== code) $("code").textContent = code;
   $("duration").textContent = typeof result?.elapsed_s === "number" ? `${result.elapsed_s.toFixed(3)} s` : "";
   $("outcome").hidden = !result;
-  $("outcome").dataset.tone = tone(result?.status);
-  $("outcome").textContent = result ? `${number ? "Cell" : "MCP"}：${statusLabel(result.status)}${result.reason ? `\n${result.reason}` : ""}` : "";
+  $("outcome").dataset.tone = tone(view.status);
+  // 异常末行通常含 agent 抛出的明确原因，优先呈现；完整调用栈放在错误详情中。
+  const exceptionSummary = String(result?.exception || "").trim().split("\n").at(-1);
+  const explanation = result?.reason || exceptionSummary;
+  $("outcome").textContent = result ? `${hasCell ? "代码执行" : "工具调用"}：${codeStatus}${explanation ? `\n${explanation}` : ""}` : "";
   $("robot-results").replaceChildren();
   const motion = result?.control?.motion;
-  if (motion) robotRow("运动 · 控制快照", statusLabel(motion.status), tone(motion.status));
-  else if (result) robotRow("运动 · 控制快照", "未记录运动结果", "muted");
   // planning_failed 可由 Python 的 MotionResult 返回而不抛异常；现有记录只在
   // stdout 中出现时，明确标为“文本提示”，不能伪装为新增的结构化硬件反馈。
   const failure = [["stdout", result?.stdout], ["返回值", result?.value]]
     .map(([source, text]) => [source, String(text || "").split("\n").find((line) => line.includes("planning_failed"))])
     .find(([, line]) => line);
   if (failure) {
-    robotRow(`${failure[0]} 文本提示`, "planning_failed · 规划失败", "bad");
+    robotRow(`根据${failure[0]}提示`, "有运动规划失败", "bad");
     $("robot-results").append(element("p", "hint errors", failure[1]));
   }
-  for (const call of result?.robot_calls || []) {
-    robotRow(`${call.operation} · ${Number(call.elapsed_s || 0).toFixed(3)} s`,
-      call.ok ? "控制请求返回" : "控制请求失败", call.ok ? "info" : "bad");
-    if (call.reason) $("robot-results").append(element("p", "hint errors", call.reason));
+  if (motion) {
+    robotRow("最近一次已提交运动 · 收尾快照", statusLabel(motion.status), tone(motion.status));
+    if (failure) {
+      // 规划失败的动作没有 start_motion，因此这份快照可能属于前一段成功动作。
+      // 不通过快照的 completed 覆盖本 cell 输出中的 planning_failed。
+      $("robot-results").append(element("p", "hint", "该快照仅描述已提交的运动；规划失败的动作未提交，不会更新这份运动状态。"));
+    }
+    if (motion.reason) $("robot-results").append(element("p", "hint", motion.reason));
   }
+  renderRequests(result?.robot_calls || []);
   $("buffer-note").textContent = result ? "cell 正常返回不代表运动到位或抓取成功。" :
     "cell 执行期间 stdout 被缓存；等待返回后显示，不提供 cell 内实时进度。";
   $("stdout").textContent = result?.stdout || "暂无输出";
   $("value").textContent = result?.value ?? "—";
+  $("value-section").hidden = result?.value === null || result?.value === undefined;
   const errors = [result?.exception, result?.stderr, view.item?.error && pretty(view.item.error),
     ...(result?.image_errors || [])].filter(Boolean).join("\n");
   $("error-section").hidden = !errors;
   $("errors").textContent = errors;
   $("raw").textContent = result ? pretty(result) : view.item?.result ? pretty(view.item.result) : "暂无结果";
+  $("call-details").hidden = !view.item;
+  $("call-info").textContent = view.item ? pretty({item_id: view.item.id,
+    server: view.item.server, tool: view.item.tool, codex_event_status: view.item.status}) : "";
 }
 
 function allImages() {
@@ -281,7 +350,8 @@ function allImages() {
 function renderImages() {
   const images = allImages();
   const select = $("image-select");
-  const currentCell = selectedView().result?.cell_id || selectedView().local?.id;
+  const currentView = selectedView();
+  const currentCell = currentView.local?.id ?? currentView.result?.cell_id;
   if (!model.imageKey || ($("follow").checked && images.length)) {
     model.imageKey = images.filter((image) => image.cellId === currentCell).at(-1)?.key || images.at(-1)?.key;
   }
