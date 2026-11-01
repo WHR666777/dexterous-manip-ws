@@ -34,7 +34,7 @@ class RobotController:
         self.fault = ""
         self.motion = None
         self._lock = Lock()  # 只保护少量内存状态；绝不在持锁时做 SDK/磁盘 I/O。
-        # 只串行化一次 SDK 关节发送，避免普通轨迹七轴帧与人工保持帧交错。
+        # 只串行化一次 SDK 目标发送，避免 J/L 目标帧与人工保持帧交错。
         # 不保护规划/相机/手部/落盘；人工先置位 Event，等待中的普通发送重查后放弃。
         self._arm_send_lock = Lock()
         # 轨迹线程与普通请求只在“换目标/暂停”时共享此锁。相机、手部查询、
@@ -220,7 +220,9 @@ class RobotController:
                              "error": self._hand_error},
                     "motion": self._motion_result(), "fault": self.fault,
                     "arm_status": deepcopy(self._arm_status),
-                    "executor": "joint_position_J",
+                    "executor": (self.motion.get("executor", "joint_position_J")
+                                 if self.motion and self.motion["status"] in {"running", "completed"}
+                                 and not self.manual_stop.is_set() else "joint_position_J"),
                     "manual_hold_latched": self.manual_stop.is_set(),
                     "manual_hold_report": deepcopy(self.manual_hold_report),
                     "manual_hold_target": (self._manual_target.tolist()
@@ -249,8 +251,8 @@ class RobotController:
         with self._arm_send_lock:
             if not self.manual_stop.is_set():
                 started = time.monotonic()
-                # move_J 与固定启动 PTP 使用整体回位上限。move_L 的普通
-                # 分段继续使用原有单步限制，不把 PTP 上限全局套到连续路径。
+                # move_J 与固定启动 PTP 使用整体回位上限；普通暂停和人工
+                # 保持仍使用默认的单步限制，不把 PTP 上限全局套到保持请求。
                 from .planning import PTP_MAX_JOINT_DELTA_RAD
 
                 ptp = self.motion is not None and self.motion["plan"].mode in {"ptp", "startup_ptp"}
@@ -261,6 +263,7 @@ class RobotController:
                 if self.on_control_sample is not None:
                     self.on_control_sample({
                         "sent_at": sent_at, "command_sent": True,
+                        "executor": "joint_position_J",
                         "sent_at_unix": self._last_send_wall_at,
                         "send_started_at_unix": self._last_send_wall_at - (sent_at - started),
                         "arm_status_before_send": deepcopy(self._arm_status),
@@ -277,6 +280,130 @@ class RobotController:
                 self._hold_sent = True
                 return True
         return False
+
+    def _linear_event(self, motion, description, **values):
+        """运动线程只入队；打印与落盘仍由普通 I/O 线程处理。"""
+        if self.on_control_sample is not None:
+            self.on_control_sample({"command_sent": False, "executor": "native_linear_L",
+                                    "description": description, "motion_id": motion["motion_id"],
+                                    "phase": motion["phase"], "attempt": motion["attempt"],
+                                    "sampled_at": self._sampled_at,
+                                    "arm_status": deepcopy(self._arm_status), **values})
+
+    def _send_linear(self, motion):
+        """只发送同一个法兰终点一次；启动确认与有界重发由后续 tick 决定。"""
+        with self._arm_send_lock:
+            # 人工 hold 可随时置位；即使本次重发已经在等锁，也不能覆盖人工目标。
+            if self.manual_stop.is_set():
+                return
+            started, sent_wall = time.monotonic(), time.time()
+            self.arm.move_linear(motion["flange_pose"],
+                                 speed_percent=self.motion_settings["joint_speed_percent"])
+            now = time.monotonic()
+            motion.update(attempt=motion["attempt"] + 1, target_sent=True,
+                          target_sent_at=now, target_sent_wall_at=sent_wall,
+                          phase="confirm_start", phase_started_at=now)
+            self._hold_feedback, self._stable_since = None, None
+            self._linear_event(
+                motion, "厂家 L 目标已调用 SDK Native move_l target submitted",
+                command_sent=True, sent_at=now, sent_at_unix=sent_wall,
+                send_started_at_unix=sent_wall, send_duration_s=now - started,
+                waypoint_index=None, target_joints=None,
+                target_tcp=motion["plan"].target_tcp.tolist(), flange_pose=motion["flange_pose"],
+                actual_joints=self._joints.tolist(), tcp=deepcopy(self._tcp))
+
+    def _fail_linear(self, motion, reason):
+        """L 超时后取消该动作并固定当前关节，不能让迟到的固件运动继续推进。"""
+        with self._lock:
+            if self.manual_stop.is_set():
+                return
+            motion.update(status="failed", reached=False, reason=reason,
+                          actual_joints=self._joints.tolist())
+        self._linear_event(motion, reason)
+        # 先保留 failed 及完整诊断，再复用普通暂停：只捕获一次反馈，发送一个
+        # J 保持目标；不重新规划、不松手、不调用会导致下坠的阻尼 emergency_stop。
+        self._pause(reason)
+
+    def _tick_linear(self, motion):
+        """将实测脚本的三个等待循环拆成状态机，每次只处理一个反馈周期。
+
+        wait_idle 最多 10 s；confirm_start 每次最多 1 s、总共最多 3 次发送；
+        wait_arrival 沿用 completion_timeout_s。这里不 sleep，也不把等待放进
+        Pipe/MCP 请求中，因此暂停和独立人工 hold 不必排在整个运动后面。
+        """
+        from robot_control.nero_ik import pose_error
+
+        now, status = time.monotonic(), self._arm_status
+        position_error, angle_error = pose_error(np.asarray(self._tcp), motion["plan"].target_tcp)
+        with self._lock:
+            motion["actual_joints"] = self._joints.tolist()
+            motion["diagnostics"] = {
+                "executor": "native_linear_L", "phase": motion["phase"],
+                "attempt": motion["attempt"], "max_attempts": self.motion_settings["linear_max_attempts"],
+                "start_confirmed": motion["start_confirmed"],
+                "position_error_m": position_error, "angle_error_rad": angle_error,
+                "position_tolerance_m": self.motion_settings["linear_position_tolerance_m"],
+                "angle_tolerance_rad": self.motion_settings["linear_angle_tolerance_rad"],
+                "target_tcp": motion["plan"].target_tcp.tolist(), "actual_tcp": deepcopy(self._tcp),
+                "flange_pose": motion["flange_pose"], "arm_status": deepcopy(status),
+                "target_sent_at_unix": motion["target_sent_wall_at"],
+                "phase_elapsed_s": now - motion["phase_started_at"]}
+        if self.on_control_sample is not None:
+            # 与 J 一样保存每个监督周期；不带 description，普通 I/O 线程只
+            # 落盘而不逐行刷终端。启动/重发/完成等事件另由 _linear_event 输出。
+            self.on_control_sample({"command_sent": False, "sent_at": None,
+                                    "motion_id": motion["motion_id"], "waypoint_index": None,
+                                    "sampled_at": self._sampled_at, "actual_joints": self._joints.tolist(),
+                                    "tcp": deepcopy(self._tcp), "target_joints": None,
+                                    **deepcopy(motion["diagnostics"])})
+
+        if motion["phase"] == "wait_idle":
+            if status["motion_status"] == 0:
+                self._send_linear(motion)
+            elif now - motion["phase_started_at"] >= self.motion_settings["linear_pre_idle_timeout_s"]:
+                self._fail_linear(motion, "厂家 L 发送前等待空闲超时 Native L pre-idle timed out; "
+                                  f"firmware={status}")
+            return
+
+        fresh_l = (status["received_at_unix"] > motion["target_sent_wall_at"]
+                   and status["mode_feedback"] == 2)
+        if motion["phase"] == "confirm_start":
+            if fresh_l and status["motion_status"] == 1:
+                motion.update(start_confirmed=True, phase="wait_arrival", phase_started_at=now)
+                self._linear_event(motion, "厂家 L 已确认启动 Native L motion_status 0->1 confirmed")
+            elif now - motion["target_sent_at"] >= self.motion_settings["linear_start_timeout_s"]:
+                if motion["attempt"] < self.motion_settings["linear_max_attempts"]:
+                    self._linear_event(motion, "厂家 L 启动未确认，重发同一目标 Native L start unconfirmed; retry same target")
+                    self._send_linear(motion)
+                    return
+                # 脚本在最后一次未看到 0->1 时仍等待到位：极短的运动可能已在
+                # 两次采样间完成。不能仅凭未捕获到启动沿就直接认定执行失败。
+                motion.update(phase="wait_arrival", phase_started_at=now)
+                self._linear_event(motion, "厂家 L 启动确认次数已用尽，继续检查到位 Native L attempts exhausted; await arrival")
+            else:
+                return
+
+        stable = (self._hold_feedback is not None
+                  and np.max(np.abs(self._joints - self._hold_feedback)) <= .002)
+        self._hold_feedback = self._joints.copy()
+        arrived = (fresh_l and status["motion_status"] == 0 and stable
+                   and position_error <= self.motion_settings["linear_position_tolerance_m"]
+                   and angle_error <= self.motion_settings["linear_angle_tolerance_rad"])
+        self._stable_since = (self._stable_since or now) if arrived else None
+        if self._stable_since is not None and now - self._stable_since >= .2:
+            with self._lock:
+                if self.manual_stop.is_set() or motion["status"] != "running":
+                    return
+                # 固件 L 已完成并自行保持。不额外发送 J，否则可能覆盖刚完成
+                # 的 L 目标；只保存当前关节，供原有静止监督/下一 cell 收尾使用。
+                self._hold, self._hold_sent, self._hold_confirmed = self._joints.copy(), True, True
+                motion.update(status="completed", reached=True)
+            self._linear_event(motion, "厂家 L 到位已确认 Native L arrival confirmed",
+                               position_error_m=position_error, angle_error_rad=angle_error)
+        elif now - motion["phase_started_at"] >= self.motion_settings["completion_timeout_s"]:
+            self._fail_linear(motion, "厂家 L 到位超时 Native L arrival timed out; "
+                              f"position_error_m={position_error:.6f}, angle_error_rad={angle_error:.6f}; "
+                              f"attempts={motion['attempt']}, firmware={status}")
 
     def pause(self, reason):
         with self._trajectory_lock:
@@ -373,20 +500,28 @@ class RobotController:
         if not self.connected or self.manual_stop.is_set():
             return
         self._measure()
-        if self.on_control_sample is not None:
-            # J 目标之间不会连续发命令，仍保存每个监督周期的真实反馈，便于
+        motion = self.motion
+        native_running = (motion and motion["status"] == "running" and not self.fault
+                          and motion.get("executor") == "native_linear_L")
+        if self.on_control_sample is not None and not native_running:
+            # J/L 目标之间不会连续发命令，仍保存每个监督周期的真实反馈，便于
             # 区分固件运动过程、目标下发时刻及停稳后的误差。
             self.on_control_sample({"command_sent": False, "sent_at": None,
                                     "sampled_at": self._sampled_at,
                                     "arm_status": deepcopy(self._arm_status),
                                     "motion_id": self.motion["motion_id"] if self.motion else None,
                                     "waypoint_index": self.motion["waypoint_index"] if self.motion else None,
+                                    "executor": self.motion.get("executor", "joint_position_J") if self.motion else "joint_position_J",
+                                    "phase": self.motion.get("phase") if self.motion else None,
+                                    "attempt": self.motion.get("attempt") if self.motion else None,
                                     "actual_joints": self._joints.tolist(),
                                     "tcp": deepcopy(self._tcp),
                                     "target_joints": (self._hold.tolist()
                                                       if self._hold is not None else None)})
-        motion = self.motion
         if motion and motion["status"] == "running" and not self.fault:
+            if native_running:
+                self._tick_linear(motion)
+                return  # 厂家 L 期间绝不能执行旧的 J 分段或重发旧保持目标。
             if not motion["target_sent"]:
                 self._hold = motion["plan"].joint_waypoints[motion["waypoint_index"]].copy()
                 self._hold_sent = False
@@ -489,6 +624,11 @@ class RobotController:
     def fail(self, reason):
         with self._trajectory_lock:
             try:
+                if (self.connected and self.motion and self.motion["status"] == "running"
+                        and self.motion.get("executor") == "native_linear_L"):
+                    # 设备/通信故障也必须撤销正在执行的 L；普通保持仍需通过
+                    # SDK 的使能与反馈检查，失败时保留原因，人工通道仍独立可用。
+                    self._pause(reason)
                 # 已有发送目标时保留该固定目标，避免每次故障重抓实测值。
                 # 尚未发运动目标才捕获一次；后续周期继续尝试原位保持。
                 self.cell_paused = True
@@ -508,6 +648,8 @@ class RobotController:
         from .planning import MotionPlan, PTP_MAX_JOINT_DELTA_RAD
 
         self._require_hardware()
+        if payload.get("mode") == "native_linear":
+            return self._start_linear_motion(cell_id, payload)
         plan = MotionPlan.from_dict(payload)
         if plan.arm != "right":
             raise ValueError("第一版只允许右臂 Only right arm is enabled")
@@ -560,6 +702,48 @@ class RobotController:
                 self._hold_feedback = None
                 self.motion = {"plan": plan, "waypoint_index": 1, "target_sent": False,
                                "target_sent_at": None, "target_sent_wall_at": None,
+                               "status": "running", "reached": False, "diagnostics": {},
+                               "motion_id": motion_id, "reason": "", "joint_error_rad": None,
+                               "actual_joints": q.tolist()}
+                return self._motion_result()
+
+    def _start_linear_motion(self, cell_id, payload):
+        """发布单目标厂家 L；只接收数据，不在控制进程执行 worker 源码。"""
+        from scipy.spatial.transform import Rotation
+        from .geometry import tcp_to_flange
+        from .planning import LinearMotionPlan
+
+        plan = LinearMotionPlan.from_dict(payload)
+        if plan.arm != "right":
+            raise ValueError("第一版只允许右臂 Only right arm is enabled")
+        # 控制进程重新检查 seed 限位、起点/终点工作区；不信任 worker 内的
+        # 持久变量，也不恢复已删除的逐点 IK/TOPPRA 主机执行路径。
+        plan = self.validator.plan_linear(plan.start_joints, plan.target_tcp)
+        flange = tcp_to_flange(plan.target_tcp, self.settings["task_from_base"],
+                               self.settings["flange_from_tcp"])
+        # 完全沿用实测脚本：task 虚拟 TCP -> base 法兰 -> xyz + 外旋 xyz RPY。
+        # 此处单位始终为 m/rad；不直接把虚拟 TCP 坐标传给 SDK。
+        pose = np.r_[flange[:3, 3], Rotation.from_matrix(flange[:3, :3]).as_euler("xyz")]
+        motion_id = uuid.uuid4().hex
+        plans = self.directory / "motions"
+        plans.mkdir(exist_ok=True)
+        (plans / f"{motion_id}.json").write_text(json.dumps(plan.as_dict()), encoding="utf-8")
+        with self._trajectory_lock:
+            q = self.arm.get_joint_positions()
+            if np.max(np.abs(q - plan.start_joints)) > self.motion_settings["joint_arrival_tolerance_rad"]:
+                raise ValueError("运动起点已变化 Recompute native L from current feedback")
+            with self._lock:
+                self._admit(cell_id)
+                if self.motion and self.motion["status"] == "running":
+                    raise ValueError("已有运动正在执行 A motion is already running")
+                # 撤销旧 J 的软件保持目标，防止 native L 被之前的 PTP 目标覆盖。
+                # 这里只发布状态；首次发送/启动确认/重发全部由固定周期线程推进。
+                self._hold, self._hold_sent, self._hold_confirmed = None, False, False
+                self._hold_feedback, self._stable_since = None, None
+                self.motion = {"plan": plan, "executor": "native_linear_L", "waypoint_index": None,
+                               "flange_pose": pose.tolist(), "phase": "wait_idle",
+                               "phase_started_at": time.monotonic(), "attempt": 0, "start_confirmed": False,
+                               "target_sent": False, "target_sent_at": None, "target_sent_wall_at": None,
                                "status": "running", "reached": False, "diagnostics": {},
                                "motion_id": motion_id, "reason": "", "joint_error_rad": None,
                                "actual_joints": q.tolist()}

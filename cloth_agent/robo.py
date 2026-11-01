@@ -1,7 +1,7 @@
 """worker 中的右臂机器人代理：计算留在本进程，设备操作通过 Pipe 请求控制进程。
 
 只公开收敛后的基础能力。固定机器人知识随启动 prompt 提供，没有 info/plan/execute
-或抓布判定接口；MotionPlan 只在 move_J/move_L 内部使用，不交给生成代码管理。
+或抓布判定接口；运动计划只在 move_J/move_L 内部使用，不交给生成代码管理。
 """
 
 from __future__ import annotations
@@ -169,8 +169,8 @@ class Robo:
         from .planning import PlanningError
 
         try:
-            # IK/TOPPRA 在 worker 内计算；计算期间不占住设备进程的人工停止保持路径。
-            # 执行时控制进程仍会复核起点、限位和轨迹，不把持久 globals 当成现场真值。
+            # J 的 IK 在 worker 内计算，L 只校验目标，内部规划交给固件。
+            # 控制进程仍复核实际起点与目标，不把持久 globals 当成现场真值。
             if startup_ptp:
                 plan = self._planner.plan_startup_ptp(state["joints"], target_joints=target_joints,
                                                      target_tcp=target_tcp)
@@ -179,9 +179,7 @@ class Robo:
                 # 求一次最终 IK；执行器只发送一个关节目标，不沿途分段下发。
                 plan = self._planner.plan_ptp(state["joints"], target_tcp=target_tcp)
             else:
-                plan = self._planner.plan("right", state["joints"], target_joints=target_joints,
-                                          waypoints=[transform(target_tcp)] if target_tcp is not None else None,
-                                          mode="cartesian" if target_tcp is not None else "joint")
+                plan = self._planner.plan_linear(state["joints"], target_tcp)
         except PlanningError as exc:
             return MotionResult("planning_failed", False, str(exc), diagnostics=exc.as_dict())
         started = self._call("start_motion", plan=plan.as_dict())
@@ -193,8 +191,12 @@ class Robo:
         return self._move(target_tcp=transform(target_tcp), wait=wait, ptp=True)
 
     def move_L(self, target_tcp, wait=True):
-        """task 系虚拟 TCP 直线插值，普通 J 分段近似；SE(3)/xyz-rpy，m/rad；规划失败停止。"""
-        return self._move(target_tcp=target_tcp, wait=wait)
+        """task 系 TCP 目标转法兰后使用厂家 move_l；SE(3)/xyz-rpy，m/rad。
+
+        固定朝向时虚拟 TCP 随法兰沿直线平移；同时旋转时，带工具偏移的
+        TCP 中途路径由固件的法兰运动决定，不保证该虚拟点仍严格沿直线。
+        """
+        return self._move(target_tcp=transform(target_tcp), wait=wait)
 
     def open_gripper(self):
         """使用配置中的张开姿态，只发送拇指和食指 Open thumb/index."""

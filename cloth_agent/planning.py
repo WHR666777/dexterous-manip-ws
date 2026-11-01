@@ -1,4 +1,4 @@
-"""Local waypoint planning and TOPPRA retiming; no robot connection."""
+"""运动目标校验、PTP IK 与独立路径规划工具；不连接机器人。"""
 
 from __future__ import annotations
 
@@ -27,6 +27,30 @@ class PlanningError(ValueError):
     def as_dict(self):
         return {"ok": False, "reason": str(self), "index": self.index,
                 "diagnostics": self.diagnostics}
+
+
+@dataclass
+class LinearMotionPlan:
+    """厂家 L 的单个 TCP 目标；没有主机关节轨迹，也没有 TOPPRA 时间表。"""
+
+    arm: str
+    start_joints: np.ndarray
+    target_tcp: np.ndarray
+    mode: str = field(default="native_linear", init=False)
+
+    def __post_init__(self):
+        self.start_joints = joint_vector(self.start_joints, "linear start joints").copy()
+        self.target_tcp = transform(self.target_tcp)
+
+    def as_dict(self):
+        return {"arm": self.arm, "mode": self.mode,
+                "start_joints": self.start_joints.tolist(), "target_tcp": self.target_tcp.tolist()}
+
+    @classmethod
+    def from_dict(cls, value):
+        if value["mode"] != "native_linear":
+            raise ValueError("厂家 L 目标类型无效 Invalid native L mode")
+        return cls(value["arm"], value["start_joints"], value["target_tcp"])
 
 
 @dataclass
@@ -100,6 +124,21 @@ class Planner:
         self.ik = {name: NeroIK(max_joint_delta_rad=self.motion["max_ik_step_rad"])
                    for name in self.arms}
         self._lock = Lock()  # Pinocchio model data are mutable.
+
+    def plan_linear(self, seed, target_tcp):
+        """仅校验实测起点与目标工作区；L 路径规划和 IK 交给 Nero 固件。"""
+        with self._lock:
+            plan = LinearMotionPlan("right", seed, target_tcp)
+            self._check_path("right", np.asarray([plan.start_joints]))
+            bounds = self.arms["right"]["workspace"]
+            if bounds is not None:
+                bounds = np.asarray(bounds, dtype=float)
+                xyz = plan.target_tcp[:3, 3]
+                if np.any(xyz < bounds[0]) or np.any(xyz > bounds[1]):
+                    raise PlanningError("目标 TCP 超出工作区 Target TCP leaves the configured workspace")
+            # 不再逐点求 IK，避免主机的 IK_FK_ERROR 提前拒绝固件可以执行的
+            # L 目标。这里只检查起点/终点，不声称预测了固件路径或完成场景避碰。
+            return plan
 
     def plan_startup_ptp(self, seed, *, target_joints=None, target_tcp=None):
         """保留固定启动流程的内部关节入口，不向 agent 公开关节目标。"""

@@ -54,7 +54,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
 
             def run_motion():
                 # 反馈监督只由 monotonic 定时器驱动，不能由 Pipe 请求唤醒次数
-                # 决定。普通 J 仅在分段切换时发送；此线程不查询 L20、不压缩
+                # 决定。J 发送目标，L 按空闲/启动确认/到位状态推进；不查询 L20、不压缩
                 # 图像、不验证整条轨迹、不写文件。
                 previous = next_tick = time.monotonic()
                 while not motion_shutdown.is_set() and not released.is_set():
@@ -93,16 +93,17 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                                 except Empty:
                                     break
                                 samples_file.write(json.dumps({
-                                    "description": "关节控制采样 Joint control sample", **sample
+                                    "description": "运动控制采样 Motion control sample", **sample
                                 }, ensure_ascii=False) + "\n")
-                                if sample.get("command_sent"):
-                                    # 每次真正切换目标才输出，20 Hz 反馈仍只存文件。
+                                if sample.get("command_sent") or sample.get("description"):
+                                    # 只输出目标调用与明确事件；20 Hz 反馈仍只存文件。
                                     # 打印在普通 I/O 线程，不占用运动/人工保持发送锁。
-                                    print(json.dumps({"description": "J 目标已调用 SDK Joint target submitted",
-                                                      "motion_id": sample["motion_id"],
-                                                      "waypoint_index": sample["waypoint_index"],
-                                                      "target_joints": sample["target_joints"],
-                                                      "send_duration_s": sample["send_duration_s"],
+                                    fields = ("motion_id", "executor", "waypoint_index", "target_joints",
+                                              "target_tcp", "flange_pose", "send_duration_s", "phase",
+                                              "attempt", "arm_status", "position_error_m", "angle_error_rad")
+                                    print(json.dumps({"description": sample.get("description",
+                                                          "J 目标已调用 SDK Joint target submitted"),
+                                                      **{name: sample[name] for name in fields if name in sample},
                                                       "note": "SDK returned != robot ACK"},
                                                      ensure_ascii=False), flush=True)
                             while True:

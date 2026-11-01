@@ -87,24 +87,34 @@ TCP 位姿（4×4 SE(3) 或 xyz-rpy，m/rad）。`move_J` 以实测关节为参�
 求一次 IK，生成 `mode=ptp` 的两个端点；普通 J 仅发送一次终点，由固件完成 PTP 平滑，
 不做 TOPPRA，不保证中途 TCP 直线。PTP 复用启动回位的 2π rad 整体变化上限，
 保留关节限位、工作区、起点与到位检查。agent 无需自行求 IK，IK 失败不发动作。
-内部逐点 IK 与普通 J 几何分段仅用于 `move_L` 等路径规划，没有场景避碰或接触力控。
-`MotionPlan.joint_waypoints` 保存原始几何分段点；控制进程复核这些点、分段关节插值的
-限位/工作区/最大跨度和实际起点。TOPPRA 样条数值检查留在 worker，
-控制进程不重复检查并未执行的密集样条，避免计算占用拖慢 CAN 接收。
-独立轨迹线程按配置周期读反馈，仅切换分段时发送一次 `NeroArm.move_joints`，
-中间点达到关节容差，并收到本次下发后的新鲜 J 模式到位反馈，再于下一监督周期发送下一段，
-不再额外等待 0.2 秒稳定；
-仅整条运动的最终终点和保持确认保留稳定检查，不把密集计时样本灌入普通 J。
-`joint_speed_percent` 默认 10，到位容差默认 0.003 rad。固件执行自己的位置运动处理，
-TOPPRA 时间不再驱动执行；规划 rad/s、rad/s² 约束不等于实际速度/加速度保证。
+`move_L` 使用 `LinearMotionPlan`，只保存实测起始关节和 task 系虚拟 TCP 终点，
+不生成主机逐点 IK、TOPPRA 时间表或普通 J 分段。控制进程复核起点与目标工作区，
+按标定转换为 base 法兰 xyz-rpy，再调用 `NeroArm.move_linear`，由固件完成内部规划。
+固定朝向时虚拟 TCP 也随法兰沿直线平移；同时旋转时，带偏移的 TCP 不保证严格直线。
+这里只检查起点/终点工作区，不预测固件内部轨迹，也没有场景避碰或接触力控。
+
+厂家 L 的监督移植自 `scripts/nero/check_move_linear_zbx.py`，拆成固定周期状态机：
+先等 `motion_status=0`（`linear_pre_idle_timeout_s`，默认 10 s），发送后等待新鲜
+L 模式 `motion_status=1`（`linear_start_timeout_s`，默认 1 s）。未确认启动时重发
+同一目标，`linear_max_attempts` 默认 3 次、包含首次；耗尽后仍进入到位等待，兼容未采样到启动沿的短动作。
+随后最多等待 `completion_timeout_s`（默认 30 s）：TCP 位置/角度误差达标，
+相邻关节变化不超过 0.002 rad，持续稳定 0.2 s，且新鲜 L 模式状态为已到位。
+默认位置/角度阈值沿用脚本的 **0.02 m / 2°**，分别可由 `linear_position_tolerance_m`
+和 `linear_angle_tolerance_rad` 配置。完成后保持固件 L 目标，不额外切回 J；
+超时则返回 failed，并通过普通 J 固定当前关节，保持确认后才能结束 cell。
+各阶段不阻塞 RPC 或人工 hold；`wait=False` 仍返回原有 cell 内运动句柄。
+
+`move_J` 与启动 PTP 继续使用 `MotionPlan` 的两个关节端点；固件报告 J 到位后，
+按 `joint_arrival_tolerance_rad`（默认 0.015 rad）判断误差，不另等运动停稳窗口；
+普通保持确认仍需 0.2 s 稳定。J/L 的 `joint_speed_percent` 默认 10，
+主机规划 rad/s、rad/s² 参数不构成固件实际速度/加速度保证。
 `joint_frame_interval_s` 默认 0.001：七轴目标的 `0x155/156/157/170` 四帧
 在主机相邻发送调用之间保留至少 1 ms，避免集中下发时实机出现停在上一目标的现象。
-每个几何目标仍只发送一次，不放宽到位条件、不做超时重发，也不增加分段停稳等待。
+该节拍仅针对 J 的四帧关节目标，每个 J 目标仍只发送一次；不作用于厂家 L 的三帧法兰目标。
 节拍只在 agent 控制连接的单组发送锁内运行，不通过 Codex/MCP 调度；遥操作不启用此发送配置。
-`move_L` 仍按虚拟 TCP 直线和姿态插值做 IK，由普通 J 分段近似，不保证连续严格直线。
-到位超时保留最后目标并报告失败，不重抓下坠后的反馈作为新目标。
 `control-samples.jsonl` 记录命令发送事件（`command_sent=true`）及每个监督周期的目标/实测关节与 TCP，
-由普通线程消费内存队列后落盘；记录不是总线上逐帧 ACK。
+L 另外记录阶段、发送次数、启动确认及 TCP 误差；由普通线程消费内存队列后落盘，
+记录不是总线上逐帧 ACK。`MotionResult.diagnostics` 保留 L 的 TCP 误差、法兰目标及最新固件状态。
 实机连接另存 `arm-can.jsonl`：SDK 的每帧 Bus.send 返回/异常、独立 SocketCAN
 接收到的模式/七轴目标 local echo、原始状态及关节反馈，以及每秒接口累计统计。
 用时间戳关联目标与原始帧，用本轮前后 `tx_dropped` 差值判断新增丢包；

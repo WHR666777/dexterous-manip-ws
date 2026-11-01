@@ -126,7 +126,16 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
     for name, default in (("joint_tolerance_rad", .005), ("joint_arrival_tolerance_rad", .015),
                           ("completion_timeout_s", 30.)):
         config["motion"][name] = positive(config["motion"].get(name, default), name)
-    # 普通 J 的固件速度百分比，与 TOPPRA 使用的 rad/s 上限不是同一物理量。
+    # 厂家 L 采用 check_move_linear_zbx.py 已实测的空闲等待、启动确认和
+    # TCP 到位参数。注意位置阈值为 0.02 m（2 cm），不是旧 IK 的 2 mm。
+    for name, default in (("linear_pre_idle_timeout_s", 10.), ("linear_start_timeout_s", 1.),
+                          ("linear_position_tolerance_m", .02),
+                          ("linear_angle_tolerance_rad", float(np.deg2rad(2)))):
+        config["motion"][name] = positive(config["motion"].get(name, default), name)
+    attempts = config["motion"].setdefault("linear_max_attempts", 3)
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        raise ValueError("motion.linear_max_attempts must be a positive integer.")
+    # J/L 共用现有固件速度百分比，与 TOPPRA 使用的 rad/s 上限不是同一物理量。
     # 使用本次实机单目标检查已验证的 10%；不由 agent cell 临时覆盖。
     speed = config["motion"].setdefault("joint_speed_percent", 10)
     if isinstance(speed, bool) or not isinstance(speed, int) or not 1 <= speed <= 100:

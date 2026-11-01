@@ -13,8 +13,9 @@
   **yaw 是相对该初始抓取姿态、绕 task +Z 的增量，单位 rad；yaw=0 保持初始抓取朝向。**
   不是法兰的绝对 RPY yaw，不是相对当前 cell 的姿态，也不要求 TCP X 对齐 task X。
   标定内部为计算工具固定旋转补入的 yaw=0 不作为实际起始航向。
-- 工作区仅约束虚拟 TCP 的位置。当前规划含关节限位、IK、路径工作区与速度/加速度检查，
-  没有场景碰撞、桌面接触或力控能力。动作需根据图像和任务几何明确选择。
+- 工作区仅约束虚拟 TCP 的位置。J 在主机检查 IK、关节限位和工作区；L 在主机检查
+  起点/终点工作区，内部 IK 与路径由固件处理。没有场景碰撞、桌面接触或力控能力。
+  动作需根据图像和任务几何明确选择。
 
 ## 注入对象 API
 
@@ -33,7 +34,7 @@ Python globals 中预置 `robo`、`np`、`math`、`time`。
 | `robo.pixel_to_task(obs, [u,v])` | 使用该快照同一像素深度反投影为 task XYZ；原图整数坐标，零/无效深度直接报错 |
 | `robo.top_down_pose(xyz, yaw=0.0)` | 构造 task 系虚拟 TCP 的 4×4 位姿，不发动作 |
 | `robo.move_J(target_tcp, wait=True)` | task 系虚拟 TCP 目标；内部一次 IK，再发送一次关节 PTP 目标 Single-target joint PTP |
-| `robo.move_L(target_tcp, wait=True)` | 虚拟 TCP 直线/姿态插值及 IK；普通 J 逐段近似执行，规划失败不跳过 |
+| `robo.move_L(target_tcp, wait=True)` | task 系虚拟 TCP 目标转 base 法兰目标；原厂 `move_l` 执行，监督启动与 TCP 到位 Native linear motion |
 | `robo.open_gripper()` / `robo.close_gripper()` | 只发送拇指/食指的配置预设；其余三指不发位置命令 |
 | `robo.pause_and_hold(reason)` | 暂停轨迹、使用反馈作固定保持目标；确认后结束当前 cell，返回 status=paused |
 
@@ -45,21 +46,34 @@ top-down 任务优先使用 `top_down_pose` 构造目标，避免把法兰姿态
 只下发一次最终关节目标，由固件平滑；不要求 agent 求 IK 或提供关节角。
 PTP 整体关节变化上限为 2π rad，并检查限位、工作区与实际起点；中途 TCP 路径不保证直线或避碰。
 IK 失败返回 `planning_failed`，不下发运动。关节目标只保留在宿主启动回位的内部入口。
-`move_L` 用采样 IK 和普通 J 分段实现近似直线，中间点在固件报到位后推进（不另做停稳等待），
-超过警告容差 `joint_tolerance_rad` 记录 warning，超过失败容差 `joint_arrival_tolerance_rad` 立即终止；不承诺连续空间
-的精确直线或避碰。底层不使用 JS，不将 TOPPRA 密集点连续灌入普通 J。
-固件速度由 `motion.joint_speed_percent` 指定（默认 10%），不是 rad/s。`move_J` 不做
-TOPPRA 时间规划；`move_L` 的 TOPPRA 仍用于数值规划/检查，不决定固件执行时间，
-不能据此声称实际速度/加速度已被精确限制。
+`move_L` 不再逐点求主机 IK、不做 TOPPRA、不发送 J 分段；原厂 `move_l` 接收一个
+base 系法兰 xyz-rpy 目标。固定朝向平移时，虚拟 TCP 也随法兰沿直线平移。
+同时改变朝向时，工具偏移会影响虚拟 TCP 的中途路径，不保证该虚拟点严格沿直线；
+top-down 抓取/搬运需要直线时保持 yaw 不变，调整朝向另选合适的撤高位置。
+主机不会预先证明固件内部路径的工作区、关节轨迹或避碰。
+J/L 共用 `motion.joint_speed_percent`（默认 10%），百分比不是 rad/s，
+配置中的主机规划 rad/s、rad/s² 上限不构成固件实际速度/加速度保证。
+
+L 的执行逻辑来自实测脚本 `check_move_linear_zbx.py`：先等待 `motion_status=0`，
+默认最多 10 s；发送后在 1 s 内检查新鲜 L 模式反馈是否出现 `motion_status=1`。
+未确认启动时最多发送 3 次**同一目标**（含首次），不是换点抓取或重新规划。
+次数耗尽后仍进入到位等待，因为很短的运动可能没有被采样到启动沿。
+到位等待默认 30 s，由 `completion_timeout_s` 控制；人工 hold 可在任意阶段撤销动作权限。
 
 ## 反馈与 cell 闭环 Feedback
 
 运动默认返回 `MotionResult`，查看 `.status`、`.reached`、`.reason`、`.actual_joints`。
-超时的 `.diagnostics` 含点号、目标/实测关节、逐轴误差和固件状态；失败后停止并报告，不自动重发。
-`planning_failed` 不下发运动；`completed/reached=True` 表示固件反馈到位且关节偏差在
-`joint_arrival_tolerance_rad`（默认 0.015 rad）以内。偏差超过 `joint_tolerance_rad`（默认 0.005 rad）
-会记录 warning 但不影响完成；偏差超过 `joint_arrival_tolerance_rad` 立即终止并报 failed。
-运动到位判定不使用停稳窗口；保持到位（quiescent）仍要求 0.2 秒稳定。
+J 的 `.diagnostics` 含点号、目标/实测关节、逐轴误差和固件状态；L 包含阶段、发送次数、
+启动是否确认、目标/实测 TCP、位置/角度误差、法兰命令及固件状态。失败后停止并报告，
+agent 不应自行重复失败动作；L 内部只在启动未确认时按上述次数重发。
+`planning_failed` 不下发运动。J 的 `completed/reached=True` 表示固件反馈到位且关节偏差在
+`joint_arrival_tolerance_rad`（默认 0.015 rad）以内；超过 `joint_tolerance_rad`（默认 0.005 rad）
+记录 warning，超过到位阈值则 failed。J 不另等停稳窗口，保持确认仍要求 0.2 s 稳定。
+L 的完成要求：收到本次发送之后的 L 模式 `motion_status=0`，实测 TCP 位置/角度误差在
+`linear_position_tolerance_m` / `linear_angle_tolerance_rad` 内，且相邻周期关节变化不超过
+0.002 rad、连续稳定 0.2 s。默认阈值沿用实测脚本：**0.02 m（2 cm）/ 2°**，
+不是毫米级抓取精度保证。完成后由固件保持，不额外发送 J 覆盖 L 目标。
+L 空闲等待或到位超时返回 failed，并转为当前关节的普通 J 固定保持；保持未确认则任务结束。
 不能把到位、SDK 返回、手指关节反馈解释为抓布成功。第一版通过再次 `observe()` + `show()`，
 让模型查看实际图像判断抓布效果；没有专门抓布判定接口。
 

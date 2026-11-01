@@ -388,7 +388,7 @@ stdout 和运动反馈在 cell 返回后更新，图片为观测快照；详细�
 
 旧 app-server、普通子任务脚本提交、参数回信、demo 与对应执行后端已删除，不再提供原来的 `demo/script` 命令或 `cloth_agent.tools` 接口。
 
-`geometry.py`、`planning.py`、`config.py` 与标定配置已接入新任务主流程；IK/TOPPRA 在 worker 计算，设备进程复核与执行。几何函数仍供现有 TCP/相机标定使用。`configs/cloth_agent_mock.yaml` 仅作为规划测试的数值输入，不对应假设备运行或 demo。
+`geometry.py`、`planning.py`、`config.py` 与标定配置已接入新任务主流程。`move_J` 在 worker 求一次 IK，再由设备进程发送关节 PTP；`move_L` 把虚拟 TCP 转为法兰目标，使用原厂 `move_l`，配合固件空闲、启动确认、有界重发和 TCP 到位监督，不再使用逐点 IK/J 分段。L 的位置到位阈值沿用实测脚本的 0.02 m，可在 `motion.linear_position_tolerance_m` 调整。几何函数仍供现有 TCP/相机标定使用；独立规划器的 TOPPRA 保留供规划脚本使用。`configs/cloth_agent_mock.yaml` 仅作为规划测试的数值输入，不对应假设备运行或 demo。
 
 ## 目录
 

@@ -25,7 +25,7 @@ calibration:
   file: ../data/calibration/pinch-01/calibration.yaml
   arm: right
 motion:
-  # 普通 J 每段发送一次，反馈确认到位；百分比不是 rad/s。
+  # J PTP 与厂家 L 共用固件速度百分比；不是 rad/s。
   joint_speed_percent: 10
   # 七轴目标的四个 CAN 帧在主机发送时至少间隔 1 ms；非分段停稳等待。
   # Nero 1.11 实机复现使用；0 只用于诊断对照，不建议用于任务。
@@ -37,6 +37,14 @@ motion:
   joint_tolerance_rad: 0.005
   joint_arrival_tolerance_rad: 0.015
   completion_timeout_s: 30.0
+  # 厂家 L：先等空闲，再发单个法兰目标；1 s 内未确认启动才重发同一目标。
+  # 最多发送 3 次（含首次）；次数耗尽后仍进入到位等待，不改目标、不切换 J 分段。
+  linear_pre_idle_timeout_s: 10.0
+  linear_start_timeout_s: 1.0
+  linear_max_attempts: 3
+  # 沿用 check_move_linear_zbx.py 的到位阈值：2 cm / 2 deg，另需稳定 0.2 s。
+  linear_position_tolerance_m: 0.02
+  linear_angle_tolerance_rad: 0.03490658503988659
 observations:
   task_from_camera: null
 camera:
