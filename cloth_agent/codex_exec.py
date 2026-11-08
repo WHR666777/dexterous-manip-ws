@@ -38,6 +38,13 @@ Python 环境预置 robo、np、math、time。变量、函数与允许的 import
 
 执行 Execution：一次只执行一个 cell；普通异常后环境保留，可以下一 cell 修正。
 之前的变量修改和物理动作不会回滚。异步运动只能在当前 cell 内监督；返回前必须收尾。
+观察节奏：抬升后确认一次夹布；确认后将正常搬运、调整朝向、放置、松手和撤离连续执行，
+不因运动分段而例行 observe/show 或等待视觉反馈，最终撤离后再观察结果。每段仍检查到位，异常时停止并按需观察。
+异常反馈 Operation failures：目标/限位拒绝、观测失败和手部未到位不会单独结束会话。
+运动失败通过 MotionResult 返回；普通操作失败通过 cell 的 error/exception 返回。
+动作失败后当前 cell 的后续动作可能已被撤权；在下一 cell 读取 state，必要时重新观察，
+再调整目标恢复，不盲目重复。旧运动必须先停止并确认保持，才能开始下一 cell。
+人工 hold、设备失能、控制反馈失效、通信故障或保持失败仍会结束会话，不尝试绕过。
 运动学反馈 Kinematics：主机 IK 返回 planning_failed 时未执行动作，可调整目标重新调用 move。
 固件 NO_SOLUTION 是状态反馈，不需要清错或恢复接口，也不必等待 NORMAL 才发送新命令。
 需要重新规划时读取实际状态、调整目标，再调用 move_J/move_L；仍遵守一次一条运动的规则。
@@ -46,12 +53,18 @@ Python 环境预置 robo、np、math、time。变量、函数与允许的 import
 """
 
 
+EXPERIENCE_FILES = (
+    Path(__file__).parent / "grasp_examples" / "experience.md",
+    Path(__file__).with_name("fold33_experience.md"),
+)
+
+
 def build_prompt(session, task):
     # 固定操作知识在启动时一次注入，不再让模型为了单位/TCP/手型调用 info 工具。
     operations = Path(__file__).with_name("robot_operations.md").read_text(encoding="utf-8")
     # 把人工示范经验随本轮 prompt 一次提供给模型；worker 禁止文件访问，
     # 不能只给文档路径而期待 agent 自行读取。经验中的数值仅为条件先验。
-    experience = Path(__file__).with_name("grasp_experience.md").read_text(encoding="utf-8")
+    experience = "\n\n".join(path.read_text(encoding="utf-8") for path in EXPERIENCE_FILES)
     actual = {"hardware_connected": session.control.ready["hardware_connected"],
               "startup_prepared": session.startup_prepared,
               "robot_config": session.robot_config}
@@ -84,9 +97,9 @@ def build_command(session, mcp_url, *, executable="codex", model=None):
         command.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
     # Markdown 正文已进入 prompt；将其中链接的 PNG 按出现顺序直接作为
     # 启动图片附件，模型才能实际看到示范。无需新增 MCP 工具或图片读取流程。
-    experience = Path(__file__).with_name("grasp_experience.md")
-    for link in re.findall(r"\]\(([^)]+\.png)\)", experience.read_text(encoding="utf-8")):
-        command.extend(["--image", str((experience.parent / link).resolve())])
+    for experience in EXPERIENCE_FILES:
+        for link in re.findall(r"\]\(([^)]+\.png)\)", experience.read_text(encoding="utf-8")):
+            command.extend(["--image", str((experience.parent / link).resolve())])
     command.append("-")
     return command
 

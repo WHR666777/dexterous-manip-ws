@@ -8,9 +8,14 @@ from typing import Any, Callable, List, Optional
 
 import numpy as np
 
+from .errors import CommandRejected
+
 
 NERO_DOF = 7
 NERO_MOTOR_FEEDBACK_MAX_AGE_S = 0.5
+# 实测起点/保持目标仅容许反馈在官方边界外最多 1 mrad；不是 agent 目标的限位容差。
+# 使用边界内的整 mrad 值，避免 2.146755 附近的反馈/指令量化再次越界。
+NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD = 0.001
 
 
 def _load_nero_sdk():
@@ -825,6 +830,28 @@ class NeroArm:
                 raise ValueError("Joint command exceeds max_joint_delta.")
         return command
 
+    def hold_target_from_feedback(self, joints: Any) -> np.ndarray:
+        """将一次真实反馈变为边界内的固定保持目标，不修改原始反馈。
+
+        fold-30 的 J4 实测为 2.147，官方上限为 2.146755。直接回发实测值
+        会被严格限位拒绝。这里只允许不超过 1 mrad 的边界差异，将保持目标
+        收到官方区间内的整 mrad 边界（该例为 2.146）。仅边界附近的值会调整。
+        明显越界或无效反馈仍报控制故障；普通 move_joints 的限位检查不放宽。
+        此函数不读取设备、不发送指令，只供控制进程捕获保持目标时调用。
+        """
+        try:
+            feedback = self._array_from_input(joints, (NERO_DOF,))
+        except ValueError as exc:
+            raise RuntimeError("保持反馈无效 Invalid joint feedback for hold") from exc
+        lower, upper = self._joint_limits.T
+        tolerance = NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD
+        if np.any(feedback < lower - tolerance - 1e-9) or np.any(feedback > upper + tolerance + 1e-9):
+            raise RuntimeError("保持反馈明显越限 Hold feedback exceeds joint boundary tolerance: "
+                               f"joints={feedback.tolist()}, limits={self._joint_limits.tolist()}")
+        inside_lower = np.ceil(lower / tolerance) * tolerance
+        inside_upper = np.floor(upper / tolerance) * tolerance
+        return np.clip(feedback, inside_lower, inside_upper)
+
     @staticmethod
     def _validate_speed_percent(speed_percent: Any) -> int:
         if (
@@ -890,10 +917,13 @@ class NeroArm:
         可选映射 ``set_speed_percent()`` 后映射 ``move_j()`` 一次，不等待完成；
         连续目标频率必须经真机逐级验证。
         """
-        speed = self._prepare_motion(speed_percent)
-        command = self.validate_joint_command(
-            joints, max_joint_delta=max_joint_delta,
-        )
+        # 仅把发送前的参数/目标校验标记为可恢复拒绝。SDK 发送期间的异常不能
+        # 据此宣称“没有执行”，仍原样交给上层作为设备/通信故障处理。
+        try:
+            speed = self._prepare_motion(speed_percent)
+            command = self.validate_joint_command(joints, max_joint_delta=max_joint_delta)
+        except ValueError as exc:
+            raise CommandRejected(str(exc)) from exc
         if speed is not None:
             self._driver.set_speed_percent(speed)
         self._driver.move_j(command.tolist())
@@ -999,11 +1029,17 @@ class NeroArm:
         可选映射 ``set_speed_percent()`` 后映射 ``move_l()``；不等待完成，官方不
         承诺其可用作连续目标流。
         """
-        speed = self._prepare_motion(speed_percent)
-        command = self._validate_pose(pose)
+        try:
+            speed = self._prepare_motion(speed_percent)
+            command = self._validate_pose(pose)
+        except ValueError as exc:
+            raise CommandRejected(str(exc)) from exc
         if speed is not None:
             self._driver.set_speed_percent(speed)
         self._driver.move_l(command.tolist())
+        error = self._driver.get_comm_error()
+        if error is not None:
+            raise RuntimeError(f"Nero linear send failed on {self._can_channel}: {error}")
 
     def set_tcp_offset(self, pose: List[float]) -> None:
         self._driver.set_tcp_offset(pose)

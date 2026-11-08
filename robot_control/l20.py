@@ -11,6 +11,8 @@ from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 
+from .errors import GripperTimeout, OperationError
+
 
 L20_JOINT_NAMES = (
     "thumb_base", "index_base", "middle_base", "ring_base", "little_base",
@@ -419,7 +421,9 @@ class LinkerHandL20:
                 return cls._validate_raw_values(values, shape, name)
             return cls._array_from_input(values, shape, name)
         except ValueError as exc:
-            raise RuntimeError(
+            # 收到的数据不可用时把本次操作交回 agent；真实 SDK/CAN 异常
+            # 不在这里改写，仍由控制进程结束会话。保留 RuntimeError 兼容性。
+            raise OperationError(
                 "L20 {} feedback is unavailable or malformed.".format(name),
             ) from exc
 
@@ -539,7 +543,7 @@ class LinkerHandL20:
                       f"errors={errors.tolist()}, tolerance_raw={tolerance_raw}")
             if attempt < max_retries:
                 print(f"[L20] 未到位，重发同一目标 Position retry: {detail}", flush=True)
-        raise TimeoutError(f"L20 空载位置到位超时 Position arrival timed out: {detail}")
+        raise GripperTimeout(f"L20 空载位置到位超时 Position arrival timed out: {detail}")
 
     def set_joint_positions_normalized(self, action: Any) -> None:
         """将归一化 20 槽位目标半向上转换后发送。
@@ -595,6 +599,8 @@ class LinkerHandL20:
                 for values in cached_by_finger:
                     self._array_from_feedback(values, (6,), 'finger position', raw=True)
                 feedback = low_level.joint_state_to_cmd_state(cached_by_finger)
+            except (AttributeError, ValueError, OperationError) as exc:
+                raise OperationError("L20 位置缓存不可用 Position cache unavailable") from exc
             except Exception as exc:
                 raise RuntimeError(
                     "L20 G20-protocol position cache is unavailable.",

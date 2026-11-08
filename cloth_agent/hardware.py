@@ -17,6 +17,8 @@ import uuid
 
 import numpy as np
 
+from robot_control.errors import CommandRejected, OperationError
+
 
 class RobotController:
     def __init__(self, config, directory, manual_stop, failed, allow_hardware):
@@ -53,6 +55,7 @@ class RobotController:
         self._hand_read_at = None
         self._hold = None
         self._hold_sent = False
+        self._hold_mode = 1  # 记录实际保持模式；显式暂停完成后的 L 也会改为 J。
         self._stable_since = None
         self._hold_feedback = None
         self._hold_confirmed = False
@@ -238,7 +241,7 @@ class RobotController:
     def _admit(self, cell_id):
         if (self.manual_stop.is_set() or self.ended or self.fault
                 or self.cell_paused or cell_id != self.active_cell):
-            raise ValueError("动作权限已失效 Robot action admission revoked")
+            raise CommandRejected("动作权限已失效 Robot action admission revoked")
 
     def _require_hardware(self):
         if not self.connected:
@@ -254,11 +257,13 @@ class RobotController:
                 # 保持仍使用默认的单步限制，不把 PTP 上限全局套到保持请求。
                 from .planning import PTP_MAX_JOINT_DELTA_RAD
 
-                ptp = self.motion is not None and self.motion["plan"].mode in {"ptp", "startup_ptp"}
+                ptp = (self.motion is not None and self.motion["status"] == "running"
+                       and self.motion["plan"].mode in {"ptp", "startup_ptp"})
                 self.arm.move_joints(q, speed_percent=self.motion_settings["joint_speed_percent"],
                                      max_joint_delta=PTP_MAX_JOINT_DELTA_RAD if ptp else None)
                 sent_at = time.monotonic()
                 self._last_send_wall_at = time.time()
+                self._hold_mode = 1
                 if self.on_control_sample is not None:
                     self.on_control_sample({
                         "sent_at": sent_at, "command_sent": True,
@@ -298,6 +303,7 @@ class RobotController:
             started, sent_wall = time.monotonic(), time.time()
             self.arm.move_linear(motion["flange_pose"],
                                  speed_percent=self.motion_settings["joint_speed_percent"])
+            self._last_send_wall_at = sent_wall
             now = time.monotonic()
             motion.update(attempt=motion["attempt"] + 1, target_sent=True,
                           target_sent_at=now, target_sent_wall_at=sent_wall,
@@ -311,14 +317,15 @@ class RobotController:
                 target_tcp=motion["plan"].target_tcp.tolist(), flange_pose=motion["flange_pose"],
                 actual_joints=self._joints.tolist(), tcp=deepcopy(self._tcp))
 
-    def _fail_linear(self, motion, reason):
-        """L 超时后取消该动作并固定当前关节，不能让迟到的固件运动继续推进。"""
+    def _fail_motion(self, motion, reason):
+        """动作失败后固定当前关节；不锁存设备故障，允许下一 cell 重新规划。"""
         with self._lock:
             if self.manual_stop.is_set():
                 return
             motion.update(status="failed", reached=False, reason=reason,
                           actual_joints=self._joints.tolist())
-        self._linear_event(motion, reason)
+        if motion.get("executor") == "native_linear_L":
+            self._linear_event(motion, reason)
         # 先保留 failed 及完整诊断，再复用普通暂停：只捕获一次反馈，发送一个
         # J 保持目标；不重新规划、不松手、不调用会导致下坠的阻尼 emergency_stop。
         self._pause(reason)
@@ -360,7 +367,7 @@ class RobotController:
             if status["motion_status"] == 0:
                 self._send_linear(motion)
             elif now - motion["phase_started_at"] >= self.motion_settings["linear_pre_idle_timeout_s"]:
-                self._fail_linear(motion, "厂家 L 发送前等待空闲超时 Native L pre-idle timed out; "
+                self._fail_motion(motion, "厂家 L 发送前等待空闲超时 Native L pre-idle timed out; "
                                   f"firmware={status}")
             return
 
@@ -396,17 +403,29 @@ class RobotController:
                 # 固件 L 已完成并自行保持。不额外发送 J，否则可能覆盖刚完成
                 # 的 L 目标；只保存当前关节，供原有静止监督/下一 cell 收尾使用。
                 self._hold, self._hold_sent, self._hold_confirmed = self._joints.copy(), True, True
+                self._hold_mode = 2
                 motion.update(status="completed", reached=True)
             self._linear_event(motion, "厂家 L 到位已确认 Native L arrival confirmed",
                                position_error_m=position_error, angle_error_rad=angle_error)
         elif now - motion["phase_started_at"] >= self.motion_settings["completion_timeout_s"]:
-            self._fail_linear(motion, "厂家 L 到位超时 Native L arrival timed out; "
+            self._fail_motion(motion, "厂家 L 到位超时 Native L arrival timed out; "
                               f"position_error_m={position_error:.6f}, angle_error_rad={angle_error:.6f}; "
                               f"attempts={motion['attempt']}, firmware={status}")
 
     def pause(self, reason):
         with self._trajectory_lock:
             return self._pause(reason)
+
+    def _capture_hold_target(self):
+        """只捕获一次真实关节；仅保持目标进行小幅边界处理，状态反馈保持原值。"""
+        feedback = self.arm.get_joint_positions()
+        target = self.arm.hold_target_from_feedback(feedback)
+        if not np.array_equal(feedback, target) and self.on_control_sample is not None:
+            self.on_control_sample({
+                "description": "保持边界调整 Hold target moved inside official limits",
+                "command_sent": False, "actual_joints": feedback.tolist(),
+                "target_joints": target.tolist(), "sampled_at": time.monotonic()})
+        return target
 
     def _pause(self, reason):
         self.cell_paused = True
@@ -416,13 +435,18 @@ class RobotController:
                                    actual_joints=self._joints.tolist() if self._joints is not None else None)
         if self.connected and not self.manual_stop.is_set():
             # 读真实反馈作为新的固定目标；不继续原轨迹，也不松开 L20。
-            q = self.arm.get_joint_positions()
+            q = self._capture_hold_target()
             self._hold = q.copy()
             self._hold_sent = False
             self._hold_confirmed = False
             self._stable_since = None
             self._hold_feedback = None
-            self._send(q)
+            try:
+                self._send(q)
+            except CommandRejected as exc:
+                # 同样的目标拒绝在普通动作中可以返回；但保持目标也无法发送
+                # 意味着旧运动未能可靠收尾，必须升级为控制故障，而不是继续抓取。
+                raise RuntimeError(f"保持目标被拒绝 Hold command rejected: {exc}") from exc
         return self.snapshot()
 
     def manual_hold(self, reason):
@@ -443,7 +467,7 @@ class RobotController:
             try:
                 # 使用带新鲜度检查的七轴实测值，不使用旧轨迹目标或部分填零缓存。
                 # 捕获失败时不在后续周期重抓目标，也不自动切换成阻尼急停。
-                self._manual_target = self.arm.get_joint_positions().copy()
+                self._manual_target = self._capture_hold_target()
                 report["right"] = "target_captured"
             except Exception as exc:
                 report["right"] = "hold_failed"
@@ -493,7 +517,15 @@ class RobotController:
     def tick(self, delta):
         """独立轨迹线程推进一次；RPC、图像落盘和手部查询不能改变下发周期。"""
         with self._trajectory_lock:
-            self._tick(delta)
+            try:
+                self._tick(delta)
+            except CommandRejected as exc:
+                # 只有 SDK 发送前明确拒绝的动作目标可恢复；不能把反馈失效、
+                # CAN 错误或未知 ValueError 一并吞掉。保持失败也不能退回普通动作。
+                if not self.motion or self.motion["status"] != "running":
+                    raise RuntimeError(f"保持指令失败 Hold command failed: {exc}") from exc
+                self.motion["diagnostics"]["command_rejected"] = True
+                self._fail_motion(self.motion, f"动作目标被拒绝 Motion command rejected: {exc}")
 
     def _tick(self, delta):
         if not self.connected or self.manual_stop.is_set():
@@ -599,10 +631,17 @@ class RobotController:
         stable = (self._hold_feedback is not None
                   and np.max(np.abs(self._joints - self._hold_feedback)) <= .005)
         self._hold_feedback = self._joints.copy()
+        # 关节暂时不动不能证明旧 L 已被 J 保持接管。暂停后必须看到发送后的
+        # 新鲜 J/idle；已成功完成的 L 则继续监督其 L/idle，不额外切换控制模式。
+        sent_at = self._last_send_wall_at
+        idle = (self._hold_sent and sent_at is not None
+                and self._arm_status["received_at_unix"] > sent_at
+                and self._arm_status["mode_feedback"] == self._hold_mode
+                and self._arm_status["motion_status"] == 0)
         with self._lock:
             if self.manual_stop.is_set():
                 return
-            if error <= arrival_tol and stable:
+            if idle and error <= arrival_tol and stable:
                 self._stable_since = self._stable_since or time.monotonic()
                 self._hold_confirmed = time.monotonic() - self._stable_since >= .2
             else:
@@ -620,7 +659,7 @@ class RobotController:
                 # 尚未发运动目标才捕获一次；后续周期继续尝试原位保持。
                 self.cell_paused = True
                 if self.connected and self._hold is None:
-                    self._hold = self.arm.get_joint_positions().copy()
+                    self._hold = self._capture_hold_target()
                     self._hold_sent = False
             except Exception as exc:
                 reason += f"；保持请求失败 Hold request failed: {exc}"
@@ -637,32 +676,39 @@ class RobotController:
         self._require_hardware()
         if payload.get("mode") == "native_linear":
             return self._start_linear_motion(cell_id, payload)
-        plan = MotionPlan.from_dict(payload)
+        try:
+            plan = MotionPlan.from_dict(payload)
+        except ValueError as exc:
+            raise CommandRejected(f"运动数据无效 Invalid motion data: {exc}") from exc
         if plan.arm != "right":
-            raise ValueError("第一版只允许右臂 Only right arm is enabled")
+            raise CommandRejected("第一版只允许右臂 Only right arm is enabled")
         if plan.mode not in {"joint", "cartesian", "ptp", "startup_ptp"} or plan.joint_waypoints is None:
-            raise ValueError("普通 J 执行需要几何分段点 Joint executor requires geometric waypoints")
+            raise CommandRejected("普通 J 执行需要几何分段点 Joint executor requires geometric waypoints")
         startup_ptp = plan.mode == "startup_ptp"
         ptp = plan.mode in {"ptp", "startup_ptp"}
         if ptp and len(plan.joint_waypoints) != 2:
-            raise ValueError("PTP 仅接受起点和单个终点 PTP requires two endpoints")
+            raise CommandRejected("PTP 仅接受起点和单个终点 PTP requires two endpoints")
         if startup_ptp and (cell_id != 0 or not self.config.get("startup", {}).get("enabled", False)):
-            raise ValueError("启动 PTP 只允许固定准备 cell Startup PTP requires cell 000")
+            raise CommandRejected("启动 PTP 只允许固定准备 cell Startup PTP requires cell 000")
         # 发送的是真正的几何分段点，不是计时样本。这里仅复核
         # 每段关节插值的限位/工作区和最大跨度；不把固件内部路径当作已知曲线。
-        self.validator._check_path("right", plan.joint_waypoints)
+        if ptp:
+            # 实测起点可能有 1 mrad 边界差异，但最终下发的单个 PTP 目标
+            # 必须严格位于官方区间；不能将反馈容差用于放宽 agent 的目标。
+            self.validator._check_path("right", plan.joint_waypoints[1:])
+        self.validator._check_path("right", plan.joint_waypoints, feedback_path=ptp)
         starts, ends = plan.joint_waypoints[:-1], plan.joint_waypoints[1:]
         delta_limit = (PTP_MAX_JOINT_DELTA_RAD if ptp
                        else self.motion_settings["max_ik_step_rad"])
         if np.max(np.abs(ends - starts)) > delta_limit:
-            raise ValueError("J 分段跨度过大 Joint waypoint step exceeded")
+            raise CommandRejected("J 分段跨度过大 Joint waypoint step exceeded")
         # PTP 整体跨度可能大于任务分段；按 joint_step_rad 生成只读检查点，
         # 保留路径工作区检查的密度。执行数据仍只有起点/终点，不发送检查点。
         count = (max(10, int(np.ceil(np.max(np.abs(ends - starts))
                                     / self.motion_settings["joint_step_rad"])) + 1)
                  if ptp else 10)
         segments = np.linspace(starts, ends, count, axis=1).reshape(-1, 7)
-        self.validator._check_path("right", segments)
+        self.validator._check_path("right", segments, feedback_path=ptp)
         # 普通 J 不执行 TOPPRA 的计时样本和样条，设备进程只复核实际下发的
         # 几何目标及分段。密集样条仍由 worker 在规划时检查，不能在这里用
         # 无关的重复计算拖慢 CAN 接收，也不能将样条限速误称为固件限速。
@@ -676,7 +722,7 @@ class RobotController:
             q = self.arm.get_joint_positions()
             seed_error = float(np.max(np.abs(q - plan.positions[0])))
             if seed_error > self.motion_settings["joint_arrival_tolerance_rad"]:
-                raise ValueError(
+                raise CommandRejected(
                     "轨迹起点已变化 Recompute motion from current feedback; "
                     f"max_error_rad={seed_error}, tolerance_rad={self.motion_settings['joint_arrival_tolerance_rad']}, "
                     f"planned_start={plan.positions[0].tolist()}, actual_joints={q.tolist()}"
@@ -684,7 +730,7 @@ class RobotController:
             with self._lock:
                 self._admit(cell_id)
                 if self.motion and self.motion["status"] == "running":
-                    raise ValueError("已有运动正在执行 A motion is already running")
+                    raise CommandRejected("已有运动正在执行 A motion is already running")
                 self._hold_confirmed, self._stable_since = False, None
                 self._hold_feedback = None
                 self.motion = {"plan": plan, "waypoint_index": 1, "target_sent": False,
@@ -700,9 +746,12 @@ class RobotController:
         from .geometry import tcp_to_flange
         from .planning import LinearMotionPlan
 
-        plan = LinearMotionPlan.from_dict(payload)
+        try:
+            plan = LinearMotionPlan.from_dict(payload)
+        except ValueError as exc:
+            raise CommandRejected(f"L 目标数据无效 Invalid native L data: {exc}") from exc
         if plan.arm != "right":
-            raise ValueError("第一版只允许右臂 Only right arm is enabled")
+            raise CommandRejected("第一版只允许右臂 Only right arm is enabled")
         # 控制进程重新检查 seed 限位、起点/终点工作区；不信任 worker 内的
         # 持久变量，也不恢复已删除的逐点 IK/TOPPRA 主机执行路径。
         plan = self.validator.plan_linear(plan.start_joints, plan.target_tcp)
@@ -718,11 +767,11 @@ class RobotController:
         with self._trajectory_lock:
             q = self.arm.get_joint_positions()
             if np.max(np.abs(q - plan.start_joints)) > self.motion_settings["joint_arrival_tolerance_rad"]:
-                raise ValueError("运动起点已变化 Recompute native L from current feedback")
+                raise CommandRejected("运动起点已变化 Recompute native L from current feedback")
             with self._lock:
                 self._admit(cell_id)
                 if self.motion and self.motion["status"] == "running":
-                    raise ValueError("已有运动正在执行 A motion is already running")
+                    raise CommandRejected("已有运动正在执行 A motion is already running")
                 # 撤销旧 J 的软件保持目标，防止 native L 被之前的 PTP 目标覆盖。
                 # 这里只发布状态；首次发送/启动确认/重发全部由固定周期线程推进。
                 self._hold, self._hold_sent, self._hold_confirmed = None, False, False
@@ -737,8 +786,18 @@ class RobotController:
                 return self._motion_result()
 
     def _observe(self):
+        # 只有观测链路的已知采集/保存异常回到 agent。不要把 KeyError 等未知
+        # 程序错误，或机械臂读取/发送错误笼统包装成“可重试的相机问题”。
         if self.camera is None:
-            raise ValueError("相机未连接 Camera not connected")
+            raise CommandRejected("相机未连接 Camera not connected")
+        import cv2
+
+        try:
+            return self._capture_observation()
+        except (RuntimeError, OSError, cv2.error) as exc:
+            raise OperationError(f"观测失败 Observation failed: {exc}") from exc
+
+    def _capture_observation(self):
         frame = self.camera.get_latest()
         if frame is None:
             raise RuntimeError("RGB-D 缺失或过期 RGB-D unavailable/stale")
@@ -779,7 +838,7 @@ class RobotController:
         if operation == "begin_cell":
             if self.ended or self.manual_stop.is_set() or self.fault or not self.snapshot()["quiescent"]:
                 nquencent_reason = f"Motion: {('None' if self.motion is None else self.motion['status'])}, " + f"Hold: {('None' if self._hold is None else self._hold_confirmed)}"
-                raise ValueError("控制状态不允许新 cell Robot is not ready for a new cell: " +
+                raise CommandRejected("控制状态不允许新 cell Robot is not ready for a new cell: " +
                                  f"Ended: {self.ended}, Fault: {self.fault}, !Quiescent: ({('Y' if self.snapshot()['quiescent'] else nquencent_reason)})")
             self.active_cell, self.cell_paused = request["cell_id"], False
         elif operation in {"cell_end", "end_task"}:
@@ -792,14 +851,14 @@ class RobotController:
             # 已结束的轨迹保留最后一个固定目标；收尾不重新捕获偏离后的关节，
             # 由协调器检查保持确认并报告失败，不能用换目标掩盖跟踪偏差。
         elif operation != "status":
-            raise ValueError("未知协调请求 Unknown coordinator request")
+            raise CommandRejected("未知协调请求 Unknown coordinator request")
         return {**self.snapshot(), "cell_interrupted": interrupted}
 
     def _dispatch_worker(self, request):
         operation = request["operation"]
         cell_id = request.get("cell_id")
         if cell_id != self.active_cell or self.ended or self.manual_stop.is_set():
-            raise ValueError("cell 已失效 Cell admission revoked")
+            raise CommandRejected("cell 已失效 Cell admission revoked")
         if operation == "state":
             # 反馈由轨迹线程固定频率刷新；状态请求不再额外推进/阻塞控制周期。
             return self.snapshot()
@@ -807,7 +866,7 @@ class RobotController:
             return self._observe()
         if operation == "motion_status":
             if not self.motion or self.motion["motion_id"] != request["motion_id"]:
-                raise ValueError("未知运动句柄 Unknown motion handle")
+                raise CommandRejected("未知运动句柄 Unknown motion handle")
             return self.snapshot()["motion"]
         if operation == "pause":
             return self.pause(request["reason"])
@@ -815,7 +874,7 @@ class RobotController:
         if operation == "startup_open_hand":
             self._require_hardware()
             if cell_id != 0 or not self.config.get("startup", {}).get("enabled", False):
-                raise ValueError("全手张开仅允许固定启动流程 Full-hand open requires startup cell 000")
+                raise CommandRejected("全手张开仅允许固定启动流程 Full-hand open requires startup cell 000")
             # 复用 wrist-only 的同一个 SDK 包装方法，一次发送官方全手张开
             # 预设，包含其余三指。这里不是 thumb/index gripper 操作，也不是
             # reset；与 teleop 一样不把 SDK 返回宣称为五指已确认到位。
@@ -830,7 +889,7 @@ class RobotController:
             self._require_hardware()
             preset = request["preset"]
             if preset not in {"open", "closed", "replay_start"}:
-                raise ValueError("未知手型 Unknown gripper preset")
+                raise CommandRejected("未知手型 Unknown gripper preset")
             # replay_start 可由普通配置保存示范首帧，或由调试脚本从指定 CSV
             # 第一帧生成；均经同一权限检查与 thumb/index 发送路径，不接受
             # cell 自定义关节数组，也不在这里启动整段回放。
@@ -845,7 +904,7 @@ class RobotController:
             return {"command_status": "feedback_reached", "preset": preset, **result,
                     "commanded_fingers": ["thumb", "index"],
                     "delivery_confirmed": False, "hand": self.snapshot()["hand"]}
-        raise ValueError("未知 robo 操作 Unknown robo operation")
+        raise CommandRejected("未知 robo 操作 Unknown robo operation")
 
     def close(self):
         # 清理不 reset、不失能、不松手；先由协调器请求普通暂停，再结束设备连接。

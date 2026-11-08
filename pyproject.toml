@@ -30,7 +30,7 @@ vision = [
 include = ["robot_control*", "teleop*", "cloth_agent*"]
 
 [tool.setuptools.package-data]
-cloth_agent = ["robot_operations.md", "grasp_experience.md", "grasp_examples/*.png", "monitor_assets/*.html", "monitor_assets/*.css", "monitor_assets/*.js"]
+cloth_agent = ["robot_operations.md", "grasp_experience.md", "fold33_experience.md", "grasp_examples/*.md", "grasp_examples/*.png", "monitor_assets/*.html", "monitor_assets/*.css", "monitor_assets/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

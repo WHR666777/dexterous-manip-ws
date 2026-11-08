@@ -9,6 +9,8 @@ import numpy as np
 from scipy.interpolate import CubicHermiteSpline
 
 from robot_control.nero_ik import NeroIK
+from robot_control.nero import NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD
+from robot_control.errors import CommandRejected
 from .config import effective_arm, joint_vector
 from .geometry import interpolate_poses, tcp_to_flange, transform
 
@@ -18,7 +20,7 @@ from .geometry import interpolate_poses, tcp_to_flange, transform
 PTP_MAX_JOINT_DELTA_RAD = float(2 * np.pi)
 
 
-class PlanningError(ValueError):
+class PlanningError(CommandRejected):
     def __init__(self, reason, *, index=None, diagnostics=None):
         super().__init__(reason)
         self.index = index
@@ -129,7 +131,7 @@ class Planner:
         """仅校验实测起点与目标工作区；L 路径规划和 IK 交给 Nero 固件。"""
         with self._lock:
             plan = LinearMotionPlan("right", seed, target_tcp)
-            self._check_path("right", np.asarray([plan.start_joints]))
+            self._check_path("right", np.asarray([plan.start_joints]), feedback_path=True)
             bounds = self.arms["right"]["workspace"]
             if bounds is not None:
                 bounds = np.asarray(bounds, dtype=float)
@@ -173,7 +175,11 @@ class Planner:
             # 这不是固件实际路径预测，也没有场景避碰保证。
             checked = [seed.copy()]
             self._append_joint_segment(checked, target)
-            self._check_path("right", np.asarray(checked))
+            # 真正下发的终点严格限位；实测起点和仅用于检查的插值点允许
+            # 1 mrad 反馈边界差异，避免 fold-30 保持后仍无法向限位内回撤。
+            # 不截断/改写 seed，工作区 FK 仍检查原始位置。
+            self._check_path("right", np.asarray([target]))
+            self._check_path("right", np.asarray(checked), feedback_path=True)
             endpoints = np.asarray([seed, target])
             # 复用现有 MotionPlan/到位监督协议。时间字段仅满足存储格式，
             # 不代表 PTP 用时或速度；执行器只发送 endpoints[1] 一次。
@@ -232,7 +238,7 @@ class Planner:
                                    / self.motion["joint_step_rad"])))
         points.extend(np.linspace(points[-1], target, count + 1)[1:])
 
-    def _check_path(self, arm, points):
+    def _check_path(self, arm, points, *, feedback_path=False):
         solver, settings = self.ik[arm], self.arms[arm]
         points = np.asarray(points, dtype=float)
         if points.ndim != 2 or points.shape[1] != 7:
@@ -240,9 +246,12 @@ class Planner:
         # 批量做数值/限位判断；固定标定矩阵与工作区只校验一次。原先逐点
         # 重复 transform() 会为每个点反复做 allclose/det，长启动路径约需
         # 半秒，挤占同一设备进程中的 CAN 接收线程，触发真实反馈过期保护。
+        # 仅真实反馈/未下发的 PTP 检查点使用反馈容差；调用方必须另外
+        # 严格检查实际下发的终点。普通关节分段和 agent 目标默认不放宽。
+        tolerance = NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD if feedback_path else 0.
         valid = (np.isfinite(points).all(axis=1)
-                 & (points >= solver.limits[:, 0]).all(axis=1)
-                 & (points <= solver.limits[:, 1]).all(axis=1))
+                 & (points >= solver.limits[:, 0] - tolerance).all(axis=1)
+                 & (points <= solver.limits[:, 1] + tolerance).all(axis=1))
         if not valid.all():
             raise PlanningError("Path violates joint limits.", index=int(np.flatnonzero(~valid)[0]))
         if settings["workspace"] is None:

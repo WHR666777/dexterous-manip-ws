@@ -19,6 +19,7 @@ from threading import Event, Lock, Thread
 import time
 import os
 
+from robot_control.errors import CommandRejected, GripperTimeout, OperationError
 from .hardware import RobotController
 
 
@@ -131,10 +132,15 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                                 try:
                                     value = robot.dispatch(request, owner=owner)
                                     reply = {"ok": True, "result": value}
+                                except (CommandRejected, OperationError, GripperTimeout) as exc:
+                                    # 已知目标/输入拒绝、观测失败和手部未到位只结束本次
+                                    # 操作。worker 会把异常作为 cell 反馈交回 agent，
+                                    # 不设置 fault/Event，也不清错或自动换目标重试。
+                                    reply = {"ok": False, "reason": str(exc)}
                                 except Exception as exc:
-                                    # 输入/规划起点等错误只拒绝当前请求；SDK RuntimeError 则撤销
-                                    # 后续动作。未连接模式的明确拒绝不伪造设备故障。
-                                    if isinstance(exc, RuntimeError) and robot.connected and not manual_hold.is_set():
+                                    # 未标记的 SDK/通信异常和程序错误仍撤销动作权限。
+                                    # 不再用笼统 RuntimeError 判断相机/手部是否可恢复。
+                                    if robot.connected and not manual_hold.is_set():
                                         robot.fail(str(exc))
                                     reply = {"ok": False, "reason": str(exc)}
                                 record("处理控制请求 Control request handled", operation=request["operation"],

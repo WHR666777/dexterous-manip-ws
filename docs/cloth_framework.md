@@ -44,6 +44,14 @@ J7 0.01 rad 往返、虚拟 TCP +Z 5 mm 分段运动（FK 抬升约 4.70 mm）�
 已移除此前引入的恢复接口和启动恢复流程；agent 可根据实测状态调整目标直接提交新运动，
 仍遵守一次一条运动与原有到位监督。人工 hold、通信及其他固件故障的处理保持不变。
 
+可恢复操作现与设备故障分开：目标/限位拒绝和 J/L 超时在确认普通保持后返回动作失败；
+相机采集/观测保存异常、手部反馈数据不可用或位置未到位作为 cell 错误返回，保留 worker
+与 Codex 会话，由 agent 在后续 cell 调整。机械臂失能、反馈失效、通信故障、未知控制异常
+及无法确认保持仍结束会话；启动失败、预算/超时、人工取消等生命周期退出规则不变。
+fold-30 的保持目标不再直接回发轻微越限的实测值：仅对保持允许最多 1 mrad 边界差异，
+将目标收至官方区间内的整 mrad 边界，保留原始反馈和边界调整日志；不放宽 agent 目标。
+以上修改仅完成语法检查，没有连接实机验证。
+
 ## 阅读顺序
 
 | 文件 | 职责 |
@@ -54,6 +62,7 @@ J7 0.01 rad 往返、虚拟 TCP +Z 5 mm 分段运动（FK 抬升约 4.70 mm）�
 | `cloth_agent/robo.py` | 模型使用的代理；几何和 IK/TOPPRA 在 worker 内计算 |
 | `cloth_agent/hardware.py` | 控制进程内设备连接、轨迹复核/采样、反馈、普通保持、人工固定位置保持 |
 | `cloth_agent/control.py` | 协调器管理 Pipe、worker 普通 Pipe、人工专用 Unix datagram；人工保持和普通 I/O 分开处理 |
+| `robot_control/errors.py` | 明确标记可返回 agent 的目标拒绝、观测/手部数据异常、手部到位超时；未标记的控制异常仍终止 |
 | `cloth_agent/mcp_server.py` | 临时 `python` / `finish` 工具；文字反馈与真正的 MCP ImageContent |
 | `cloth_agent/codex_exec.py` | 一次 Codex task；中英混合 prompt、固定操作说明与本次配置快照 |
 | `cloth_agent/monitor.py` / `monitor_assets/` | 独立只读 HTTP/SSE 观察页；时间线、cell 代码/结果和观测图片，不进入控制链路 |
