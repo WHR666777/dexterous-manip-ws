@@ -117,12 +117,23 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
     if config["backend"] not in ("mock", "hardware"):
         raise ValueError("backend must be mock or hardware.")
     positive(config["control_hz"], "control_hz")
+    # 空载手指到位监督：重试次数不含首次发送；仅重发原预设，不加力或改目标。
+    gripper = config.setdefault("gripper", {})
+    for name, default in (("timeout_s", 2.), ("poll_interval_s", .1)):
+        gripper[name] = positive(gripper.get(name, default), f"gripper.{name}")
+    retries = gripper.setdefault("max_retries", 2)
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        raise ValueError("gripper.max_retries must be a nonnegative integer.")
+    tolerance = gripper.setdefault("tolerance_raw", 5)
+    if isinstance(tolerance, bool) or not isinstance(tolerance, int) or not 0 <= tolerance <= 255:
+        raise ValueError("gripper.tolerance_raw must be an integer in [0, 255].")
     # 此处仅校验独立规划器仍使用的参数；旧执行器的到位/录制参数已随主流程删除。
     for name in ("max_ik_step_rad", "position_step_m", "rotation_step_rad", "joint_step_rad"):
         positive(config["motion"][name], name)
     # 反馈到位与暂停收尾仍由设备执行层判断；默认值只补到内存，不改写现场标定文件。
     # joint_tolerance_rad：理想精度（超过此值发出警告但继续执行）。
-    # joint_arrival_tolerance_rad：到位失败阈值（固件报到位后关节偏差超过此值立即终止）。
+    # joint_arrival_tolerance_rad：实测关节到位阈值，必须与新鲜 J/0 同时满足。
+    # J/0 也可能出现在运动启动前；误差尚大时继续监督，超过执行超时才失败。
     for name, default in (("joint_tolerance_rad", .005), ("joint_arrival_tolerance_rad", .015),
                           ("completion_timeout_s", 30.)):
         config["motion"][name] = positive(config["motion"].get(name, default), name)

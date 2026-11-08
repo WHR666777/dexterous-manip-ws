@@ -107,10 +107,12 @@ def _worker_main(connection, workspace, robot_connection, config):
             # 删除，后续模型 cell 仍只使用原有 robo API；无需放开私有属性访问。
             if message["cell_id"] == 0:
                 namespace["startup_move_ptp"] = robo._startup_move_ptp
+                namespace["startup_open_hand"] = robo._startup_open_hand
             try:
                 result = _execute(message["source"], namespace, message["cell_id"])
             finally:
                 namespace.pop("startup_move_ptp", None)
+                namespace.pop("startup_open_hand", None)
             # 文件路径和 crop 元数据只交给宿主附图；不把整幅 RGB-D 转成文本日志。
             result["images"] = robo._shows
             result["robot_calls"] = robo._calls

@@ -4,6 +4,14 @@
 
 `AnyDexRetarget/` 是唯一有效的 VR 输入和手部重定向实现。原 `vr_teleop` 只作为腕部相对锚定和平滑方案的参考，所需跟踪逻辑已经迁入 `teleop/`，不再作为运行依赖。
 
+## LeRobot 训练与推理目录
+
+本工作区保留遥操作、硬件驱动、配置和 `data/` 采集数据。训练在
+`/home/lab404/dex-mani/lerobot` 中进行，训练输出已迁至该项目的 `outputs/`，
+双侧 ACT 推理入口为该项目的 `scripts/infer_act_bimanual.py`。推理复用本工作区的
+驱动与设备配置，主进程使用 `nero` 环境，模型子进程使用 `act` 环境。
+运行方式见 `/home/lab404/dex-mani/lerobot/README.md` 的“本机 NERO + L20 双侧 ACT”一节。
+
 ## Pico 4 输入（当前默认）
 
 完整启动步骤见 [notes-zyd.md](notes-zyd.md)。头显打开 robo、勾选手部追踪并 reconnect；USB 连接时执行 `adb reverse tcp:63901 tcp:63901`。先在一个终端保持运行原 AnyDex 转发：
@@ -274,10 +282,10 @@ python3 -m teleop.cli --config configs/pico4_nero_l20.yaml \
 保持 replay 闭合手型，通过 Pico 改变位置和完整腕部姿态，按 `C` 保存静止后的 RGB-D 与 Nero FK；退出采集后人工点选接触点，再联合求解相机外参与 TCP 偏移：
 
 ```bash
-python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-01 \
+python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-04 \
   --config configs/pico4_nero_l20.yaml --execute
-python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-01 --scale 2
-python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-01
+python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-04 --scale 2
+python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-04
 ```
 
 默认固定 replay 最后一帧，可用 `--hand-frame` 选择。采集用 `R` 锚定/恢复、`C` 暂停并等待反馈稳定后采样、`Q` 退出；必须包含不同 roll/pitch 倾斜，不能只改变位置和 yaw。结果写入会话目录的 `calibration.yaml`，包含 `base_from_camera` 和完整的 `flange_from_tcp`。坐标约定、点选要求及结果使用见 [标定说明](docs/calibration.md#5-rgb-d-相机外参与拈布虚拟-tcp-联合标定)。
@@ -329,6 +337,60 @@ python3 examples/l20_example.py --can-channel can1 --hand-type right
 
 它们默认只读。带 `--execute` 后直接执行单步动作，只用于现场分级验证。
 
+## 简单抓取调试
+
+复用已有 `robo.move_L`、拍照和拇指/食指开合接口，不启动 Codex/MCP：
+
+```bash
+python scripts/nero/debug_grasp.py --execute
+```
+
+启动时沿用 agent 的初始回位：回记录关节，再到初始抓取姿态。默认读取
+`configs/cloth_agent.yaml` 的设备/标定/夹爪/运动参数，以及 `configs/pico4_nero_l20.yaml`
+的 `arm.wrist_only_roll_pitch_deg`；可用 `--config`、`--teleop-config` 覆盖。
+准备完成后，在交互终端中**单键控制，无需回车**。方向以 task 坐标轴为准，不是图像方向。
+
+| 按键 | 操作 |
+| --- | --- |
+| `W` / `S` | TCP 沿 task X 正/负方向移动一步 |
+| `A` / `D` | TCP 沿 task Y 正/负方向移动一步 |
+| `R` / `F` | TCP 沿 task Z 正/负方向移动一步 |
+| `J` / `L` | base 系法兰 yaw 减少/增加一步 |
+| `-` / `+`（或 `=`） | 减小/增大平移步长：1、2、5、10、20 mm；默认 5 mm |
+| `[` / `]` | 减小/增大 yaw 步长：1、2、5、10°；默认 2° |
+| `P` | 拍照并记录实际 TCP |
+| `C` | 闭合，前后自动各拍一张 |
+| `O` | 张开拇指/食指 |
+| `V` | 拇指/食指到遥操作配置 `hand.replay_clip_file` 对应 CSV 的第一帧，不回放 |
+| `B` / `G` | 保存当前实际 TCP 为唯一预设 / 通过 `move_L` 返回预设（含朝向） |
+| `I` / `H` / `Q` | 实际状态 / 帮助 / 结束并生成叠加图 |
+
+按键不区分大小写。平移从最新实测 TCP 位置加减步长，yaw 按实测法兰角度增量调整，
+与 agent `top_down_pose` 相对初始朝向的 yaw 定义不同。每次移动固定配置的法兰 roll/pitch，
+通过现有 `robo.move_L` 执行；同时旋转时虚拟 TCP 的中途路径不保证直线。
+每步同步等待到位，显示 `Ready` 后再按下一键；动作期间积压的按键会丢弃，不补执行。
+运动中的人工停止仍使用启动时打印的独立 `hold` 命令。程序不连接 VR，不自动开合手。
+预设保存在固定文件 `configs/grasp_debug_preset.json`，包含完整 task 系 TCP 位置与朝向，
+下次启动自动加载。`B` 立即写入文件并覆盖旧值；`G` 通过 `move_L` 返回该位姿。
+加载预设不会自动运动；没有预设文件时按 `G` 只提示，不发运动。
+`V` 默认读取 `configs/pico4_nero_l20.yaml` 中的 `hand.replay_clip_file`
+（当前为 `configs/l20_thumb_index_9_10s.csv`），相对路径以项目根目录为基准。
+仅操作 CSV 中的拇指/食指槽位，其他三指不发送位置命令；`O`、`C` 保留原有行为。
+
+闭合使用 `hardware.py` 的同一入口与标定预设，只操作拇指/食指；
+`O/C/V` 均调用 `robot_control/l20.py` 中的阻塞到位检查：发送目标后轮询七个有效槽位，
+每次默认最多等待 2 秒，容差为 5 个原始位置单位，轮询间隔 0.1 秒；超时重试最多 2 次，
+即含首次共发送最多 3 次同一目标。参数在 `configs/cloth_agent.yaml` 顶层 `gripper` 中修改。
+最终失败会抛出异常并停止调试；不自动加力或修改目标。`C` 到位后才拍后照，取消原来的
+固定 1 秒延时。检查针对空载位置，SDK 反馈可能是缓存，不能证明抓住布料；接触阻挡也可能导致超时。
+遥操作仍使用原非阻塞发送接口。照片、深度及关联的实测 TCP/时间戳
+保存在本轮 `observations/`，属于邻近采样，没有相机/CAN 硬件同步。
+默认记录目录是 `data/grasp_debug/时间戳/`，可用 `--output-dir` 指定新目录。
+`photos.json` 记录照片顺序与每次闭合前的 TCP；退出时把全部闭合前 TCP 投到全部照片，
+另存 `annotated/`，原图保留。G1/G2 等编号对应各次闭合，三轴长度 3 cm，X 红/Y 绿/Z 蓝；
+这是固定 TCP 的几何投影，不处理手或布料遮挡。人工 `hold` 入口在启动时打印，
+沿用原有保持和外部支撑确认后的 `release-hold` 流程。
+
 ## 折布 agent
 
 架构见 [docs/closth_agent.md](docs/closth_agent.md)，代码阅读与运行说明见 [docs/cloth_framework.md](docs/cloth_framework.md)。唯一主流程使用 `codex exec + MCP + 独立持久 Python worker / 控制进程`，入口为 `python -m cloth_agent`。
@@ -336,7 +398,8 @@ python3 examples/l20_example.py --can-channel can1 --hand-type right
 使用已配置好的 `nero` 环境进行首轮 agent 实机测试，连接右侧 Nero、右侧 L20 和 L515。
 启动前确认右臂已使能、配置中的 CAN 通道/相机序列号与当前设备一致，并使用当前现场标定。
 `run` 先启动 worker/控制进程并公布人工 `hold` 入口，再自动完成起始位姿准备，之后才启动 MCP/Codex，无需预先启动 `serve`。
-默认 `startup.enabled: true`：先回到 `nero_start_pose.yaml` 的记录关节位姿，再保留其法兰位置/yaw、
+默认 `startup.enabled: true`：先调用与 wrist-only 相同的 `open_hand()` 张开整只手，
+再回到 `nero_start_pose.yaml` 的记录关节位姿，随后保留其法兰位置/yaw、
 将 roll/pitch 调整到标定的示教倾角。此时的抓取朝向定义为 `yaw=0`；后续规划 yaw 是相对它绕 task +Z 的增量，单位 rad。
 准备过程中也会实际运动；未确认到位、规划失败、超时或人工停止时不会启动 agent。
 首轮任务完成一次“观察 → 抓取 → 小幅抬升 → 再观察 → 放回”的闭环：
@@ -354,7 +417,12 @@ cd /home/lab404/WHR/dexterous-manip-ws
 
 python -m cloth_agent run \
   --execute \
-  --task '进行第一次抹布实机抓取测试。先读取真实机器人状态，获取并展示现场图像；收到图像反馈后，选择清晰可见且深度有效的布料边角抓取点。以 L20 食指、拇指闭合接触点为虚拟 TCP，进行一次 top-down 抓取，沿 task +Z 抬升最多 0.10 m，再获取并展示图像，判断是否抓住，并判断一个合适的折叠放置点。验证后将布料放到折叠放置点、松手并撤离布面，以此类推。最后尽量完成布料的对折。上下运动可以使用 move_J，折叠的水平运动过程可以使用 move_L，并且与布料保持 0.10 m 左右的距离，防止移动过程中手与桌面接触。遇到异常情况尽量重试或者尝试恢复。'
+  --task '你的目标是抓起布料一角（图片中的最下方的角），然后将其对折至图像最左边的角。先读取真实机器人状态，获取并展示现场图像；收到图像反馈后，选择清晰可见且深度有效的布料边角抓取点。以 L20 食指、拇指闭合接触点为虚拟 TCP，进行一次 top-down 抓取，沿 task +Z 抬升最多 0.05 m编写的代码中，抓取后就要抬升，因为大拇指闭合后会与台面接触（大拇指低于 tcp 点），若没有抬升会导致大拇指无法闭合。验证后将布料放到折叠放置点、松手并撤离布面，以此类推。最后尽量完成布料的对折。task空间的上下运动可以使用 move_J，折叠的水平运动过程可以使用 move_L，并且与布料保持 0.05 m 左右的距离，防止移动过程中手与桌面接触。遇到异常情况尽量重试或者尝试恢复。'
+
+python -m cloth_agent run \
+  --execute \
+  --task '进行第一次抹布实机抓取调试，你的目标是尽最大努力抓起布料一角（图片中的最下方的角）。先读取真实机器人状态，获取并展示现场图像；收到图像反馈后，选择清晰可见且深度有效的布料边角抓取点。以 L20 食指、拇指闭合接触点为虚拟 TCP，进行一次 top-down 抓取。编写的代码中，抓取后就要抬升，因为大拇指闭合后会与台面接触（大拇指低于 tcp 点），若没有抬升会导致大拇指无法闭合。遇到异常情况尽量重试或者尝试恢复。若没有抓取成功，可以尝试微调 TCP pose，比如roll，然后再次尝试。成功抓取后，需要总结经验。'
+
 ```
 
 另一个终端同样进入 `nero` 环境和项目目录；需要人工停止并保持时，直接通知本次控制进程：
@@ -366,6 +434,9 @@ python -m cloth_agent hold-status
 
 上面的 `--execute` 会直接连接设备并按配置准备起始抓取位姿，无需输入确认词；程序不自动使能、执行硬件回零或复位。
 固定准备流程及完整反馈保存在 `cells/000.py` / `000.json`，不占 agent 的 cell 预算；准备超时由 `startup.timeout_s` 控制。
+人工示范经验见 [grasp_experience.md](cloth_agent/grasp_experience.md)，会随启动 prompt 全文提供：
+抓前先用 `gripper_replay_start()` 手型比对食指与布边，贴合后再闭合，并用抬升后的图像验证。
+文中的高度是 `pinch-04` 与对应台面条件下的 task Z 参考，不是通用的布面高度偏置。
 `configs/cloth_agent.yaml` 启用相机与自动准备；人工保持测试用的 `configs/cloth_agent_estop.yaml` 关闭了相机和自动准备，不用于这次视觉抓取任务。
 每次重试只需把配置中的 `session.output_dir` 换成新目录，`run` / `serve` / `monitor` / `hold` / `hold-status` / `release-hold` 共用它，旧记录不覆盖。本轮运行期间保持该字段不变。
 默认读取 `configs/cloth_agent.yaml`；使用其他配置时，各命令加同一个 `--config 配置文件`。

@@ -38,9 +38,11 @@ J7 0.01 rad 往返、虚拟 TCP +Z 5 mm 分段运动（FK 抬升约 4.70 mm）�
 
 随后 `robot-grasp-10` 在尚未发启动运动时读到 `arm_status=2`（固件 NO_SOLUTION），
 因此拒绝启动。这是控制器反馈，不是本轮 Python IK 失败；可能是之前动作遗留的状态，
-没有上一轮固件状态记录，无法确认起因。`motion_status=0` 不能抵消这个异常。
-连接预检现在先检查固件异常，再连接 L20/相机；错误同时给出状态名称与原始字段。
-通过现场操作流程排查恢复后再启动，agent 不自动 reset、使能或忽略该状态。
+没有上一轮固件状态记录，无法确认起因。上述是该轮历史行为。
+当前按操作者确认的含义，将 NO_SOLUTION 作为状态反馈保留，不视为需要清错的故障，
+不锁存、不取消目标、不额外发送原位保持，也不等待 NORMAL 才允许新命令。
+已移除此前引入的恢复接口和启动恢复流程；agent 可根据实测状态调整目标直接提交新运动，
+仍遵守一次一条运动与原有到位监督。人工 hold、通信及其他固件故障的处理保持不变。
 
 ## 阅读顺序
 
@@ -56,6 +58,7 @@ J7 0.01 rad 往返、虚拟 TCP +Z 5 mm 分段运动（FK 抬升约 4.70 mm）�
 | `cloth_agent/codex_exec.py` | 一次 Codex task；中英混合 prompt、固定操作说明与本次配置快照 |
 | `cloth_agent/monitor.py` / `monitor_assets/` | 独立只读 HTTP/SSE 观察页；时间线、cell 代码/结果和观测图片，不进入控制链路 |
 | `cloth_agent/robot_operations.md` | 启动时提供给 agent 的静态操作知识和 API 说明；代替 info 工具 |
+| `cloth_agent/grasp_experience.md` | 正文随启动 prompt 注入，其中链接的 PNG 直接通过 `codex exec --image` 附加 |
 
 `geometry.py`、`planning.py`、`config.py` 复用已有几何、IK、TOPPRA 与标定文件。
 `PyRUA-Lean/` 仅作源码参考，不是运行依赖。没有旧 Runtime/app-server、framework 子包或 demo 兼容入口。
@@ -64,14 +67,21 @@ J7 0.01 rad 往返、虚拟 TCP +Z 5 mm 分段运动（FK 抬升约 4.70 mm）�
 
 完整签名、返回值和示例语义见 [机器人操作说明](../cloth_agent/robot_operations.md)。
 接口仅包括：`state`、`observe`、`show`、`pixel_to_task`、`top_down_pose`、`move_J`、`move_L`、
-`open_gripper`、`close_gripper`、`pause_and_hold`。不增加 info、公开 plan/execute、抓布判定或双臂接口。
+`open_gripper`、`close_gripper`、`gripper_replay_start`、`pause_and_hold`。
+`gripper_replay_start` 使用配置中的示范首帧手型，仅操作拇指/食指、不启动回放；
+默认预设来自 `data/grasp_debug/success-4/robot_config.json`。
+不增加 info、公开 plan/execute、抓布判定或双臂接口。
 
 运动使用拇指/食指闭合接触点作为固定虚拟 TCP。初始抓取姿态保留记录起始位姿的法兰位置/yaw，
 roll/pitch 取标定的示教参考；规划 yaw 是相对该姿态绕 task +Z 的增量，单位 rad。
-`startup.enabled: true` 时，人工入口与记录就绪后，宿主用 worker 中的固定 cell 000 先以
-PTP 回记录关节，再对初始抓取位姿求一次最终 IK 并执行 PTP。每段仅通过普通 J 下发一次
+`startup.enabled: true` 时，人工入口与记录就绪并确认 quiescent 后，宿主用固定 cell 000 调用
+与 wrist-only 相同的 `open_hand()` 发送全手张开预设，再以 PTP 回记录关节，
+随后对初始抓取位姿求一次最终 IK 并执行 PTP。全手张开只确认 SDK 返回，不宣称五指到位；
+不执行 hand reset，不改变普通 `open_gripper` 只操作拇指/食指的约定。
+每段仅通过普通 J 下发一次
 最终关节目标，由固件平滑；不下发中间点，不进行 TCP 直线插值或 TOPPRA 时间规划。
-启动专用辅助函数 `startup_move_ptp` 仅在 cell 000 中注入，之后删除，不新增 agent API。
+启动专用辅助函数 `startup_open_hand` / `startup_move_ptp` 仅在 cell 000 中注入，之后删除，
+不新增 agent API。禁用 startup 或不连接硬件时，不发送全手张开命令。
 整体关节变化上限与 teleop 回记录位姿一致，为 2π rad；限位、起点、反馈和工作区检查保留。
 插值检查点仅用于工作区复核，不代表固件实际路径或场景避碰。等待到位、保持收尾并检查实际 TCP
 满足 IK 的位置/角度容差后才启动 MCP/Codex；失败/超时/人工停止则结束准备，不启动 agent。
@@ -104,9 +114,12 @@ L 模式 `motion_status=1`（`linear_start_timeout_s`，默认 1 s）。未确�
 超时则返回 failed，并通过普通 J 固定当前关节，保持确认后才能结束 cell。
 各阶段不阻塞 RPC 或人工 hold；`wait=False` 仍返回原有 cell 内运动句柄。
 
-`move_J` 与启动 PTP 继续使用 `MotionPlan` 的两个关节端点；固件报告 J 到位后，
-按 `joint_arrival_tolerance_rad`（默认 0.015 rad）判断误差，不另等运动停稳窗口；
-普通保持确认仍需 0.2 s 稳定。J/L 的 `joint_speed_percent` 默认 10，
+`move_J` 与启动 PTP 继续使用 `MotionPlan` 的两个关节端点；完成必须同时满足本次
+发送后的新鲜 J 模式 `motion_status=0` 和关节误差不超过 `joint_arrival_tolerance_rad`
+（默认 0.015 rad）。`0` 且误差大时继续等待，避免将启动前的空闲反馈误判为到位失败；
+`1` 时继续监督，短动作也不强制采样到 `1`。超过 `completion_timeout_s` 仍未达标则
+报告 failed，并请求普通 J 固定当前关节，保留原目标/误差诊断，不让旧目标继续运动。
+不增加固定等待或运动停稳窗口；普通保持确认仍需 0.2 s 稳定。J/L 的 `joint_speed_percent` 默认 10，
 主机规划 rad/s、rad/s² 参数不构成固件实际速度/加速度保证。
 `joint_frame_interval_s` 默认 0.001：七轴目标的 `0x155/156/157/170` 四帧
 在主机相邻发送调用之间保留至少 1 ms，避免集中下发时实机出现停在上一目标的现象。
@@ -130,6 +143,12 @@ SDK 发送 socket 为此开启本机回环，自己的 SDK 接收仍不接收自
 MotionPlan 送入正式控制进程，不重新求 IK 或改变关节分段；人工 hold 使用该目录
 下的 `session.json`。它不恢复手部动作、抓布负载及当时的线程调度时序，因此相同
 轨迹仍可能需要重复对照，单次成功不表示原问题已经修复。
+
+夹爪位置到位监督复用 L20 底层 `set_thumb_index_positions_raw_and_wait`，在普通请求线程
+阻塞轮询，不影响机械臂监督线程和独立人工 hold。默认每次等 2 秒、最多重试 2 次
+（共 3 次发送），只比较拇指/食指七个有效槽位，容差 5，轮询间隔 0.1 秒；配置见顶层
+`gripper`。超时抛出异常，重试只发送原目标；遥操作保留原非阻塞接口。
+反馈仍受 SDK 缓存新鲜度限制，不能把到位检查当成逐帧 ACK 或抓布成功判定。
 
 默认运动等待结果；`wait=False` 的句柄只在当前 cell 有效。cell 返回前会暂停遗留轨迹并等待
 固定目标附近的反馈稳定；不能确认时结束任务并报告失败。`pause_and_hold` 确认后展开调用栈，

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -22,8 +23,10 @@ INSTRUCTIONS = """你是本次任务唯一的 agent，使用同一 Codex session
 不使用 shell、网络或其他服务绕过 robo。设备未连接或能力缺失时如实报告，以 failure
 或 stuck 结束，不编造物理效果。没有 info、公开 plan/execute 或抓布判定接口。
 
-初始姿态 Startup：本次配置启用 startup 且 startup_prepared=true 时，宿主已经先回记录
-关节位姿，再到约定的初始抓取位姿。不要重复执行准备 cell 000 或自行回零。
+初始姿态 Startup：本次配置启用 startup 且 startup_prepared=true 时，宿主已经先发送
+全手张开预设（与 wrist-only 的 open_hand 相同），再回记录关节位姿并到约定的初始抓取位姿。
+全手张开仅记录 SDK 返回，不保证五指已到位；仍需读取状态和观察现场。
+不要重复执行准备 cell 000 或自行回零。
 规划中的 yaw 是相对该初始抓取姿态、绕 task +Z 的增量，单位 rad；yaw=0 保持其朝向，
 不是把法兰绝对 RPY yaw 设成 0，也不随每个 cell 的当前姿态重新锚定。
 
@@ -35,20 +38,24 @@ Python 环境预置 robo、np、math、time。变量、函数与允许的 import
 
 执行 Execution：一次只执行一个 cell；普通异常后环境保留，可以下一 cell 修正。
 之前的变量修改和物理动作不会回滚。异步运动只能在当前 cell 内监督；返回前必须收尾。
-pause_and_hold 确认保持后结束当前 cell，新 cell 重新观察再决策。
-worker 超时/退出、任务预算用尽或人工停止保持都会结束任务，
-此时不得重新执行旧代码。人工停止保持不由 agent 处理，不尝试清除锁定或复位设备。
-完成后必须调用 finish，随后给出简短总结；运动到位不代表抓布或折布成功。
+运动学反馈 Kinematics：主机 IK 返回 planning_failed 时未执行动作，可调整目标重新调用 move。
+固件 NO_SOLUTION 是状态反馈，不需要清错或恢复接口，也不必等待 NORMAL 才发送新命令。
+需要重新规划时读取实际状态、调整目标，再调用 move_J/move_L；仍遵守一次一条运动的规则。
+不能仅凭该状态判断到位，要检查 MotionResult 与实测位置。人工 hold 和设备/通信故障仍按原流程处理。
+完成后必须调用 finish，随后给出简短总结。
 """
 
 
 def build_prompt(session, task):
     # 固定操作知识在启动时一次注入，不再让模型为了单位/TCP/手型调用 info 工具。
     operations = Path(__file__).with_name("robot_operations.md").read_text(encoding="utf-8")
+    # 把人工示范经验随本轮 prompt 一次提供给模型；worker 禁止文件访问，
+    # 不能只给文档路径而期待 agent 自行读取。经验中的数值仅为条件先验。
+    experience = Path(__file__).with_name("grasp_experience.md").read_text(encoding="utf-8")
     actual = {"hardware_connected": session.control.ready["hardware_connected"],
               "startup_prepared": session.startup_prepared,
               "robot_config": session.robot_config}
-    return (INSTRUCTIONS + "\n" + operations
+    return (INSTRUCTIONS + "\n" + operations + "\n\n" + experience
             + "\n\n本次冻结配置 Frozen configuration (null means not loaded)：\n```json\n"
             + json.dumps(actual, ensure_ascii=False, indent=2) + "\n```\n\n本次任务 Task：\n" + task)
 
@@ -75,6 +82,11 @@ def build_command(session, mcp_url, *, executable="codex", model=None):
         command.extend(["--model", model])
     if effort is not None:
         command.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
+    # Markdown 正文已进入 prompt；将其中链接的 PNG 按出现顺序直接作为
+    # 启动图片附件，模型才能实际看到示范。无需新增 MCP 工具或图片读取流程。
+    experience = Path(__file__).with_name("grasp_experience.md")
+    for link in re.findall(r"\]\(([^)]+\.png)\)", experience.read_text(encoding="utf-8")):
+        command.extend(["--image", str((experience.parent / link).resolve())])
     command.append("-")
     return command
 

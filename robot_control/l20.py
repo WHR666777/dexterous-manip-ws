@@ -29,10 +29,8 @@ _L20_MOTOR_SHAPE = (5,)
 
 # Official source: example/gui_control/config/constants.py, L20 ``张开`` action,
 # LinkerHand commit 0cc0585b97214b2cc4a9a5afcc84aee9f414e0e8.
-_L20_OPEN_PRESET = (
-    255, 255, 255, 255, 255, 255, 10, 100, 180, 240,
-    245, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-)
+# Middle/ring/little abduction targets increased from 100/180/240.
+_L20_OPEN_PRESET = (255, 255, 255, 255, 255, 255, 193, 0, 0, 0, 245, 255, 255, 255, 255, 255, 255, 255, 255, 255)
 
 # Official source: example/gui_control/config/constants.py, L20 ``握拳`` action,
 # LinkerHand commit 0cc0585b97214b2cc4a9a5afcc84aee9f414e0e8.
@@ -491,6 +489,58 @@ class LinkerHandL20:
             driver.set_thumb_positions(fingers[0])
             driver.set_index_positions(fingers[1])
 
+    def set_thumb_index_positions_raw_and_wait(
+        self, positions: Any, *, timeout_s: float = 2., max_retries: int = 2,
+        tolerance_raw: int = 5, poll_interval_s: float = .1,
+        check_cancelled: Optional[Callable[[], None]] = None,
+    ) -> dict:
+        """空载到位检查：发送、阻塞读反馈，超时后有限次重发同一目标。
+
+        max_retries 不含首次发送；默认最多发送 3 次。只比较拇指/食指的
+        7 个有效槽位，误差单位为协议原始值，不是角度。最终仍不到位抛出
+        TimeoutError，不自动加力、修改目标或清故障。原非阻塞 setter 保留
+        给遥操作使用，不能让逐周期回放也进入此等待流程。
+
+        check_cancelled 在发送前及查询前后调用；控制层可在人工 hold/撤权后
+        抛出异常结束等待。睡眠与整个等待不持有位置 I/O 锁，允许后台反馈查询。
+        fresh=True 仅表示请求查询；SDK 没有反馈代次，仍不保证缓存的新鲜度。
+        单次 SDK 调用本身可能阻塞，因此 timeout_s 是轮询等待期限而非硬实时限制。
+        """
+        raw = self._validate_raw_values(positions, _L20_POSITION_SHAPE, "position")
+        if (not np.isfinite(timeout_s) or timeout_s <= 0
+                or not np.isfinite(poll_interval_s) or poll_interval_s <= 0):
+            raise ValueError("L20 等待时间与轮询间隔必须为正 Wait times must be positive")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise ValueError("L20 max_retries must be a nonnegative integer")
+        if isinstance(tolerance_raw, bool) or not isinstance(tolerance_raw, int) or not 0 <= tolerance_raw <= 255:
+            raise ValueError("L20 tolerance_raw must be an integer in [0, 255]")
+        indices = [0, 5, 10, 15, 1, 6, 16]
+        for attempt in range(max_retries + 1):
+            if check_cancelled is not None:
+                check_cancelled()
+            self.set_thumb_index_positions_raw(raw)
+            deadline = time.monotonic() + timeout_s
+            while True:
+                if check_cancelled is not None:
+                    check_cancelled()
+                actual = self.get_joint_positions_raw(fresh=True)
+                if check_cancelled is not None:
+                    check_cancelled()
+                errors = np.abs(actual[indices] - raw[indices])
+                if int(errors.max()) <= tolerance_raw:
+                    return {"reached": True, "attempts": attempt + 1, "retries": attempt,
+                            "max_error_raw": int(errors.max()), "position_raw": actual.tolist()}
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_interval_s, remaining))
+            detail = (f"attempt={attempt + 1}/{max_retries + 1}, indices={indices}, "
+                      f"target={raw[indices].tolist()}, actual={actual[indices].tolist()}, "
+                      f"errors={errors.tolist()}, tolerance_raw={tolerance_raw}")
+            if attempt < max_retries:
+                print(f"[L20] 未到位，重发同一目标 Position retry: {detail}", flush=True)
+        raise TimeoutError(f"L20 空载位置到位超时 Position arrival timed out: {detail}")
+
     def set_joint_positions_normalized(self, action: Any) -> None:
         """将归一化 20 槽位目标半向上转换后发送。
 
@@ -811,7 +861,7 @@ class LinkerHandL20:
         return version
 
     def open_hand(self) -> None:
-        """发送官方 L20 ``张开`` 预设动作。
+        """发送调大中指、无名指和小指侧摆目标的 L20 ``张开`` 预设动作。
 
         Returns
         -------
@@ -825,7 +875,7 @@ class LinkerHandL20:
 
         Notes
         -----
-        使用固定官方 20 槽位 ``张开`` 值并映射 ``finger_move``；不等待运动完成。
+        使用基于官方动作调整的 20 槽位 ``张开`` 值并映射 ``finger_move``；不等待运动完成。
         固定 SDK 可能吞掉低层 ``can.CanError``。
         """
         self._require_connected().finger_move(pose=list(_L20_OPEN_PRESET))

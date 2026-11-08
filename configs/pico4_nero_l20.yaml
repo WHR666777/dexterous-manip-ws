@@ -53,7 +53,7 @@ hand:
   type: right
   model: L20
   can_channel: can_hand_a
-  speed: [240, 240, 240, 240, 240                                                                                                       ]
+  speed: [160, 160, 160, 160, 160]
   max_raw_step: 10
   feedback_poll_hz: 20
   feedback_max_age_s: 0.25

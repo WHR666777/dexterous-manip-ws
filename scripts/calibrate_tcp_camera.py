@@ -23,7 +23,7 @@ def build_parser():
     collect = commands.add_parser("collect", help="teleop full wrist, freeze replay fingers, C saves RGB-D/FK")
     collect.add_argument("directory", type=Path, help="new session directory")
     collect.add_argument("--config", default="configs/pico4_nero_l20.yaml")
-    collect.add_argument("--hand-frame", type=int, default=-1, help="0-based replay frame; default -1 is the last frame")
+    collect.add_argument("--hand-frame", type=int, default=0, help="0-based replay frame; default -1 is the last frame")
     collect.add_argument("--execute", action="store_true")
     label = commands.add_parser("annotate", help="offline click contact point in each RGB-D sample")
     label.add_argument("directory", type=Path)
@@ -31,7 +31,7 @@ def build_parser():
     solve = commands.add_parser("solve", help="offline joint least-squares calibration")
     solve.add_argument("directory", type=Path)
     solve.add_argument("--output", type=Path, help="defaults to DIRECTORY/calibration.yaml")
-    solve.add_argument("--max-rms-mm", type=float, default=7., help="do not publish a result above this fit RMS")
+    solve.add_argument("--max-rms-mm", type=float, default=10., help="do not publish a result above this fit RMS")
     return parser
 
 

@@ -100,28 +100,30 @@ JSON 的 `actual_hz` 和 `sample_interval_s` 按真实观测时间计算，能�
 
 ## 离线 ACT 检查与训练
 
-在 act 环境、项目根目录执行，沿用交接文档的系统 libffi 修复：
+离线数据检查在 act 环境、采集项目根目录执行，沿用交接文档的系统 libffi 修复：
 
 ```bash
 conda activate act
+cd /home/lab404/WHR/dexterous-manip-ws
 export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libffi.so.7${LD_PRELOAD:+:$LD_PRELOAD}"
 python scripts/check_lerobot_act.py data/lerobot/nero_l20_act
 ```
 
 该检查只读取本地数据，不连接机器人、不下载权重；用实际 640×480 RGB、23 维状态和 60 步动作块，检查前向、反向、梯度和 `(1,60,23)` 输出。可加 `--device cpu/cuda`。
 
-最小训练命令（按资源调整训练参数）：
+训练在 LeRobot 项目根目录执行，数据集仍从采集工作区读取，训练输出写入 LeRobot 的 `outputs/`。最小训练命令（按资源调整训练参数）：
 
 ```bash
+cd /home/lab404/dex-mani/lerobot
 lerobot-train \
   --dataset.repo_id=local/nero_l20_act \
-  --dataset.root="$PWD/data/lerobot/nero_l20_act" \
+  --dataset.root=/home/lab404/WHR/dexterous-manip-ws/data/lerobot/nero_l20_act \
   --policy.type=act \
   --policy.chunk_size=60 \
   --policy.n_action_steps=20 \
   --policy.pretrained_backbone_weights=null \
   --policy.push_to_hub=false \
-  --output_dir=outputs/nero_l20_act
+  --output_dir="$PWD/outputs/train/nero_l20_act"
 ```
 
-旧 `scripts/replay_episode.py` 仍只支持旧诊断格式；本次未增加新格式实机回放或 ACT 实机推理。
+旧 `scripts/replay_episode.py` 仍只支持旧诊断格式。双侧 ACT 推理入口已迁至 `/home/lab404/dex-mani/lerobot/scripts/infer_act_bimanual.py`，运行说明见该项目的 `README.md`；驱动、配置和采集数据仍来自本工作区。

@@ -21,8 +21,11 @@
 
 Python globals 中预置 `robo`、`np`、`math`、`time`。
 本次冻结配置含 `start_joint_positions`、`initial_grasp_tcp` 和 `reference_tcp_rotation`。
-当 `startup_prepared=true` 时，宿主在启动 Codex 前已通过固定准备 cell 000 先以 PTP
-回记录关节，再以 PTP 到初始抓取姿态，并检查反馈；每段只发送一次最终关节目标，
+当 `startup_prepared=true` 时，宿主在启动 Codex 前已通过固定准备 cell 000 先调用
+与 wrist-only 相同的 `open_hand()` 发送官方全手张开预设（包含中指、无名指、小指），
+再以 PTP 回记录关节、以 PTP 到初始抓取姿态，并检查机械臂反馈。全手张开仅记录
+SDK 返回，不保证五指已到位；正常任务的 `open_gripper()` 仍只操作拇指/食指。
+每段 PTP 只发送一次最终关节目标，
 启动第二段不要求 TCP 直线运动。不要重放该 cell。agent 仍应先读取真实状态并观察现场。
 准备失败、超时或人工 hold 时不启动 agent，不自动切换抓取参考或继续旧轨迹。
 
@@ -35,7 +38,8 @@ Python globals 中预置 `robo`、`np`、`math`、`time`。
 | `robo.top_down_pose(xyz, yaw=0.0)` | 构造 task 系虚拟 TCP 的 4×4 位姿，不发动作 |
 | `robo.move_J(target_tcp, wait=True)` | task 系虚拟 TCP 目标；内部一次 IK，再发送一次关节 PTP 目标 Single-target joint PTP |
 | `robo.move_L(target_tcp, wait=True)` | task 系虚拟 TCP 目标转 base 法兰目标；原厂 `move_l` 执行，监督启动与 TCP 到位 Native linear motion |
-| `robo.open_gripper()` / `robo.close_gripper()` | 只发送拇指/食指的配置预设；其余三指不发位置命令 |
+| `robo.open_gripper()` / `robo.close_gripper()` | 拇指/食指到配置预设；阻塞检查位置，超时有限重发；其余三指不发位置命令 |
+| `robo.gripper_replay_start()` | 到配置中的示范首帧预抓手型并等待位置反馈，用于食指贴合布边的视觉比对；不启动回放、不 reset |
 | `robo.pause_and_hold(reason)` | 暂停轨迹、使用反馈作固定保持目标；确认后结束当前 cell，返回 status=paused |
 
 `move_J` 和 `move_L` 都接收 task 系虚拟 TCP 位姿：4×4 SE(3)，或
@@ -62,13 +66,36 @@ L 的执行逻辑来自实测脚本 `check_move_linear_zbx.py`：先等待 `moti
 
 ## 反馈与 cell 闭环 Feedback
 
+夹爪到位监督在 `robot_control/l20.py` 的 `set_thumb_index_positions_raw_and_wait` 中实现，
+比较 `[0,5,10,15,1,6,16]` 七个有效槽位的原始位置误差，不比较保留位或其他三指。
+参数读取 YAML 顶层 `gripper`：`timeout_s: 2.0` 为每次发送后的轮询等待期限，
+`max_retries: 2` 不含首次发送（最多 3 次），`tolerance_raw: 5`，`poll_interval_s: 0.1`。
+只重发相同目标，不加力、不修改目标或清故障；耗尽次数抛出异常，当前 cell 不再继续后续动作。
+返回 `command_status=feedback_reached`、`reached`、`attempts`、`retries`、`max_error_raw`
+及 `position_raw`；SDK 查询可能返回旧缓存，因此 `delivery_confirmed` 仍为 false，
+到位仅表示本次查询返回值满足容差，不是逐帧 ACK 或抓布成功证明。
+这是空载到位检查；接触物体可能阻止达到空载预设，不应把超时直接解释成发送丢包。
+人工 hold/动作撤权会取消后续轮询和重试，已进入 SDK 的阻塞调用不能硬中断。
+
 运动默认返回 `MotionResult`，查看 `.status`、`.reached`、`.reason`、`.actual_joints`。
 J 的 `.diagnostics` 含点号、目标/实测关节、逐轴误差和固件状态；L 包含阶段、发送次数、
-启动是否确认、目标/实测 TCP、位置/角度误差、法兰命令及固件状态。失败后停止并报告，
-agent 不应自行重复失败动作；L 内部只在启动未确认时按上述次数重发。
-`planning_failed` 不下发运动。J 的 `completed/reached=True` 表示固件反馈到位且关节偏差在
-`joint_arrival_tolerance_rad`（默认 0.015 rad）以内；超过 `joint_tolerance_rad`（默认 0.005 rad）
-记录 warning，超过到位阈值则 failed。J 不另等停稳窗口，保持确认仍要求 0.2 s 稳定。
+启动是否确认、目标/实测 TCP、位置/角度误差、法兰命令及固件状态。失败后先停止并检查原因，
+不直接重复失败动作；L 内部只在启动未确认时按上述次数重发。
+
+固件 `arm_status=2 / NO_SOLUTION` 仅作为状态保留在 `state.arm_status` 和运动诊断中，
+不据此锁存错误、取消运动、创建保持目标、清错或等待 NORMAL，也不阻止启动与发送新命令。
+需要重新规划时读取当前真实状态、调整目标，直接调用 move_J/move_L；没有恢复接口。
+主机 IK 返回 `planning_failed` 时没有下发运动，也可以直接调整目标重试。
+是否到位仍按下面的新鲜模式/运动反馈与实测位置判断，不能仅凭 NO_SOLUTION 判成功或失败。
+仍遵守一次只运行一条运动；需中断正在运行的动作时使用已有 pause_and_hold，在新 cell 重新规划。
+人工 hold、通信和其他固件故障的终止流程不变。
+
+`planning_failed` 不下发运动。J 的 `completed/reached=True` 要求发送后的新鲜 J 模式
+`motion_status=0` 与关节偏差在 `joint_arrival_tolerance_rad`（默认 0.015 rad）以内同时满足。
+`0` 且误差大时继续等待，兼容命令已发送、运动尚未启动的阶段；`1` 时继续监督。
+短动作不强制采样到 `1`。到位误差超过 `joint_tolerance_rad`（默认 0.005 rad）时
+记录 warning；超过 `completion_timeout_s` 仍未满足完成条件则 failed，并请求普通 J 原位保持。
+J 不增加固定等待或终点停稳窗口；保持确认仍要求 0.2 s 稳定。
 L 的完成要求：收到本次发送之后的 L 模式 `motion_status=0`，实测 TCP 位置/角度误差在
 `linear_position_tolerance_m` / `linear_angle_tolerance_rad` 内，且相邻周期关节变化不超过
 0.002 rad、连续稳定 0.2 s。默认阈值沿用实测脚本：**0.02 m（2 cm）/ 2°**，

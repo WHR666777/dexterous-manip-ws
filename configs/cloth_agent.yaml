@@ -13,8 +13,15 @@ model_reasoning_effort: high
 session:
   # 每轮测试前仅修改此处；所有 CLI 默认共用它。相对配置文件目录 configs/。
   # run/serve 不覆盖旧记录；运行期间保持此值不变，下一轮再换新目录。
-  output_dir: ../data/agent_runs/fold-8
+  output_dir: ../data/agent_runs/fold-30
 control_hz: 20
+# 手指空载到位检查 Gripper arrival check；原始值容差，不是角度。
+# 每次最多等 2 s，失败后重发同一目标；2 次 retry + 首次 = 最多 3 次发送。
+gripper:
+  timeout_s: 2.0
+  max_retries: 2
+  tolerance_raw: 50
+  poll_interval_s: 0.1
 # agent 任务前自动准备：先回记录关节位姿，再调整到约定的初始抓取姿态。
 # yaw 零点保留记录位姿的法兰航向；roll/pitch 使用标定中的示教参考值。
 startup:
@@ -22,7 +29,7 @@ startup:
   timeout_s: 120.0
 calibration:
   # Paths are relative to this config directory, or may be absolute.
-  file: ../data/calibration/pinch-01/calibration.yaml
+  file: ../data/calibration/pinch-04/calibration.yaml
   arm: right
 motion:
   # J PTP 与厂家 L 共用固件速度百分比；不是 rad/s。
@@ -71,4 +78,7 @@ arms:
       cube_side_m: 10.0
     hand_poses:
       open: [255, 255, 255, 255, 255, 255, 10, 100, 180, 240, 245, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+      # 人工抓布示范 success-4 的 CSV 首帧预抓手型，用于食指与布边比对。
+      # gripper_replay_start 只发送有效 thumb/index 槽位，不启动回放。
+      replay_start: [255, 34, 255, 255, 255, 183, 255, 0, 0, 0, 242, 255, 255, 255, 255, 151, 215, 255, 255, 255]
     hand_speed: [160, 160, 160, 160, 160]

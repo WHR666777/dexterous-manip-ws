@@ -166,13 +166,12 @@ class RobotController:
 
     @staticmethod
     def _check_arm_status(status, *, phase):
-        """固件状态与 Python IK 结果分开解释；保留异常，交现场操作流程恢复。"""
-        if status["arm_status"] == 0:
+        """NO_SOLUTION 仅记录为状态，不阻止新命令；其他固件故障仍终止任务。"""
+        if status["arm_status"] in {0, 2}:
             return
-        # NO_SOLUTION 在连接时就可能存在，不能推断是本次尚未执行的初始
-        # 回位失败，也不能仅凭 motion_status=0 就把整个控制器认定为正常。
-        detail = ("无解 NO_SOLUTION；这是固件状态，不是本次 Python IK 的返回值"
-                  if status["arm_status"] == 2 else status["arm_status_name"])
+        # NO_SOLUTION 不需要清错或等待 NORMAL；到位仍由新鲜模式/运动反馈
+        # 和实测位置判断。其余故障保留原有处理，不与主机 IK 无解混为一谈。
+        detail = status["arm_status_name"]
         raise RuntimeError(
             f"Nero 固件报告异常 Firmware arm fault during {phase}: {detail}; "
             f"status={status}；请通过现场操作流程排查并恢复正常状态后重新启动 "
@@ -531,74 +530,62 @@ class RobotController:
                 motion["target_sent"], motion["target_sent_at"] = True, time.monotonic()
                 motion["target_sent_wall_at"] = self._last_send_wall_at
             error = float(np.max(np.abs(self._joints - self._hold)))
-            # 信任固件到位状态：要求命令发出后的新鲜状态帧报告 MOVE J（1）
-            # 且已到位（0）。固件报到位后机械臂不再主动调整，此时做一次性
-            # 关节误差检查即可，不做终点稳定窗口。
-            firmware_reached = (self._arm_status["received_at_unix"] > motion["target_sent_wall_at"]
-                                and self._arm_status["mode_feedback"] == 1
-                                and self._arm_status["motion_status"] == 0)
+            # 新鲜状态帧只说明刚收到反馈，不能确认本次命令已启动。fold-14
+            # 中发送后约 39 ms 仍反馈 J/0，约 55 ms 才变为运动中 J/1；
+            # 因而 J/0 且误差大时应继续等待，不能立即判“到位但偏差过大”。
+            # 完成必须同时满足发送后的新鲜 J/0 和实测关节误差达标。
+            # 不强制采样到 1：很短的动作可能在相邻监督周期之间完成。
+            firmware_idle = (self._arm_status["received_at_unix"] > motion["target_sent_wall_at"]
+                             and self._arm_status["mode_feedback"] == 1
+                             and self._arm_status["motion_status"] == 0)
             arrival_tol = self.motion_settings["joint_arrival_tolerance_rad"]
             warn_tol = self.motion_settings["joint_tolerance_rad"]
             final_waypoint = motion["waypoint_index"] == len(motion["plan"].joint_waypoints) - 1
-            if firmware_reached:
-                if error > arrival_tol:
-                    # 固件报到位但关节偏差超过失败阈值，立即终止。
-                    self.cell_paused = True
-                    index = motion["waypoint_index"]
+            if firmware_idle and error <= arrival_tol:
+                if error > warn_tol and self.on_control_sample is not None:
+                    self.on_control_sample({
+                        "command_sent": False, "executor": "joint_position_J",
+                        "description": "到位警告 Arrival warning: error > tolerance",
+                        "waypoint_index": motion["waypoint_index"],
+                        "joint_error_rad": error, "warn_tolerance_rad": warn_tol})
+                if final_waypoint:
                     with self._lock:
-                        if not self.manual_stop.is_set():
-                            motion.update(status="failed", reason=(
-                                "固件报到位但关节偏差过大 Firmware arrived but joint error exceeded; "
-                                f"waypoint={index}/{len(motion['plan'].joint_waypoints) - 1}, "
-                                f"joint_error_rad={error:.6f}, "
-                                f"arrival_tolerance_rad={arrival_tol}"),
-                                joint_error_rad=error, actual_joints=self._joints.tolist(),
-                                diagnostics={
-                                    "waypoint_index": index,
-                                    "waypoint_count": len(motion["plan"].joint_waypoints) - 1,
-                                    "target_joints": self._hold.tolist(),
-                                    "actual_joints": self._joints.tolist(),
-                                    "joint_errors_rad": (self._joints - self._hold).tolist(),
-                                    "arm_status": deepcopy(self._arm_status),
-                                    "target_sent_at_unix": motion["target_sent_wall_at"],
-                                    "firmware_reached": True})
+                        if not self.manual_stop.is_set() and motion["status"] == "running":
+                            self._hold_confirmed = True
+                            motion.update(status="completed", reached=True, joint_error_rad=error,
+                                          actual_joints=self._joints.tolist())
                 else:
-                    if error > warn_tol and self.on_control_sample is not None:
-                        self.on_control_sample({
-                            "command_sent": False, "executor": "joint_position_J",
-                            "description": "到位警告 Arrival warning: error > tolerance",
-                            "waypoint_index": motion["waypoint_index"],
-                            "joint_error_rad": error, "warn_tolerance_rad": warn_tol})
-                    if final_waypoint:
-                        self._hold_confirmed = True
-                        with self._lock:
-                            if not self.manual_stop.is_set() and motion["status"] == "running":
-                                motion.update(status="completed", reached=True, joint_error_rad=error,
-                                              actual_joints=self._joints.tolist())
-                    else:
-                        motion["waypoint_index"] += 1
-                        motion["target_sent"] = False
+                    motion["waypoint_index"] += 1
+                    motion["target_sent"] = False
             elif time.monotonic() - motion["target_sent_at"] > self.motion_settings["completion_timeout_s"]:
                 self.cell_paused = True
                 index = motion["waypoint_index"]
                 with self._lock:
-                    if not self.manual_stop.is_set():
-                        motion.update(status="failed", reason=(
-                            "固件未报到位超时 Firmware did not report arrival; "
-                            f"waypoint={index}/{len(motion['plan'].joint_waypoints) - 1}, "
-                            f"joint_error_rad={error:.6f}, "
-                            f"firmware_motion_status={self._arm_status['motion_status']}, "
-                            f"firmware_mode={self._arm_status['mode_feedback']}"),
-                            joint_error_rad=error, actual_joints=self._joints.tolist(),
-                            diagnostics={
-                                "waypoint_index": index,
-                                "waypoint_count": len(motion["plan"].joint_waypoints) - 1,
-                                "target_joints": self._hold.tolist(),
-                                "actual_joints": self._joints.tolist(),
-                                "joint_errors_rad": (self._joints - self._hold).tolist(),
-                                "arm_status": deepcopy(self._arm_status),
-                                "target_sent_at_unix": motion["target_sent_wall_at"],
-                                "firmware_reached": False})
+                    if self.manual_stop.is_set():
+                        return
+                    motion.update(status="failed", reason=(
+                        "关节运动到位超时 Joint arrival timed out; "
+                        f"waypoint={index}/{len(motion['plan'].joint_waypoints) - 1}, "
+                        f"joint_error_rad={error:.6f}, arrival_tolerance_rad={arrival_tol}, "
+                        f"firmware_motion_status={self._arm_status['motion_status']}, "
+                        f"firmware_mode={self._arm_status['mode_feedback']}"),
+                        joint_error_rad=error, actual_joints=self._joints.tolist(),
+                        diagnostics={
+                            "waypoint_index": index,
+                            "waypoint_count": len(motion["plan"].joint_waypoints) - 1,
+                            "target_joints": self._hold.tolist(),
+                            "actual_joints": self._joints.tolist(),
+                            "joint_errors_rad": (self._joints - self._hold).tolist(),
+                            "arrival_tolerance_rad": arrival_tol,
+                            "arm_status": deepcopy(self._arm_status),
+                            "target_sent_at_unix": motion["target_sent_wall_at"],
+                            "firmware_idle": firmware_idle,
+                            "joint_reached": error <= arrival_tol})
+                # 保留失败瞬间的原目标与误差，再请求一次当前关节的固定保持。
+                # 仅标 failed 并保留旧运动目标，会让已报失败的机械臂继续运动，
+                # 还会使 cell_end 跳过 running 分支、过早耗尽 3 s 收尾时间。
+                # _pause 不覆盖 failed 结果；人工 hold 置位后也不会再发普通目标。
+                self._pause(motion["reason"])
         elif self._hold is not None:
             # 普通 J 成功接收目标后由固件保持；仅未成功发送的固定目标会再次尝试。
             if not self._hold_sent:
@@ -781,7 +768,6 @@ class RobotController:
         return {**metadata, "rgb": frame.color.copy(), "depth_m": depth}
 
     def dispatch(self, request, *, owner):
-        operation = request["operation"]
         if owner:
             with self._trajectory_lock:
                 return self._dispatch_owner(request)
@@ -792,7 +778,9 @@ class RobotController:
         interrupted = False
         if operation == "begin_cell":
             if self.ended or self.manual_stop.is_set() or self.fault or not self.snapshot()["quiescent"]:
-                raise ValueError("控制状态不允许新 cell Robot is not ready for a new cell")
+                nquencent_reason = f"Motion: {('None' if self.motion is None else self.motion['status'])}, " + f"Hold: {('None' if self._hold is None else self._hold_confirmed)}"
+                raise ValueError("控制状态不允许新 cell Robot is not ready for a new cell: " +
+                                 f"Ended: {self.ended}, Fault: {self.fault}, !Quiescent: ({('Y' if self.snapshot()['quiescent'] else nquencent_reason)})")
             self.active_cell, self.cell_paused = request["cell_id"], False
         elif operation in {"cell_end", "end_task"}:
             self.active_cell = None
@@ -824,19 +812,37 @@ class RobotController:
         if operation == "pause":
             return self.pause(request["reason"])
         self._admit(cell_id)
+        if operation == "startup_open_hand":
+            self._require_hardware()
+            if cell_id != 0 or not self.config.get("startup", {}).get("enabled", False):
+                raise ValueError("全手张开仅允许固定启动流程 Full-hand open requires startup cell 000")
+            # 复用 wrist-only 的同一个 SDK 包装方法，一次发送官方全手张开
+            # 预设，包含其余三指。这里不是 thumb/index gripper 操作，也不是
+            # reset；与 teleop 一样不把 SDK 返回宣称为五指已确认到位。
+            self.hand.open_hand()
+            self._hand_target, self._hand_read_at = None, None
+            return {"command_status": "sdk_returned", "preset": "official_full_hand_open",
+                    "commanded_fingers": ["thumb", "index", "middle", "ring", "little"],
+                    "delivery_confirmed": False, "hand": self.snapshot()["hand"]}
         if operation == "start_motion":
             return self._start_motion(cell_id, request["plan"])
         if operation == "set_gripper":
             self._require_hardware()
             preset = request["preset"]
-            if preset not in {"open", "closed"}:
+            if preset not in {"open", "closed", "replay_start"}:
                 raise ValueError("未知手型 Unknown gripper preset")
+            # replay_start 可由普通配置保存示范首帧，或由调试脚本从指定 CSV
+            # 第一帧生成；均经同一权限检查与 thumb/index 发送路径，不接受
+            # cell 自定义关节数组，也不在这里启动整段回放。
             raw = self.settings["hand_poses"][preset]
             self._admit(cell_id)
-            self.hand.set_thumb_index_positions_raw(raw)
+            # 在普通请求线程阻塞等待，机械臂监督线程和独立人工 hold 入口
+            # 继续运行。每次重发/读反馈前复核权限，人工 hold 后不继续重试。
             self._hand_target = list(raw)
             self._hand_read_at = None
-            return {"command_status": "sdk_returned", "preset": preset,
+            result = self.hand.set_thumb_index_positions_raw_and_wait(
+                raw, **self.config["gripper"], check_cancelled=lambda: self._admit(cell_id))
+            return {"command_status": "feedback_reached", "preset": preset, **result,
                     "commanded_fingers": ["thumb", "index"],
                     "delivery_confirmed": False, "hand": self.snapshot()["hand"]}
         raise ValueError("未知 robo 操作 Unknown robo operation")

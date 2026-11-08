@@ -128,22 +128,30 @@ class TaskSession:
         return state
 
     def _prepare_robot(self):
-        """固定宿主流程，两次 PTP 回记录关节/初始抓取姿态；完成前不会启动 Codex。"""
+        """固定宿主流程：全手张开，再两次 PTP 回位；完成前不会启动 Codex。"""
         startup = (self.robot_config or {}).get("startup", {})
         if not self.control.ready["hardware_connected"] or not startup.get("enabled", False):
             return
         settings = self.robot_config["arms"]["right"]
-        self.log("startup_started", "PTP 准备初始抓取姿态 Preparing initial grasp pose with PTP",
+        self.log("startup_started", "全手张开并 PTP 准备初始姿态 Open hand then prepare grasp pose with PTP",
                  start_joints=settings["start_joint_positions"],
                  initial_grasp_tcp=settings["initial_grasp_tcp"],
                  reference_flange_yaw_rad=settings["reference_flange_yaw_rad"])
         print(json.dumps({"description": "即将自动准备初始抓取姿态 Preparing robot before agent; hold is available",
                           "session_file": str(self.directory / "session.json")}, ensure_ascii=False), flush=True)
+        # 仅等待已有的普通保持就绪，不把 NO_SOLUTION 状态当作故障，
+        # 不为该状态额外创建保持目标或等待清错；随后直接开始固定准备 cell。
+        self._settle_control(self.control.request("status"))
         # 固定 cell 000 使用内部 PTP 辅助函数，复用轨迹复核、到位与暂停收尾。
         # 每段只下发一个最终关节目标；第二段只求最终姿态 IK，不做直线插值或 TOPPRA。
         # 源码由宿主构造，不由模型决定；不新增公开回零工具，也不占 agent 的 cell 预算。
         # 第一段只回记录关节，第二段到保持记录法兰位置/yaw 的示教抓取倾角。
         source = (
+            # 与 wrist-only 一样调用整只手的官方张开预设，先让其余三指也张开。
+            # open_gripper 只控制拇指/食指，不能替代这里的全手初始化；该内部
+            # 辅助函数仅在 cell 000 注入，且此时人工 hold 通道已经可用。
+            "startup_hand_result = startup_open_hand()\n"
+            "print('启动全手张开反馈 Startup open_hand command:', startup_hand_result)\n"
             # 与 teleop 回记录位姿一致：已在容差内就跳过第一段，避免为原地
             # 等待构造一条零位移轨迹、无必要地下发目标并立刻开始下一段。
             "startup_joints = np.array(" + repr(settings["start_joint_positions"]) + ", dtype=float)\n"

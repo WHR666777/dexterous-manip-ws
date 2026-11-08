@@ -150,6 +150,12 @@ class Robo:
                            @ np.asarray(self._config["arms"]["right"]["reference_tcp_rotation"]))
         return pose
 
+    def _startup_open_hand(self):
+        """启动专用全手张开；普通 agent 的 open_gripper 仍只操作拇指/食指。"""
+        if self._cell_id != 0:
+            raise RuntimeError("全手初始化仅用于启动准备 Startup open_hand requires cell 000")
+        return self._call("startup_open_hand")
+
     def _startup_move_ptp(self, *, target_joints=None, target_tcp=None):
         """仅供宿主固定 cell 000 调用，不增加 agent 公开运动 API。"""
         if self._cell_id != 0:
@@ -199,12 +205,16 @@ class Robo:
         return self._move(target_tcp=transform(target_tcp), wait=wait)
 
     def open_gripper(self):
-        """使用配置中的张开姿态，只发送拇指和食指 Open thumb/index."""
+        """拇指/食指到配置张开姿态，阻塞检查到位并有限重试 Open and wait."""
         return self._call("set_gripper", preset="open")
 
     def close_gripper(self):
-        """使用 replay 标定闭合姿态 Close thumb/index; no grasp-success judgement."""
+        """到标定闭合姿态，阻塞检查到位并有限重试；不判定抓布成功。"""
         return self._call("set_gripper", preset="closed")
+
+    def gripper_replay_start(self):
+        """到 CSV 首帧拇指/食指姿态并等待到位，不启动回放或设备 reset。"""
+        return self._call("set_gripper", preset="replay_start")
 
     def pause_and_hold(self, reason="任务监督请求暂停 Task monitor requested pause"):
         """确认普通保持后结束本 cell；不是人工位置保持 Pause and return to agent."""
