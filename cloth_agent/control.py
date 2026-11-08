@@ -20,7 +20,7 @@ import time
 import os
 
 from robot_control.errors import CommandRejected, GripperTimeout, OperationError
-from .hardware import RobotController
+from .bimanual import RobotController
 
 
 def _control_main(owner_connection, worker_connection, manual_hold, released, failed,
@@ -99,7 +99,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                                 if sample.get("command_sent") or sample.get("description"):
                                     # 只输出目标调用与明确事件；20 Hz 反馈仍只存文件。
                                     # 打印在普通 I/O 线程，不占用运动/人工保持发送锁。
-                                    fields = ("motion_id", "executor", "waypoint_index", "target_joints",
+                                    fields = ("arm", "motion_id", "executor", "waypoint_index", "target_joints",
                                               "target_tcp", "flange_pose", "send_duration_s", "phase",
                                               "attempt", "arm_status", "position_error_m", "angle_error_rad")
                                     print(json.dumps({"description": sample.get("description",
@@ -172,7 +172,7 @@ def _control_main(owner_connection, worker_connection, manual_hold, released, fa
                         next_hold_at = time.monotonic() + robot.period
                         state = robot.snapshot()
                         report = state["manual_hold_report"] or {}
-                        marker = (report.get("right"), report.get("error"), state["hold_confirmed"])
+                        marker = (report.get("left"), report.get("right"), report.get("error"), state["hold_confirmed"])
                         if marker != previous_report:
                             notifications.put(state)
                             previous_report = marker

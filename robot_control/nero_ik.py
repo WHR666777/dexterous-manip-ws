@@ -58,9 +58,13 @@ class NeroIK:
         max_joint_delta_rad=DEFAULT_MAX_IK_JOINT_DELTA_RAD,
         joint_limit_margin_rad=DEFAULT_JOINT_LIMIT_MARGIN_RAD,
         feedback_limit_tolerance_rad=DEFAULT_FEEDBACK_LIMIT_TOLERANCE_RAD,
+        max_nfev=MAX_NFEV,
     ):
         self.urdf_path = Path(urdf_path).resolve()
         self.max_joint_delta_rad = float(max_joint_delta_rad)
+        if isinstance(max_nfev, bool) or not isinstance(max_nfev, (int, np.integer)) or max_nfev < 1:
+            raise ValueError('max_nfev 必须为正整数')
+        self.max_nfev = int(max_nfev)
         if (
             not np.isfinite(self.max_joint_delta_rad)
             or self.max_joint_delta_rad < 0
@@ -317,7 +321,7 @@ class NeroIK:
                 initial,
                 jac=jacobian,
                 bounds=(self.command_limits[:, 0], self.command_limits[:, 1]),
-                max_nfev=MAX_NFEV,
+                max_nfev=self.max_nfev,
             )
         except TimeoutError:
             record_progress()

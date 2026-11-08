@@ -1,7 +1,7 @@
 # Cloth agent：代码阅读与运行入口
 
 主流程为 `codex exec + MCP + 独立持久 Python worker + 独立机器人控制进程`。
-本阶段接入右侧 Nero/L20 的基础 robo 接口、L515 RGB-D、内部运动规划与执行。
+当前支持左右 Nero/L20 独立 J/L 执行、软件同时启动和一份共享 L515 RGB-D 观测。
 初版仅做语法检查。2026-10-25 已在现场监护下执行真实控制进程的固定目标检查，
 在 JS 目标不变时复现下移，未进入后续 J7 小幅运动；该检查失败，不能作为抓取可用的证明。
 记录位于 `data/agent_runs/control-check-20261025-01/`。后续的超时保持修正已检查语法，
@@ -42,7 +42,7 @@ J7 0.01 rad 往返、虚拟 TCP +Z 5 mm 分段运动（FK 抬升约 4.70 mm）�
 当前按操作者确认的含义，将 NO_SOLUTION 作为状态反馈保留，不视为需要清错的故障，
 不锁存、不取消目标、不额外发送原位保持，也不等待 NORMAL 才允许新命令。
 已移除此前引入的恢复接口和启动恢复流程；agent 可根据实测状态调整目标直接提交新运动，
-仍遵守一次一条运动与原有到位监督。人工 hold、通信及其他固件故障的处理保持不变。
+仍遵守每侧一次一条运动与原有到位监督。人工 hold、通信及其他固件故障的处理保持不变。
 
 可恢复操作现与设备故障分开：目标/限位拒绝和 J/L 超时在确认普通保持后返回动作失败；
 相机采集/观测保存异常、手部反馈数据不可用或位置未到位作为 cell 错误返回，保留 worker
@@ -72,6 +72,35 @@ fold-30 的保持目标不再直接回发轻微越限的实测值：仅对保持
 `geometry.py`、`planning.py`、`config.py` 复用已有几何、IK、TOPPRA 与标定文件。
 `PyRUA-Lean/` 仅作源码参考，不是运行依赖。没有旧 Runtime/app-server、framework 子包或 demo 兼容入口。
 
+
+## 双臂执行与合并标定
+
+`configs/cloth_agent.yaml` 通过 `calibration.file` 读取自包含的
+`configs/cloth_agent_calibration.yaml`。公共 task 是右臂基座，左基座通过两份相机外参
+计算；两侧 `flange_from_tcp` 完整保留原始标定，不镜像或重定义左侧工具轴。
+左侧恢复原始参考角 `[-87.781805°, -20.890762°]`，拟合位置保持不变。双侧共享 open/closed/replay_start
+手型；各侧 `calibration_hand_pose_raw` 记录各自实际标定手型。
+
+`cloth_agent/bimanual.py` 共享相机、cell 和人工停止 Event，分别实例化
+`hardware.RobotController(arm_name=...)`。单臂执行器各自拥有设备连接、反馈、运动、
+目标发送锁和保持目标。控制周期逐侧推进已有 J/L 状态机，不进行联合轨迹规划。
+规划和路径复核在周期锁外；提交时复核所有起点，再在同一调度边界发布两侧目标。
+`move_both` 要求两侧无活动运动且固件空闲；准备或起点复核失败时两侧都不启动。
+软件同时启动不保证硬件起动时刻或到达时刻相同。
+
+`robo.state()` 增加 `arms.left/right`，顶层 joints/tcp 保留默认右侧视图；全局
+quiescent 和 hold_confirmed 要求两侧满足。`state(arm=...)` 返回单侧状态。
+运动、top_down_pose 和手型接口使用 `arm="left"` / `"right"`，省略时默认右侧。
+`move_both(left=..., right=..., mode="J"或"L", wait=True)` 返回按侧索引的结果；
+`wait=False` 返回两个独立句柄。句柄仍局限当前 cell，不能跨 cell 遗留运动。
+启动准备先张开两手，再逐侧执行原有两段 PTP 并检查两侧实际 TCP。
+PTP 大幅腕部转动的一次 IK 允许 240 次评估；遥操作默认预算、FK 精度、关节和工作区限制不变。
+
+任一侧运动执行失败、普通暂停、cell 收尾或任务终止覆盖两侧；人工 hold 先撤销两侧
+动作权限，再各自捕获一次固定保持目标。重复 hold 不重抓任一侧目标。
+CAN 抓包和单侧计划位于 `arms/left/`、`arms/right/`；公共控制采样带 arm 字段，
+监控页面分别呈现两侧运动结果。该变更已做离线执行器验证，尚未执行双臂实机运动。
+
 ## robo 第一版边界
 
 完整签名、返回值和示例语义见 [机器人操作说明](../cloth_agent/robot_operations.md)。
@@ -81,8 +110,18 @@ fold-30 的保持目标不再直接回发轻微越限的实测值：仅对保持
 默认预设来自 `data/grasp_debug/success-4/robot_config.json`。
 不增加 info、公开 plan/execute、抓布判定或双臂接口。
 
-运动使用拇指/食指闭合接触点作为固定虚拟 TCP。初始抓取姿态保留记录起始位姿的法兰位置/yaw，
-roll/pitch 取标定的示教参考；规划 yaw 是相对该姿态绕 task +Z 的增量，单位 rad。
+运动使用各自标定的固定虚拟 TCP：右侧沿用已有拈布点，左侧为第 0 帧手型的食指指尖参考点。
+标定文件中的 `reference_roll_pitch_deg` 只描述工具轴定义，不决定初始运动目标。
+启动 TCP 位姿在 `startup.tcp_poses` 中独立配置：直接值为 task 系 SE(3) 或
+`[x,y,z,roll,pitch,yaw]`（m/rad），位置镜像项使用 `mirror_position_of` 和 `plane_y_m`。
+当前右侧显式保留 `bi_fold-01` 的目标；左侧关于 task 的竖直平面
+`Y=-0.26764081143104956 m` 仅镜像右侧位置。令 `S=diag(1,-1,1)`，位置为
+`p_left=S @ p_right+[0,2*plane_y_m,0]`，旋转为 `R_left=R_right`，
+因此两侧保持 X、Z 相同且在公共 task 中朝向一致。两侧 task Z 均为 `0.00772207748671605 m`。
+`initial_grasp_tcp` 是解析后的启动目标，`reference_tcp_rotation` 取该目标旋转；
+规划 yaw 是相对该朝向绕 task +Z 的增量，单位 rad。
+启用启动时每侧必须配置 TCP 目标和 `workspace.start_pose_file`。禁用启动且未配置目标时，
+不合成启动目标；计算接口只保留记录位姿的工具朝向。
 `startup.enabled: true` 时，人工入口与记录就绪并确认 quiescent 后，宿主用固定 cell 000 调用
 与 wrist-only 相同的 `open_hand()` 发送全手张开预设，再以 PTP 回记录关节，
 随后对初始抓取位姿求一次最终 IK 并执行 PTP。全手张开只确认 SDK 返回，不宣称五指到位；
@@ -220,7 +259,7 @@ python -m cloth_agent run --execute \
 python -m cloth_agent hold
 ```
 
-`--execute` 才允许连接配置中的右臂、右手与相机；硬件需由操作者预先使能，程序不会自动使能。
+`--execute` 才允许连接配置中的两侧机械臂、手与共享相机；硬件需由操作者预先使能，程序不会自动使能。
 CLI 默认使用 `configs/cloth_agent.yaml` 中的 `session.output_dir` 作为本轮记录目录，
 相对路径以配置文件所在目录为基准。每轮测试前修改一次，本轮运行期间不改；旧记录不覆盖。
 `run` / `serve` / `monitor` / `hold` / `hold-status` / `release-hold` 共用此目录；

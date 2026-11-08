@@ -127,12 +127,14 @@ class Planner:
                    for name in self.arms}
         self._lock = Lock()  # Pinocchio model data are mutable.
 
-    def plan_linear(self, seed, target_tcp):
+    def plan_linear(self, seed, target_tcp, *, arm="right"):
         """仅校验实测起点与目标工作区；L 路径规划和 IK 交给 Nero 固件。"""
         with self._lock:
-            plan = LinearMotionPlan("right", seed, target_tcp)
-            self._check_path("right", np.asarray([plan.start_joints]), feedback_path=True)
-            bounds = self.arms["right"]["workspace"]
+            if arm not in self.arms:
+                raise PlanningError(f"Unknown arm: {arm}")
+            plan = LinearMotionPlan(arm, seed, target_tcp)
+            self._check_path(arm, np.asarray([plan.start_joints]), feedback_path=True)
+            bounds = self.arms[arm]["workspace"]
             if bounds is not None:
                 bounds = np.asarray(bounds, dtype=float)
                 xyz = plan.target_tcp[:3, 3]
@@ -142,27 +144,31 @@ class Planner:
             # L 目标。这里只检查起点/终点，不声称预测了固件路径或完成场景避碰。
             return plan
 
-    def plan_startup_ptp(self, seed, *, target_joints=None, target_tcp=None):
+    def plan_startup_ptp(self, seed, *, target_joints=None, target_tcp=None, arm="right"):
         """保留固定启动流程的内部关节入口，不向 agent 公开关节目标。"""
         return self.plan_ptp(seed, target_joints=target_joints, target_tcp=target_tcp,
-                             mode="startup_ptp")
+                             mode="startup_ptp", arm=arm)
 
-    def plan_ptp(self, seed, *, target_joints=None, target_tcp=None, mode="ptp"):
+    def plan_ptp(self, seed, *, target_joints=None, target_tcp=None, mode="ptp", arm="right"):
         """只生成起点/终点；TCP 目标求一次 IK，固件负责 PTP 平滑，不做 TOPPRA。"""
         if mode not in {"ptp", "startup_ptp"}:
             raise PlanningError("PTP 运动类型无效 Invalid PTP mode")
+        if arm not in self.arms:
+            raise PlanningError(f"Unknown arm: {arm}")
         with self._lock:
             seed = joint_vector(seed, "PTP seed")
             if (target_joints is None) == (target_tcp is None):
                 raise PlanningError("PTP 必须提供一个目标 Provide one PTP target")
             if target_tcp is not None:
-                settings = self.arms["right"]
+                settings = self.arms[arm]
                 flange = tcp_to_flange(target_tcp, settings["task_from_base"],
                                        settings["flange_from_tcp"])
                 # 一次求解最终姿态，以当前实测关节为参考选择相近的解；
                 # 不再沿 TCP 直线逐点求 IK。使用 PTP 上限，避免把整体调整
                 # 误判为连续 IK 的单周期跳变；IK 的限位与 FK 精度检查不变。
-                solver = NeroIK(max_joint_delta_rad=PTP_MAX_JOINT_DELTA_RAD)
+                # 镜像初始姿态可能包含大幅腕部转动；PTP 的一次目标 IK
+                # 允许更多迭代，遥操作的默认预算、FK 精度和限位保持不变。
+                solver = NeroIK(max_joint_delta_rad=PTP_MAX_JOINT_DELTA_RAD, max_nfev=240)
                 target = solver.solve(flange, seed)
                 if target is None:
                     raise PlanningError("目标位姿 IK 失败 PTP IK failed",
@@ -178,12 +184,12 @@ class Planner:
             # 真正下发的终点严格限位；实测起点和仅用于检查的插值点允许
             # 1 mrad 反馈边界差异，避免 fold-30 保持后仍无法向限位内回撤。
             # 不截断/改写 seed，工作区 FK 仍检查原始位置。
-            self._check_path("right", np.asarray([target]))
-            self._check_path("right", np.asarray(checked), feedback_path=True)
+            self._check_path(arm, np.asarray([target]))
+            self._check_path(arm, np.asarray(checked), feedback_path=True)
             endpoints = np.asarray([seed, target])
             # 复用现有 MotionPlan/到位监督协议。时间字段仅满足存储格式，
             # 不代表 PTP 用时或速度；执行器只发送 endpoints[1] 一次。
-            return MotionPlan("right", [0, 1 / self.config["control_hz"]],
+            return MotionPlan(arm, [0, 1 / self.config["control_hz"]],
                               endpoints, np.zeros((2, 7)), mode,
                               joint_waypoints=endpoints)
 

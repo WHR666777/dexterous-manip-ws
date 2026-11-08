@@ -42,8 +42,8 @@ class TaskSession:
             config_path = DEFAULT_CONFIG
         self.robot_config = load_config(config_path) if config_path is not None else None
         if self.robot_config is not None:
-            if self.robot_config["backend"] != "hardware" or set(self.robot_config["arms"]) != {"right"}:
-                raise ValueError("robo 只接受右臂硬件配置 Only right-arm hardware configuration is supported")
+            if self.robot_config["backend"] != "hardware":
+                raise ValueError("robo 只接受硬件配置 Only hardware configuration is supported")
             validate_hardware_config(self.robot_config)
         self.directory = Path(output_dir or (
             Path("data/agent_runs") / ("session-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -128,70 +128,59 @@ class TaskSession:
         return state
 
     def _prepare_robot(self):
-        """固定宿主流程：全手张开，再两次 PTP 回位；完成前不会启动 Codex。"""
+        """固定宿主流程：两手张开，各侧依次回记录关节和初始抓取姿态。"""
         startup = (self.robot_config or {}).get("startup", {})
         if not self.control.ready["hardware_connected"] or not startup.get("enabled", False):
             return
-        settings = self.robot_config["arms"]["right"]
-        self.log("startup_started", "全手张开并 PTP 准备初始姿态 Open hand then prepare grasp pose with PTP",
-                 start_joints=settings["start_joint_positions"],
-                 initial_grasp_tcp=settings["initial_grasp_tcp"],
-                 reference_flange_yaw_rad=settings["reference_flange_yaw_rad"])
-        print(json.dumps({"description": "即将自动准备初始抓取姿态 Preparing robot before agent; hold is available",
+        settings = self.robot_config["arms"]
+        preparation = {name: {key: arm[key] for key in
+                             ("start_joint_positions", "initial_grasp_tcp")}
+                       for name, arm in settings.items()}
+        self.log("startup_started", "准备双臂初始姿态 Prepare configured arms", arms=preparation)
+        print(json.dumps({"description": "即将准备各侧初始抓取姿态 Preparing arms; hold is available",
                           "session_file": str(self.directory / "session.json")}, ensure_ascii=False), flush=True)
-        # 仅等待已有的普通保持就绪，不把 NO_SOLUTION 状态当作故障，
-        # 不为该状态额外创建保持目标或等待清错；随后直接开始固定准备 cell。
         self._settle_control(self.control.request("status"))
-        # 固定 cell 000 使用内部 PTP 辅助函数，复用轨迹复核、到位与暂停收尾。
-        # 每段只下发一个最终关节目标；第二段只求最终姿态 IK，不做直线插值或 TOPPRA。
-        # 源码由宿主构造，不由模型决定；不新增公开回零工具，也不占 agent 的 cell 预算。
-        # 第一段只回记录关节，第二段到保持记录法兰位置/yaw 的示教抓取倾角。
         source = (
-            # 与 wrist-only 一样调用整只手的官方张开预设，先让其余三指也张开。
-            # open_gripper 只控制拇指/食指，不能替代这里的全手初始化；该内部
-            # 辅助函数仅在 cell 000 注入，且此时人工 hold 通道已经可用。
-            "startup_hand_result = startup_open_hand()\n"
-            "print('启动全手张开反馈 Startup open_hand command:', startup_hand_result)\n"
-            # 与 teleop 回记录位姿一致：已在容差内就跳过第一段，避免为原地
-            # 等待构造一条零位移轨迹、无必要地下发目标并立刻开始下一段。
-            "startup_joints = np.array(" + repr(settings["start_joint_positions"]) + ", dtype=float)\n"
-            "startup_state = robo.state()\n"
-            "if np.max(np.abs(np.array(startup_state['joints']) - startup_joints)) > "
+            "startup_arms = " + repr(preparation) + "\n"
+            "for startup_arm in startup_arms:\n"
+            "    print(startup_arm, startup_open_hand(arm=startup_arm))\n"
+            "for startup_arm, startup_settings in startup_arms.items():\n"
+            "    startup_joints = np.array(startup_settings['start_joint_positions'])\n"
+            "    startup_state = robo.state(arm=startup_arm)\n"
+            "    if np.max(np.abs(np.array(startup_state['joints']) - startup_joints)) > "
             + repr(self.robot_config["motion"]["joint_tolerance_rad"]) + ":\n"
-            "    startup_joint_result = startup_move_ptp(target_joints=startup_joints.tolist())\n"
-            "    print('PTP 回记录关节反馈 Recorded joint PTP:', startup_joint_result)\n"
-            "    if startup_joint_result.status != 'completed' or not startup_joint_result.reached:\n"
-            "        raise RuntimeError('回记录关节位姿失败 Recorded joint move failed: ' + repr(startup_joint_result))\n"
-            "else:\n"
-            "    print('已在记录关节位姿，跳过原地运动 Already at recorded joint pose; skip PTP')\n"
-            "startup_grasp_result = startup_move_ptp(target_tcp=" + repr(settings["initial_grasp_tcp"]) + ")\n"
-            "print('PTP 初始抓取位姿反馈 Initial grasp PTP:', startup_grasp_result)\n"
-            "if startup_grasp_result.status != 'completed' or not startup_grasp_result.reached:\n"
-            "    raise RuntimeError('初始抓取姿态准备失败 Initial grasp move failed: ' + repr(startup_grasp_result))\n"
+            "        startup_result = startup_move_ptp(target_joints=startup_joints.tolist(), arm=startup_arm)\n"
+            "        print(startup_arm, 'recorded joint PTP', startup_result)\n"
+            "        if startup_result.status != 'completed' or not startup_result.reached:\n"
+            "            raise RuntimeError('Recorded joint move failed: ' + repr(startup_result))\n"
+            "    startup_result = startup_move_ptp(target_tcp=startup_settings['initial_grasp_tcp'], arm=startup_arm)\n"
+            "    print(startup_arm, 'initial grasp PTP', startup_result)\n"
+            "    if startup_result.status != 'completed' or not startup_result.reached:\n"
+            "        raise RuntimeError('Initial grasp move failed: ' + repr(startup_result))\n"
         )
         result = self.execute(source, _startup=True)
         if self.status != "running":
-            return  # 人工停止/超时已收尾，不将其改写成普通准备失败或继续发动作。
+            return
         if result["status"] != "completed":
             raise RuntimeError(result.get("exception") or result.get("reason") or str(result))
         from robot_control.nero_ik import pose_error, MAX_FK_POSITION_ERROR_M, MAX_FK_ROTATION_ERROR_DEG
         from .geometry import transform
 
-        # 关节到位后还检查实际 TCP 与初始抓取位姿一致，不能只凭 Python cell 正常
-        # 返回就向模型宣称“已准备”。沿用 IK 的位置/角度容差，不放宽规划门限。
-        actual = transform(result["control"]["tcp"])
-        target = transform(settings["initial_grasp_tcp"])
-        position_error, angle_error = pose_error(actual, target)
-        if position_error >= MAX_FK_POSITION_ERROR_M or math.degrees(angle_error) >= MAX_FK_ROTATION_ERROR_DEG:
-            raise RuntimeError(f"初始抓取位姿反馈未达标 Startup pose feedback mismatch: "
-                               f"{position_error} m, {math.degrees(angle_error)} deg")
+        actual_poses = {}
+        for name, arm in settings.items():
+            actual = transform(result["control"]["arms"][name]["tcp"])
+            target = transform(arm["initial_grasp_tcp"])
+            position_error, angle_error = pose_error(actual, target)
+            if position_error >= MAX_FK_POSITION_ERROR_M or math.degrees(angle_error) >= MAX_FK_ROTATION_ERROR_DEG:
+                raise RuntimeError(f"{name}: 初始抓取姿态反馈未达标 Startup pose feedback mismatch: "
+                                   f"{position_error} m, {math.degrees(angle_error)} deg")
+            actual_poses[name] = actual.tolist()
         with self._state_lock:
             if self.status != "running" or self.control.manual_hold.is_set():
                 return
             self.startup_prepared = True
-        self.log("startup_prepared", "已到达初始抓取姿态 Initial grasp pose ready; yaw=0",
-                 actual_tcp=actual.tolist(), position_error_m=position_error,
-                 rotation_error_deg=math.degrees(angle_error))
+        self.log("startup_prepared", "各侧初始抓取姿态已就绪 Initial grasp poses ready; yaw=0",
+                 actual_tcp=actual_poses)
 
     def execute(self, source, *, _startup=False):
         if not isinstance(source, str):

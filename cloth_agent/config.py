@@ -46,6 +46,23 @@ def _load_calibration(config):
     path = _relative_file(config, reference["file"])
     with path.open() as stream:
         calibration = yaml.safe_load(stream)
+    if "arms" in calibration:
+        config["observations"]["task_from_camera"] = transform(calibration["task_from_camera"]).tolist()
+        for arm, settings in config["arms"].items():
+            if arm not in calibration["arms"]:
+                raise ValueError(f"Combined calibration is missing arm {arm!r}.")
+            values = calibration["arms"][arm]
+            for name in ("task_from_base", "flange_from_tcp"):
+                settings[name] = transform(values[name]).tolist()
+            angles = np.asarray(values["reference_roll_pitch_deg"], dtype=float)
+            if angles.shape != (2,) or not np.isfinite(angles).all():
+                raise ValueError(f"Invalid reference_roll_pitch_deg for {arm}.")
+            settings["reference_roll_pitch_deg"] = angles.tolist()
+            settings["calibration_hand_pose_raw"] = deepcopy(values["hand_pose_raw"])
+            settings.setdefault("hand_poses", {}).update(deepcopy(calibration["hand_poses"]))
+        reference["file"] = str(path)
+        reference["fit"] = {arm: values.get("fit") for arm, values in calibration["arms"].items()}
+        return
     arm = reference["arm"]
     if arm not in config["arms"]:
         raise ValueError(f"Calibration arm {arm!r} is not configured.")
@@ -61,7 +78,7 @@ def _load_calibration(config):
     roll_pitch = np.asarray(calibration["reference_roll_pitch_deg"], dtype=float)
     if roll_pitch.shape != (2,) or not np.isfinite(roll_pitch).all():
         raise ValueError("Calibration reference_roll_pitch_deg must contain two finite angles.")
-    # 此处只加载示教倾角；实际抓取零点必须结合记录起始位姿的 yaw 再构造。
+    # 标定参考角只描述工具轴的定义；启动目标从 startup.tcp_poses 单独读取。
     settings["reference_roll_pitch_deg"] = roll_pitch.tolist()
     reference["file"] = str(path)
     reference["fit"] = calibration.get("fit")
@@ -85,22 +102,44 @@ def _resolve_workspaces(config):
         tcp = task_base @ base_flange @ flange_tcp
         center = tcp[:3, 3]
         settings["workspace"] = [(center - half_side).tolist(), (center + half_side).tolist()]
-        if "reference_roll_pitch_deg" in settings:
-            # 与 wrist-only 一样：roll/pitch 采用示教参考，yaw 保留记录起始关节
-            # 经 FK 得到的法兰 yaw。标定内部为了计算工具旋转而补入的 yaw=0
-            # 不是现场的初始航向，不能直接作为 agent 的零点。
-            yaw = float(Rotation.from_matrix(base_flange[:3, :3]).as_euler("xyz")[2])
-            initial_flange = base_flange.copy()
-            initial_flange[:3, :3] = Rotation.from_euler(
-                "xyz", [*np.deg2rad(settings["reference_roll_pitch_deg"]), yaw]).as_matrix()
-            initial_tcp = task_base @ initial_flange @ flange_tcp
-            # 初始抓取位姿保留记录的法兰位置；TCP 位置因固定工具偏移随倾角改变。
-            # 后续 top_down_pose 的 yaw 是绕 task +Z 左乘的增量，不再是绝对法兰 yaw。
-            settings["start_pose_file"] = str(start_file)
-            settings["start_joint_positions"] = joints.tolist()
-            settings["initial_grasp_tcp"] = initial_tcp.tolist()
-            settings["reference_flange_yaw_rad"] = yaw
-            settings["reference_tcp_rotation"] = initial_tcp[:3, :3].tolist()
+        settings["start_pose_file"] = str(start_file)
+        settings["start_joint_positions"] = joints.tolist()
+        settings["reference_flange_yaw_rad"] = float(Rotation.from_matrix(base_flange[:3, :3]).as_euler("xyz")[2])
+        # 禁用启动且没有显式目标时，计算接口使用记录姿态的工具朝向。
+        # 启用启动时，下方必须用独立配置的 TCP 目标覆盖，不能借用标定参考角。
+        settings["reference_tcp_rotation"] = tcp[:3, :3].tolist()
+
+
+def _resolve_startup_poses(config):
+    startup = config["startup"]
+    poses = startup.get("tcp_poses", {})
+    if not isinstance(poses, dict) or any(name not in config["arms"] for name in poses):
+        raise ValueError("startup.tcp_poses must map configured arms to task TCP poses.")
+    reflection = np.diag([1., -1., 1.])
+    for name, value in poses.items():
+        if isinstance(value, dict):
+            source = value.get("mirror_position_of")
+            if (not isinstance(source, str) or source not in poses or source == name
+                    or isinstance(poses[source], dict)):
+                raise ValueError(f"startup.tcp_poses.{name}.mirror_position_of must name an explicit TCP pose.")
+            plane_y = float(value.get("plane_y_m", np.nan))
+            if not np.isfinite(plane_y):
+                raise ValueError("startup mirror plane_y_m must be finite.")
+            original = transform(poses[source])
+            target = np.eye(4)
+            target[:3, 3] = reflection @ original[:3, 3] + [0., 2 * plane_y, 0.]
+            # 只镜像位置；公共 task 中两侧 TCP 朝向完全相同。
+            target[:3, :3] = original[:3, :3]
+        else:
+            target = transform(value)
+        settings = config["arms"][name]
+        settings["initial_grasp_tcp"] = target.tolist()
+        # top_down_pose 的 yaw=0 以显式启动 TCP 朝向为准，与标定参考角独立。
+        settings["reference_tcp_rotation"] = target[:3, :3].tolist()
+    if startup["enabled"] and any(
+            "initial_grasp_tcp" not in settings or "start_joint_positions" not in settings
+            for settings in config["arms"].values()):
+        raise ValueError("Startup requires startup.tcp_poses for every arm and workspace.start_pose_file.")
 
 
 def load_config(path=DEFAULT_CONFIG) -> dict:
@@ -159,14 +198,15 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
     config["motion"]["joint_frame_interval_s"] = gap
     if not config["arms"] or any(name not in ("left", "right") for name in config["arms"]):
         raise ValueError("Configure left and/or right arms.")
+    # YAML 的公共参数可用 anchor，但每侧运行参数必须各自拥有可变数据。
+    config["arms"] = {name: deepcopy(settings) for name, settings in config["arms"].items()}
     _load_calibration(config)
     _resolve_workspaces(config)
     startup = config.setdefault("startup", {"enabled": False})
     if not isinstance(startup.get("enabled"), bool):
         raise ValueError("startup.enabled must be a boolean.")
     startup["timeout_s"] = positive(startup.get("timeout_s", 120.), "startup.timeout_s")
-    if startup["enabled"] and any("initial_grasp_tcp" not in settings for settings in config["arms"].values()):
-        raise ValueError("Startup requires calibrated reference angles and workspace.start_pose_file.")
+    _resolve_startup_poses(config)
     if config["observations"].get("task_from_camera") is not None:
         transform(config["observations"]["task_from_camera"])
     return config

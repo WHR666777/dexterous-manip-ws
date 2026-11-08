@@ -99,6 +99,10 @@ def hardware_config_path(tmp_path):
     from robot_control.tcp_calibration import tcp_rotation_from_reference
 
     raw = yaml.safe_load(DEFAULT_CONFIG.read_text())
+    # 此组验证原单臂标定格式兼容；双臂合并格式另有专门测试。
+    raw["arms"] = {"right": raw["arms"]["right"]}
+    raw["startup"]["tcp_poses"] = {"right": raw["startup"]["tcp_poses"]["right"]}
+    raw["calibration"]["arm"] = "right"
     raw["calibration"]["file"] = "calibration.yaml"
     raw["arms"]["right"]["workspace"]["start_pose_file"] = str(DEFAULT_CONFIG.parent / "nero_start_pose.yaml")
     reference = transform([0, 0, 0, *np.deg2rad([-97.507, -6.326, 0])])
@@ -117,16 +121,15 @@ def hardware_config_path(tmp_path):
     return path
 
 
-def test_default_hardware_config_has_right_arm_calibration_and_official_open_pose(hardware_config_path):
-    from robot_control.l20 import _L20_OPEN_PRESET
-
+def test_single_arm_calibration_preserves_configured_open_pose(hardware_config_path):
     config = load_config(hardware_config_path)
     validate_hardware_config(config)  # Pure validation, never constructs devices.
     assert config["backend"] == "hardware"
     assert set(config["arms"]) == {"right"}
     arm = config["arms"]["right"]
     assert (arm["can_channel"], arm["hand_can_channel"]) == ("can_arm_a", "can_hand_a")
-    np.testing.assert_array_equal(arm["hand_poses"]["open"], _L20_OPEN_PRESET)
+    configured = yaml.safe_load(hardware_config_path.read_text())["arms"]["right"]
+    np.testing.assert_array_equal(arm["hand_poses"]["open"], configured["hand_poses"]["open"])
     np.testing.assert_allclose(arm["task_from_base"], np.eye(4))
     transform(config["observations"]["task_from_camera"])
     transform(arm["flange_from_tcp"])
@@ -175,10 +178,10 @@ def test_switching_calibration_file_updates_all_derived_parameters(hardware_conf
     expected_center = (task_base @ NeroIK().forward(start["joint_positions_rad"])
                        @ transform(calibration["flange_from_tcp"]))[:3, 3]
     np.testing.assert_allclose(np.mean(arm["workspace"], axis=0), expected_center)
-    start_yaw = Rotation.from_matrix(NeroIK().forward(start["joint_positions_rad"])[:3, :3]).as_euler("xyz")[2]
-    expected_rotation = (task_base[:3, :3] @ Rotation.from_euler("xyz", [np.deg2rad(-90), np.deg2rad(-5), start_yaw]).as_matrix()
-                         @ transform(calibration["flange_from_tcp"])[:3, :3])
-    np.testing.assert_allclose(arm["reference_tcp_rotation"], expected_rotation)
+    # 工具/相机标定更新不再改变显式配置的 task 系启动 TCP 目标及 yaw 零点。
+    np.testing.assert_allclose(arm["initial_grasp_tcp"], previous["arms"]["right"]["initial_grasp_tcp"])
+    np.testing.assert_allclose(arm["reference_tcp_rotation"],
+                               transform(raw["startup"]["tcp_poses"]["right"])[:3, :3])
     assert updated["calibration"]["file"] == str(new_file.resolve())
     assert previous["arms"]["right"]["hand_poses"]["closed"][1] == 0
 

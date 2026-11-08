@@ -1,0 +1,78 @@
+# 左手 TCP/相机标定使用的单侧配置；只连接左臂和左手。
+# TCP 标定使用右手同一 CSV 的第 0 帧手型：collect 时传 --hand-frame 0。
+control_hz: 20
+input_device: pico4
+
+pico4:
+  transport: tcp
+  input_mode: relay
+  relay_host: 127.0.0.1
+  relay_port: 63902
+  port: 63901
+  broadcast_port: 29888
+  side: left
+  max_age_s: 0.25
+  max_pair_skew_s: 0.05
+
+calibration:
+  # 与已有双臂遥操作配置一致：左右 Nero 基座轴方向相同。
+  calibrated: true
+  R_base_pico4:
+    - [0.0, 1.0, 0.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0]
+
+tracking:
+  position_scale: 1.0
+  ema_alpha: 0.4
+  negate_rot_xy: false
+  position_deadband_m: 0.0
+  rotation_deadband_deg: 0.0
+
+safety:
+  max_position_step_m: 0.1
+  max_rotation_step_deg: 16.0
+  tcp_workspace_cube_side_m: 0.9
+  startup_fk_position_error_m: 0.01
+  startup_fk_rotation_error_deg: 5.0
+
+arm:
+  can_interface: socketcan
+  can_channel: can_arm_b
+  max_joint_delta_rad: 0.3345329252
+  start_pose_file: configs/nero_left_start_pose.yaml
+  start_speed_percent: 10
+  follow_speed_percent: 30
+  # 恢复 pinch-left-01 原始标定参考角，只定义工具轴，不作为启动姿态。
+  wrist_only_roll_pitch_deg: [-87.78180501724812, -20.890762262087105]
+  start_tolerance_rad: 0.02
+  start_timeout_s: 30.0
+
+hand:
+  type: left
+  model: L20
+  can_channel: can_hand_b
+  speed: [160, 160, 160, 160, 160]
+  max_raw_step: 10
+  feedback_poll_hz: 20
+  feedback_max_age_s: 0.25
+  retarget_config: AnyDexRetarget/example/config/adaptive/pico4/pico4_linker_l20_left.yaml
+  # 与右手共享，不取反或重排 raw；其余三指由官方 open_hand 预设张开。
+  replay_clip_file: configs/l20_thumb_index_9_10s.csv
+
+camera:
+  enabled: true
+  model: L515
+  serial: "f1420931"
+  width: 640
+  height: 480
+  fps: 30
+  align_depth_to_color: true
+  max_age_s: 0.25
+
+recording:
+  output_dir: data/lerobot/nero_l20_left_calibration
+  lerobot:
+    python: /home/lab404/anaconda3/envs/act/bin/python
+    repo_id: local/nero_l20_left_calibration
+    task: "Left NERO and L20 TCP calibration with shared right-hand pinch pose"

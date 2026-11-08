@@ -18,13 +18,17 @@ INSTRUCTIONS = """你是本次任务唯一的 agent，使用同一 Codex session
 语言 Language：计划、回复、代码注释、docstring、print/log、错误说明和总结均采用
 中文为主、夹杂 English 技术术语的形式。工具名、JSON 字段、变量名和枚举值保留英文。
 
-当前范围 Scope：使用 worker 中注入的 robo 操作已配置的右侧 Nero/L20。
+当前范围 Scope：使用 worker 中注入的 robo 操作已配置的左右 Nero/L20。
+动作、手型和 top_down_pose 用 arm="left" / "right" 选择侧，省略时为 right。
+robo.state() 的 arms 包含双侧状态。move_both(left=..., right=..., mode="J"或"L")
+先分别规划再一次提交，实现软件同时启动；各自到位，不做联合轨迹或同时结束。
 只通过下方机器人操作文档列出的接口访问硬件；不导入设备 SDK，不修改项目或控制文件，
 不使用 shell、网络或其他服务绕过 robo。设备未连接或能力缺失时如实报告，以 failure
 或 stuck 结束，不编造物理效果。没有 info、公开 plan/execute 或抓布判定接口。
 
 初始姿态 Startup：本次配置启用 startup 且 startup_prepared=true 时，宿主已经先发送
 全手张开预设（与 wrist-only 的 open_hand 相同），再回记录关节位姿并到约定的初始抓取位姿。
+初始 TCP 目标来自 startup.tcp_poses；标定的 reference_roll_pitch_deg 只描述工具轴定义。
 全手张开仅记录 SDK 返回，不保证五指已到位；仍需读取状态和观察现场。
 不要重复执行准备 cell 000 或自行回零。
 规划中的 yaw 是相对该初始抓取姿态、绕 task +Z 的增量，单位 rad；yaw=0 保持其朝向，
@@ -43,11 +47,11 @@ Python 环境预置 robo、np、math、time。变量、函数与允许的 import
 异常反馈 Operation failures：目标/限位拒绝、观测失败和手部未到位不会单独结束会话。
 运动失败通过 MotionResult 返回；普通操作失败通过 cell 的 error/exception 返回。
 动作失败后当前 cell 的后续动作可能已被撤权；在下一 cell 读取 state，必要时重新观察，
-再调整目标恢复，不盲目重复。旧运动必须先停止并确认保持，才能开始下一 cell。
+再调整目标恢复，不盲目重复。两侧旧运动必须先停止并确认保持，才能开始下一 cell。
 人工 hold、设备失能、控制反馈失效、通信故障或保持失败仍会结束会话，不尝试绕过。
 运动学反馈 Kinematics：主机 IK 返回 planning_failed 时未执行动作，可调整目标重新调用 move。
 固件 NO_SOLUTION 是状态反馈，不需要清错或恢复接口，也不必等待 NORMAL 才发送新命令。
-需要重新规划时读取实际状态、调整目标，再调用 move_J/move_L；仍遵守一次一条运动的规则。
+需要重新规划时读取实际状态、调整目标，再调用 move_J/move_L；每侧最多一条运动。
 不能仅凭该状态判断到位，要检查 MotionResult 与实测位置。人工 hold 和设备/通信故障仍按原流程处理。
 完成后必须调用 finish，随后给出简短总结。
 """
@@ -57,6 +61,7 @@ EXPERIENCE_FILES = (
     Path(__file__).parent / "grasp_examples" / "experience.md",
     Path(__file__).with_name("fold33_experience.md"),
 )
+TASK_FILE = Path(__file__).parent / "task" / "task.md"
 
 
 def build_prompt(session, task):
@@ -65,10 +70,12 @@ def build_prompt(session, task):
     # 把人工示范经验随本轮 prompt 一次提供给模型；worker 禁止文件访问，
     # 不能只给文档路径而期待 agent 自行读取。经验中的数值仅为条件先验。
     experience = "\n\n".join(path.read_text(encoding="utf-8") for path in EXPERIENCE_FILES)
+    task_workflow = TASK_FILE.read_text(encoding="utf-8")
     actual = {"hardware_connected": session.control.ready["hardware_connected"],
               "startup_prepared": session.startup_prepared,
               "robot_config": session.robot_config}
     return (INSTRUCTIONS + "\n" + operations + "\n\n" + experience
+            + "\n\n任务流程示范 Task workflow：\n" + task_workflow
             + "\n\n本次冻结配置 Frozen configuration (null means not loaded)：\n```json\n"
             + json.dumps(actual, ensure_ascii=False, indent=2) + "\n```\n\n本次任务 Task：\n" + task)
 
@@ -97,9 +104,9 @@ def build_command(session, mcp_url, *, executable="codex", model=None):
         command.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
     # Markdown 正文已进入 prompt；将其中链接的 PNG 按出现顺序直接作为
     # 启动图片附件，模型才能实际看到示范。无需新增 MCP 工具或图片读取流程。
-    for experience in EXPERIENCE_FILES:
-        for link in re.findall(r"\]\(([^)]+\.png)\)", experience.read_text(encoding="utf-8")):
-            command.extend(["--image", str((experience.parent / link).resolve())])
+    for document in (*EXPERIENCE_FILES, TASK_FILE):
+        for link in re.findall(r"\]\(([^)]+\.png)\)", document.read_text(encoding="utf-8")):
+            command.extend(["--image", str((document.parent / link).resolve())])
     command.append("-")
     return command
 

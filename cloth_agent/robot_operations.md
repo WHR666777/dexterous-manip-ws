@@ -1,14 +1,15 @@
 # Nero / L20 操作说明 Robot operations
 
 本文在任务启动时进入 prompt；本次实际标定、限速和工作区见后附配置快照。
-只有右臂 Nero + 右手 L20。硬件未连接时只允许计算与读取 disconnected state，不能假定动作已发生。
+配置包含左右 Nero + L20，共用一台 L515。硬件未连接时只允许计算与读取 disconnected state，不能假定动作已发生。
 
 ## 坐标与抓取 Coordinates and grasp
 
-- 位置使用 m，角度及七轴关节使用 rad。`task` 是配置中 `task_from_base` 定义的固定坐标系。
-- 运动位置始终指向 L20 **拇指、食指闭合接触点**这个虚拟 TCP；它固定在工具上，开手也不重定义。
-- 主要进行近似 gripper 的 top-down 抓取。约定的初始抓取姿态：保留记录起始关节位姿的
-  法兰位置和法兰 yaw，将 roll/pitch 调整为标定中的示教参考倾角，再乘固定工具变换得到 TCP。
+- 位置使用 m，角度及七轴关节使用 rad。公共 `task` 固定为右臂基座；左右各自的 `task_from_base` 转换到该坐标系。
+- 运动位置始终指向各自标定的虚拟 TCP；右侧沿用已有拈布点，左侧为共享 CSV 第 0 帧手型的食指指尖参考点。TCP 固定在工具上，开合手不重定义。
+- 两手 `open` / `closed` / `replay_start` 使用相同 raw 数值；`calibration_hand_pose_raw` 单独记录各侧标定手型，不把第 0 帧误当成闭合命令。
+- 主要进行近似 gripper 的 top-down 抓取。初始 TCP 位姿由 `startup.tcp_poses` 在公共 task 系单独配置，
+  不从标定参考 roll/pitch 构造。默认左侧位置关于 task 的竖直 XZ 平面镜像右侧，两侧 TCP 等高且朝向相同。
 - `top_down_pose(xyz, yaw)` 的旋转为 `Rz_task(yaw) @ R_initial_grasp`。
   **yaw 是相对该初始抓取姿态、绕 task +Z 的增量，单位 rad；yaw=0 保持初始抓取朝向。**
   不是法兰的绝对 RPY yaw，不是相对当前 cell 的姿态，也不要求 TCP X 对齐 task X。
@@ -31,16 +32,31 @@ SDK 返回，不保证五指已到位；正常任务的 `open_gripper()` 仍只�
 
 | 调用 | 含义与结果 |
 | --- | --- |
-| `robo.state()` | dict：实测 joints、task 系 TCP 4×4、arm_status 固件反馈、手反馈、运动、fault、manual_hold_latched、hold_confirmed 等 |
+| `robo.state()` / `robo.state(arm="left")` | 全局状态含 `arms.left/right`，或指定侧实测 joints、task 系 TCP、手反馈及运动；全局 quiescent/hold_confirmed 要求两侧满足 |
 | `obs = robo.observe()` | 固定 RGB-D 快照，含 id、rgb、depth_m、intrinsics、task_from_camera、timestamps、关联 state |
 | `robo.show(obs, crop=None)` | 将 RGB 作为本 cell 返回的 MCP 图片；可选 `[u0,v0,u1,v1]` 原图坐标，右/下边界不包含 |
 | `robo.pixel_to_task(obs, [u,v])` | 使用该快照同一像素深度反投影为 task XYZ；原图整数坐标，零/无效深度直接报错 |
-| `robo.top_down_pose(xyz, yaw=0.0)` | 构造 task 系虚拟 TCP 的 4×4 位姿，不发动作 |
-| `robo.move_J(target_tcp, wait=True)` | task 系虚拟 TCP 目标；内部一次 IK，再发送一次关节 PTP 目标 Single-target joint PTP |
-| `robo.move_L(target_tcp, wait=True)` | task 系虚拟 TCP 目标转 base 法兰目标；原厂 `move_l` 执行，监督启动与 TCP 到位 Native linear motion |
-| `robo.open_gripper()` / `robo.close_gripper()` | 拇指/食指到配置预设；阻塞检查位置，超时有限重发；其余三指不发位置命令 |
-| `robo.gripper_replay_start()` | 到配置中的示范首帧预抓手型并等待位置反馈，用于食指贴合布边的视觉比对；不启动回放、不 reset |
-| `robo.pause_and_hold(reason)` | 暂停轨迹、使用反馈作固定保持目标；确认后结束当前 cell，返回 status=paused |
+| `robo.top_down_pose(xyz, yaw=0.0, arm="right")` | 按指定侧参考朝向构造 task 系 TCP 位姿，不发动作 |
+| `robo.move_J(target_tcp, wait=True, arm="right")` | 指定侧内部一次 IK，再发送一次关节 PTP 目标 |
+| `robo.move_L(target_tcp, wait=True, arm="right")` | 指定侧 task 系 TCP 目标转 base 法兰目标；原厂 `move_l` 执行 |
+| `robo.move_both(left=pose_l, right=pose_r, mode="L", wait=True)` | 两侧分别规划、起点复核后同轮软件调度启动；返回 `{"left": result_l, "right": result_r}`，不保证硬件同步或同时到位 |
+| `robo.open_gripper(arm="right")` / `robo.close_gripper(arm="right")` | 指定侧拇指/食指到共用预设；阻塞检查并有限重发；其余三指不发位置命令 |
+| `robo.gripper_replay_start(arm="right")` | 指定侧到示范第 0 帧手型并等待反馈，不启动回放 |
+| `robo.pause_and_hold(reason)` | 暂停双侧、各自使用反馈作固定保持目标；确认后结束当前 cell |
+
+所有带 `arm` 的动作省略侧时默认右侧。每侧最多执行一条运动，两侧可以独立开始、完成：
+
+```python
+left_handle = robo.move_L(left_pose, arm="left", wait=False)
+right_handle = robo.move_J(right_pose, arm="right", wait=False)
+left_result = left_handle.wait()
+right_result = right_handle.wait()
+```
+
+需要一起发起时使用 `move_both`，两边先完成准备，一边目标校验失败时两边都不启动。
+`wait=False` 返回按侧索引的句柄字典；所有句柄仍须在当前 cell 里等待或暂停。
+运动执行失败、普通暂停、人工 hold 和 cell 收尾覆盖两侧。历史折布经验中的数值来自右臂，
+左侧应使用自己的参考朝向、实测状态和工作区。
 
 `move_J` 和 `move_L` 都接收 task 系虚拟 TCP 位姿：4×4 SE(3)，或
 `[x,y,z,roll,pitch,yaw]`（m/rad，scipy 外旋 xyz），不接收七轴关节角。
@@ -107,7 +123,7 @@ J 的 `.diagnostics` 含点号、目标/实测关节、逐轴误差和固件状�
 需要重新规划时读取当前真实状态、调整目标，直接调用 move_J/move_L；没有恢复接口。
 主机 IK 返回 `planning_failed` 时没有下发运动，也可以直接调整目标重试。
 是否到位仍按下面的新鲜模式/运动反馈与实测位置判断，不能仅凭 NO_SOLUTION 判成功或失败。
-仍遵守一次只运行一条运动；需中断正在运行的动作时使用已有 pause_and_hold，在新 cell 重新规划。
+每侧最多运行一条运动；需中断正在运行的动作时使用已有 pause_and_hold，在新 cell 重新规划。
 人工 hold、通信和其他固件故障的终止流程不变。
 
 `planning_failed` 不下发运动。J 的 `completed/reached=True` 要求发送后的新鲜 J 模式

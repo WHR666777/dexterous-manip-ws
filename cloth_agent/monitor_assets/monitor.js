@@ -252,7 +252,7 @@ function robotRow(label, text, color, target = $("robot-results")) {
 function renderRequests(calls) {
   // 高频轮询属于程序内部通信，默认收起并按操作合并；完整顺序仍保留在原始 JSON。
   // ok 只表示这次请求有正常回复，不把它翻译为运动成功，也不将查询次数算成动作次数。
-  const names = {state: "读取机器人状态", start_motion: "提交运动计划",
+  const names = {state: "读取机器人状态", start_motion: "提交运动计划", start_motions: "同时提交双臂目标",
     motion_status: "查询运动进度", set_gripper: "发送手部指令",
     observe: "获取现场观测", pause: "请求暂停保持"};
   const groups = new Map();
@@ -301,7 +301,7 @@ function renderSelected() {
   const explanation = result?.reason || exceptionSummary;
   $("outcome").textContent = result ? `${hasCell ? "代码执行" : "工具调用"}：${codeStatus}${explanation ? `\n${explanation}` : ""}` : "";
   $("robot-results").replaceChildren();
-  const motion = result?.control?.motion;
+  const armStates = result?.control?.arms ? Object.entries(result.control.arms) : [["", result?.control]];
   // planning_failed 可由 Python 的 MotionResult 返回而不抛异常；现有记录只在
   // stdout 中出现时，明确标为“文本提示”，不能伪装为新增的结构化硬件反馈。
   const failure = [["stdout", result?.stdout], ["返回值", result?.value]]
@@ -311,8 +311,11 @@ function renderSelected() {
     robotRow(`根据${failure[0]}提示`, "有运动规划失败", "bad");
     $("robot-results").append(element("p", "hint errors", failure[1]));
   }
-  if (motion) {
-    robotRow("最近一次已提交运动 · 收尾快照", statusLabel(motion.status), tone(motion.status));
+  for (const [side, state] of armStates) {
+    const motion = state?.motion;
+    if (!motion) continue;
+    const label = {left: "左臂", right: "右臂"}[side] || "机器人";
+    robotRow(`${label} · 最近一次已提交运动 · 收尾快照`, statusLabel(motion.status), tone(motion.status));
     if (failure) {
       // 规划失败的动作没有 start_motion，因此这份快照可能属于前一段成功动作。
       // 不通过快照的 completed 覆盖本 cell 输出中的 planning_failed。

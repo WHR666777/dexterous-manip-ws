@@ -88,7 +88,12 @@ L20 不自动松手/reset。agent 无权触发人工释放或复位。
 
 ## 5. Waypoint、虚拟 TCP 与运动
 
-**运动函数的规划位置以 L20 食指、拇指闭合接触点作为虚拟 TCP；agent 主要使用食指和拇指进行近似 gripper 的 top-down 抓取。**
+公共 task 为右臂基座。`arm="left"` / `"right"` 选择侧，省略时为右侧；
+`move_both(left=..., right=..., mode="J"或"L")` 先分别准备，再一次提交以软件同时启动。
+两侧独立完成，不做联合轨迹或同步到达。人工 hold、暂停和 cell 收尾处理两侧。
+配置和实现细节见 [双臂执行说明](cloth_framework.md#双臂执行与合并标定)。
+
+**运动使用各侧标定的固定虚拟 TCP。右侧沿用拈布点，左侧为共享 CSV 第 0 帧手型的食指指尖参考点；两侧共享开合及预抓手型。**
 
 TCP 固定于工具，开手后也不随指尖位置重定义。已有轴定义：参考姿态下 Z 向下、X 沿法兰旋转轴的水平投影、Y = Z × X，之后固定在工具上。张开手型来自官方预设，闭合手型来自 replay 标定。
 
@@ -100,10 +105,10 @@ TCP 固定于工具，开手后也不随指尖位置重定义。已有轴定义�
 L 发送前等待固件空闲；1 s 内未确认 `motion_status=1` 时有界重发同一目标，默认最多 3 次，
 随后等待 TCP 误差、稳定窗口与新鲜 L 模式到位反馈。参数与精度含义见机器人操作说明。
 不提供独立 IK 或 plan/execute；规划在 move 内完成。启动回记录关节保留内部关节入口。
-`top_down_pose(xyz, yaw)` 用标定参考姿态构造目标，
+`top_down_pose(xyz, yaw)` 用配置的启动 TCP 朝向构造目标，
 旋转为 `Rz_task(yaw) @ R_initial_grasp`；yaw 是相对约定初始抓取姿态绕 task +Z 的增量，单位 rad，
-不是绝对法兰 yaw，也不随当前 cell 重新锚定。初始抓取姿态保留记录起始关节位姿的法兰位置/yaw，
-roll/pitch 采用标定的示教参考。开启 `startup.enabled` 后，宿主先回记录关节，再到该抓取姿态，
+不是绝对法兰 yaw，也不随当前 cell 重新锚定。初始 TCP 位姿由 `startup.tcp_poses` 独立配置，
+默认左侧在公共 task 中仅镜像右侧位置，保持等高且朝向一致；标定参考角只定义工具轴。开启 `startup.enabled` 后，宿主先回记录关节，再到该抓取姿态，
 确认 TCP 反馈后才启动 Codex；固定准备 cell 000 不占模型 cell 预算，人工 hold 全程可用。
 开合手只操作食指和拇指。坐标、单位、TCP、参考姿态、工作区及手型随启动 prompt 提供，
 没有 `robo.info()`。具体约定见 [机器人操作说明](../cloth_agent/robot_operations.md)。
@@ -122,7 +127,7 @@ roll/pitch 采用标定的示教参考。开启 `startup.enabled` 后，宿主�
 ### 基础进程框架与 robo 第一版（2026-10-25）
 
 主流程统一放在 `cloth_agent/`，通过 `python -m cloth_agent` 启动。已有独立持久 worker、独立控制进程、专用人工位置保持 Unix socket、任务协调器，以及临时 MCP / `codex exec` 入口。
-本阶段接入上述 robo、右臂/右手控制与 L515 观测。默认不连接设备；指定 `--execute` 后直接连接，无交互确认。
+当前接入上述 robo、左右臂/手独立控制与共享 L515 观测。默认不连接设备；指定 `--execute` 后直接连接，无交互确认。
 人工入口在硬件模式下捕获固定关节目标并发送普通 J 保持、持续监督反馈；hold_target_sent 只表明调用返回，stop_confirmed 仍为 false，新版实际悬停效果尚未验证。旧阻尼急停入口已禁用。
 
 按用户要求，本轮仅写代码并检查语法，不执行 mock、单元测试或真实模型/设备联调。代码阅读顺序、依赖与命令见 [框架说明](cloth_framework.md)。

@@ -1,9 +1,9 @@
-# 右臂 robo 配置 Right-arm configuration. Task frame = this Nero base_link.
+# 双臂 robo 配置。公共 task frame = 右臂 Nero base_link。
 # TaskSession 显式加载后冻结参数；只有 --execute 才连接设备，无交互确认。
 # 启动读取标定 Calibration is read once; replace after recalibration.
 # Software planning caps: 0.2 rad/s, 0.4 rad/s^2 (not measured hardware ratings).
 # Workspace: 0.9 m cube at nero_start_pose.yaml FK + calibrated TCP; fixed in base.
-# 仅标定后的右臂 Only calibrated right arm; no mock device backend.
+# 两侧独立执行 J/L，move_both 一次提交并在同轮软件调度启动。
 backend: hardware
 # Codex 模型配置 Model settings：null 沿用本机 Codex 配置。
 # model 填模型名称；model_reasoning_effort 填该模型支持的推理强度，如 medium/high。
@@ -13,7 +13,7 @@ model_reasoning_effort: high
 session:
   # 每轮测试前仅修改此处；所有 CLI 默认共用它。相对配置文件目录 configs/。
   # run/serve 不覆盖旧记录；运行期间保持此值不变，下一轮再换新目录。
-  output_dir: ../data/agent_runs/fold-35
+  output_dir: ../data/agent_runs/bi_fold-03
 control_hz: 20
 # 手指空载到位检查 Gripper arrival check；原始值容差，不是角度。
 # 每次最多等 2 s，失败后重发同一目标；2 次 retry + 首次 = 最多 3 次发送。
@@ -22,15 +22,22 @@ gripper:
   max_retries: 2
   tolerance_raw: 50
   poll_interval_s: 0.1
-# agent 任务前自动准备：先回记录关节位姿，再调整到约定的初始抓取姿态。
-# yaw 零点保留记录位姿的法兰航向；roll/pitch 使用标定中的示教参考值。
+# agent 任务前自动准备：先回记录关节位姿，再到以下公共 task 系 TCP 目标。
+# 与 calibration 的工具参考轴独立；位置 m，XYZ 外旋 roll/pitch/yaw 为 rad。
 startup:
   enabled: true
   timeout_s: 120.0
+  tcp_poses:
+    # 保留 bi_fold-01 的右臂目标，明确配置完整 TCP 位姿。
+    right: [-0.6379674577012566, 0.03042760698096446, 0.00772207748671605,
+            -3.141592653589793, 0.0, -1.5712296001387693]
+    left:
+      mirror_position_of: right
+      # 仅位置关于 task 中两基座 Y 的中点镜像；朝向与右侧相同，TCP 等高。
+      plane_y_m: -0.26764081143104956
 calibration:
   # Paths are relative to this config directory, or may be absolute.
-  file: ../data/calibration/pinch-04/calibration.yaml
-  arm: right
+  file: cloth_agent_calibration.yaml
 motion:
   # J PTP 与厂家 L 共用固件速度百分比；不是 rad/s。
   joint_speed_percent: 10
@@ -63,7 +70,7 @@ camera:
   fps: 30
   max_age_s: 0.25
 arms:
-  right:
+  right: &arm_defaults
     can_channel: can_arm_a
     hand_can_channel: can_hand_a
     task_from_base:
@@ -82,3 +89,11 @@ arms:
       # gripper_replay_start 只发送有效 thumb/index 槽位，不启动回放。
       replay_start: [255, 34, 255, 255, 255, 183, 255, 0, 0, 0, 242, 255, 255, 255, 255, 151, 215, 255, 255, 255]
     hand_speed: [160, 160, 160, 160, 160]
+  left:
+    <<: *arm_defaults
+    can_channel: can_arm_b
+    hand_can_channel: can_hand_b
+    # task_from_base / flange_from_tcp / 参考朝向由合并标定文件加载。
+    workspace:
+      start_pose_file: nero_start_pose.yaml
+      cube_side_m: 10.0

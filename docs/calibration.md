@@ -12,7 +12,7 @@
 ### 坐标定义
 
 - `base` 是 Nero URDF 的 `base_link`，`flange` 是 `link7`，`camera` 是对齐 RGB-D 使用的彩色相机光学坐标系。
-- TCP 原点是固定闭合手型下的拇指、食指接触点。默认固定 replay CSV 的最后一帧，其余三指张开；可通过 `--hand-frame` 指定其他帧，编号从 0 开始。整个采集期间 P/O 不会改变手型。
+- TCP 原点是固定手型下选定的指尖参考点：现有右侧使用拈布点，左侧使用第 0 帧的食指指尖。采集默认固定 replay CSV 的第 0 帧；使用 `--hand-frame -1` 可选择最后一帧闭合手型，其余三指张开。整个采集期间 P/O 不会改变手型。
 - 参考 roll、pitch 读取 `arm.wrist_only_roll_pitch_deg`。假设 Nero base 的 +Z 实际竖直向上，在参考姿态下定义 TCP +Z 向下、+X 沿法兰 +Z 的水平投影、+Y = +Z × +X。参考 yaw 取 0 即可，算出的法兰到 TCP 固定旋转不受参考 yaw 影响。
 - **TCP 固定在手上。** 采集时允许腕部倾斜，TCP 的轴随手转动；不会在每张图片中重新把 TCP Z 轴设成向下。倾斜采样不改变之后使用的 replay 抓姿。
 
@@ -66,12 +66,73 @@ R_base_camera * point_camera_i + t_base_camera
 
 `a_from_b` 表示将 B 坐标转换到 A 坐标，平移单位是米。标定程序不改写运行配置；agent 配置通过 `calibration.file` 引用结果 YAML、通过 `calibration.arm` 指定对应机械臂。路径相对于配置文件所在目录，也支持绝对路径。
 
-`configs/cloth_agent.yaml` 引用 `pinch-01/calibration.yaml` 的右臂结果。`cloth_agent.config.load_config`
-读取相机外参、固定工具变换、闭合手型和示教参考 roll/pitch；再从记录的起始关节位姿经 FK
-取得法兰位置和 yaw，构造约定的初始抓取姿态与任务工作区。标定内部为计算固定工具旋转而
-补入的 yaw=0 不作为 agent 的实际航向零点。agent 的 yaw 是相对初始抓取姿态绕 task +Z
-的增量；`startup.enabled` 时宿主先准备到该姿态，再启动模型。重新标定后修改
+`configs/cloth_agent.yaml` 通过合并标定文件读取相机外参、固定工具变换、手型和工具参考角；
+记录起始关节位姿的 FK 仍用于任务工作区和第一段回位。实际启动 TCP 位姿从
+`startup.tcp_poses` 独立读取，不再由标定参考 roll/pitch 与记录法兰位置拼接。
+agent 的 yaw 是相对配置的启动 TCP 朝向绕 task +Z 的增量；`startup.enabled` 时
+宿主先准备到该姿态，再启动模型。重新标定后修改
 `calibration.file` 即可，不必复制矩阵。TaskSession 冻结配置，只有 `--execute` 才连接设备。
-当前 task 坐标系取该 Nero base，另一条臂的基座关系仍需独立确定。
+当前 task 坐标系取右臂 Nero base；左臂标定与坐标转换见下节。
 
 几何底层 `cloth_agent.geometry.calculate` 保留 `camera_to_task` 和 `pixel_to_task` 操作，需要显式传入 `task_from_camera`，深度与内参必须来自同一 RGB-D 快照。旧观测封装已删除，当前没有关键点自动坐标转换或 agent 几何工具入口。
+
+### 左手标定：复用右手第 0 帧手型
+
+使用 `configs/pico4_nero_l20_left.yaml`。它选择左侧 Pico 输入、`can_arm_b`、
+`can_hand_b`、左手 SDK 类型和 `nero_left_start_pose.yaml`；相机固定为右侧使用的
+L515（序列号 `f1420931`）。左右手共享 `configs/l20_thumb_index_9_10s.csv`，
+不取反或交换 raw 槽位。左侧明确使用 `--hand-frame 0` 的预抓手型，
+7 个有效拇指/食指槽位与右侧 `replay_start` 相同。
+其他三指由启动时的官方全手张开预设设置，与右侧相同。
+
+左侧 TCP 使用原始标定参考角 `[-87.781805°, -20.890762°]` 定义工具轴。
+左右侧均按第 0 帧标定处理；合并时不镜像、重定义左侧工具朝向。采集允许完整腕部旋转。
+
+在仓库根目录、已安装 teleop/vision 依赖的 Python 环境中执行。本机现有 `nero`
+环境可用：`conda activate nero`；项目 `.venv` 当前缺少 `pyrealsense2`。
+先在另一个终端启动 Pico daemon：
+
+```bash
+python3 AnyDexRetarget/example/input/pico4_daemon.py
+```
+
+左手标定仍使用同样的三步流程：
+
+```bash
+python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-left-01 \
+  --config configs/pico4_nero_l20_left.yaml --hand-frame 0 --execute
+python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-left-01 --scale 2
+python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-left-01
+```
+
+`collect` 会使能左臂、回左侧记录起始位姿，设置共享的第 0 帧手型；它不连接右臂或右手。
+按 `R` 锚定/恢复，保持静止后按 `C` 采样，按 `Q` 退出。采集不同位置和 roll/pitch
+倾斜的样本，然后点选同一个可见食指指尖参考点。采集程序自行创建目录，
+不要预先创建 `pinch-left-01`；重采使用新的目录名。
+
+结果中的 `hand_side` 为 `left`，`flange_from_tcp` 保留在左法兰坐标系。
+在相机和两臂基座保持固定、左右两份标定对应同一个相机坐标系时，以相机为桥梁：
+
+```python
+task_from_left_base = right_base_from_camera @ np.linalg.inv(left_base_from_camera)
+```
+
+其中 `right_base_from_camera` 来自右侧 `pinch-04/calibration.yaml`，
+`left_base_from_camera` 来自本次左侧标定。若相机或基座在两次采集之间移动过，
+应重新采集对应标定，再计算基座关系。左手采集和求解不需要预先知道右侧 task 变换。
+
+### 合成为双臂 agent 标定文件
+
+```bash
+python3 scripts/calibrate_tcp_camera.py merge \
+  data/calibration/pinch-04/calibration.yaml \
+  data/calibration/pinch-left-01/calibration.yaml \
+  --output configs/cloth_agent_calibration.yaml
+```
+
+`configs/cloth_agent.yaml` 的 `calibration.file` 引用这份自包含文件。它保存公共
+`task_from_camera`、两侧 `task_from_base` / `flange_from_tcp`、参考角、原标定手型和拟合残差。
+合并时完整保留两侧原始 `flange_from_tcp` 和参考角，以及已拟合的相机外参。
+重复 merge 不会镜像或重定义左侧 TCP 朝向。启动目标单独配置为位置左右对称、朝向一致。
+两侧 `open` / `closed` / `replay_start` 使用共用手型；各侧 `hand_pose_raw` 只记录标定手型，
+不会把左侧第 0 帧改作闭合命令。相机、基座关系和原拟合残差仍决定实机精度。

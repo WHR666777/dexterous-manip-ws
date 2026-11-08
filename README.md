@@ -282,13 +282,20 @@ python3 -m teleop.cli --config configs/pico4_nero_l20.yaml \
 保持 replay 闭合手型，通过 Pico 改变位置和完整腕部姿态，按 `C` 保存静止后的 RGB-D 与 Nero FK；退出采集后人工点选接触点，再联合求解相机外参与 TCP 偏移：
 
 ```bash
-python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-04 \
+python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-tmp \
   --config configs/pico4_nero_l20.yaml --execute
 python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-04 --scale 2
 python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-04
 ```
 
-默认固定 replay 最后一帧，可用 `--hand-frame` 选择。采集用 `R` 锚定/恢复、`C` 暂停并等待反馈稳定后采样、`Q` 退出；必须包含不同 roll/pitch 倾斜，不能只改变位置和 yaw。结果写入会话目录的 `calibration.yaml`，包含 `base_from_camera` 和完整的 `flange_from_tcp`。坐标约定、点选要求及结果使用见 [标定说明](docs/calibration.md#5-rgb-d-相机外参与拈布虚拟-tcp-联合标定)。
+采集默认固定 replay 第 0 帧；上述命令用 `--hand-frame -1` 显式选择最后一帧闭合手型。采集用 `R` 锚定/恢复、`C` 暂停并等待反馈稳定后采样、`Q` 退出；必须包含不同 roll/pitch 倾斜，不能只改变位置和 yaw。结果写入会话目录的 `calibration.yaml`，包含 `base_from_camera` 和完整的 `flange_from_tcp`。坐标约定、点选要求及结果使用见 [标定说明](docs/calibration.md#5-rgb-d-相机外参与拈布虚拟-tcp-联合标定)。
+
+左手使用 `configs/pico4_nero_l20_left.yaml`，共享右手 CSV 的第 0 帧预抓手型；
+采集目录使用新的 `data/calibration/pinch-left-01`，操作命令见
+[左手标定说明](docs/calibration.md#左手标定复用右手第-0-帧手型)。
+双臂 agent 使用 `configs/cloth_agent_calibration.yaml` 合并标定，公共 task 为右臂基座。
+`move_J` / `move_L` / 手型接口用 `arm="left"` 或 `arm="right"` 选择侧；
+`move_both(left=pose_l, right=pose_r, mode="L")` 一次提交两侧独立目标，软件同时启动。
 
 ## 轨迹重放与视频查看
 
@@ -395,12 +402,14 @@ python scripts/nero/debug_grasp.py --execute
 
 架构见 [docs/closth_agent.md](docs/closth_agent.md)，代码阅读与运行说明见 [docs/cloth_framework.md](docs/cloth_framework.md)。唯一主流程使用 `codex exec + MCP + 独立持久 Python worker / 控制进程`，入口为 `python -m cloth_agent`。
 
-使用已配置好的 `nero` 环境进行首轮 agent 实机测试，连接右侧 Nero、右侧 L20 和 L515。
+使用已配置好的 `nero` 环境运行 agent，连接配置中的左右 Nero/L20 和共享 L515。
 启动前确认右臂已使能、配置中的 CAN 通道/相机序列号与当前设备一致，并使用当前现场标定。
 `run` 先启动 worker/控制进程并公布人工 `hold` 入口，再自动完成起始位姿准备，之后才启动 MCP/Codex，无需预先启动 `serve`。
 默认 `startup.enabled: true`：先调用与 wrist-only 相同的 `open_hand()` 张开整只手，
-再回到 `nero_start_pose.yaml` 的记录关节位姿，随后保留其法兰位置/yaw、
-将 roll/pitch 调整到标定的示教倾角。此时的抓取朝向定义为 `yaw=0`；后续规划 yaw 是相对它绕 task +Z 的增量，单位 rad。
+再回到各侧记录关节位姿，随后到 `startup.tcp_poses` 明确配置的 task 系 TCP 位姿，
+不再从标定参考角拼接启动目标。右侧保留原启动 TCP 目标，左侧关于
+`task Y=-0.2676408114 m` 仅镜像右侧位置，朝向与右侧一致，两侧 TCP 的 task Z 都为 `0.0077220775 m`。
+此时的抓取朝向定义为 `yaw=0`；后续规划 yaw 是相对它绕 task +Z 的增量，单位 rad。
 准备过程中也会实际运动；未确认到位、规划失败、超时或人工停止时不会启动 agent。
 首轮任务完成一次“观察 → 抓取 → 小幅抬升 → 再观察 → 放回”的闭环：
 
@@ -422,6 +431,10 @@ python -m cloth_agent run \
 python -m cloth_agent run \
   --execute \
   --task '进行第一次抹布实机抓取调试，你的目标是尽最大努力抓起布料一角（图片中的最下方的角）。先读取真实机器人状态，获取并展示现场图像；收到图像反馈后，选择清晰可见且深度有效的布料边角抓取点。以 L20 食指、拇指闭合接触点为虚拟 TCP，进行一次 top-down 抓取。编写的代码中，抓取后就要抬升，因为大拇指闭合后会与台面接触（大拇指低于 tcp 点），若没有抬升会导致大拇指无法闭合。遇到异常情况尽量重试或者尝试恢复。若没有抓取成功，可以尝试微调 TCP pose，比如roll，然后再次尝试。成功抓取后，需要总结经验。'
+
+python -m cloth_agent run \
+  --execute \
+  --task '你的任务是将毛巾对折并且移动到合适的位置。'
 
 ```
 
@@ -480,4 +493,4 @@ docs/review.md               本次改造的代码 review 导航
 
 ## 当前验证边界
 
-当前 agent 按用户要求仅检查语法，没有运行 mock、测试、Codex 联调或实机运动；运行行为尚待验证，范围见 [docs/cloth_framework.md](docs/cloth_framework.md)。遥操作的现场验证顺序见 `docs/calibration.md`。
+双臂扩展已完成离线标定、执行器和 worker/控制进程通信测试，尚未进行双臂实机运动验证；范围见 [docs/cloth_framework.md](docs/cloth_framework.md)。遥操作的现场验证顺序见 `docs/calibration.md`。
