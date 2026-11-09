@@ -135,7 +135,10 @@ class RobotController:
             self.hand.set_speed(self.settings["hand_speed"])
         # 与已正常工作的遥操作复用相同的反馈轮询器。L20 的 fresh=True 会
         # 发请求并等待，不能放到机械臂的反馈监督周期里。
-        self.hand_feedback = HandFeedbackPoller(self.hand, poll_hz=4., max_age_s=1.)
+        act = self.config.get("act") or {}
+        self.hand_feedback = HandFeedbackPoller(
+            self.hand, poll_hz=act.get("hand_feedback_poll_hz", 4.),
+            max_age_s=act.get("hand_feedback_max_age_s", 1.))
         self.hand_feedback.start()
         # 相机封装独立后台采集；普通请求只取最新完整快照，不阻塞人工请求接收。
         if self.config.get("camera", {}).get("enabled"):
@@ -228,6 +231,7 @@ class RobotController:
                     "arm_status": deepcopy(self._arm_status),
                     "executor": (self.motion.get("executor", "joint_position_J")
                                  if self.motion and self.motion["status"] in {"running", "completed"}
+                                 and (self.motion.get("executor") != "act_JS" or self.motion["status"] == "running")
                                  and not self.manual_stop.is_set() else "joint_position_J"),
                     "manual_hold_latched": self.manual_stop.is_set(),
                     "manual_hold_report": deepcopy(self.manual_hold_report),
@@ -262,6 +266,7 @@ class RobotController:
                 from .planning import PTP_MAX_JOINT_DELTA_RAD
 
                 ptp = (self.motion is not None and self.motion["status"] == "running"
+                       and self.motion.get("executor") != "act_JS"
                        and self.motion["plan"].mode in {"ptp", "startup_ptp"})
                 self.arm.move_joints(q, speed_percent=self.motion_settings["joint_speed_percent"],
                                      max_joint_delta=PTP_MAX_JOINT_DELTA_RAD if ptp else None)
@@ -431,8 +436,9 @@ class RobotController:
                 "target_joints": target.tolist(), "sampled_at": time.monotonic()})
         return target
 
-    def _pause(self, reason):
-        self.cell_paused = True
+    def _pause(self, reason, *, pause_cell=True):
+        if pause_cell:
+            self.cell_paused = True
         with self._lock:
             if self.motion and self.motion["status"] == "running":
                 self.motion.update(status="paused", reached=False, reason=reason,
@@ -555,6 +561,11 @@ class RobotController:
                                     "target_joints": (self._hold.tolist()
                                                       if self._hold is not None else None)})
         if motion and motion["status"] == "running" and not self.fault:
+            if motion.get("executor") == "act_JS":
+                # ACT I/O 线程发送连续 JS；本线程只监督反馈，不能重发旧 J/L 目标。
+                with self._lock:
+                    motion["actual_joints"] = self._joints.tolist()
+                return
             if native_running:
                 self._tick_linear(motion)
                 return  # 厂家 L 期间绝不能执行旧的 J 分段或重发旧保持目标。
@@ -656,8 +667,8 @@ class RobotController:
         with self._trajectory_lock:
             try:
                 if (self.connected and self.motion and self.motion["status"] == "running"
-                        and self.motion.get("executor") == "native_linear_L"):
-                    # 设备/通信故障也必须撤销正在执行的 L；普通保持仍需通过
+                        and self.motion.get("executor") in {"native_linear_L", "act_JS"}):
+                    # 设备/通信故障也必须撤销正在执行的 L/ACT；普通保持仍需通过
                     # SDK 的使能与反馈检查，失败时保留原因，人工通道仍独立可用。
                     self._pause(reason)
                 # 已有发送目标时保留该固定目标，避免每次故障重抓实测值。

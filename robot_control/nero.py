@@ -827,7 +827,12 @@ class NeroArm:
         if delta is not None:
             current = self.get_joint_positions()
             if np.any(np.abs(command - current) > delta):
-                raise ValueError("Joint command exceeds max_joint_delta.")
+                errors = np.abs(command - current)
+                raise ValueError(
+                    "Joint command exceeds max_joint_delta. "
+                    f"limit_rad={delta}, joints={(np.flatnonzero(errors > delta) + 1).tolist()}, "
+                    f"target={command.tolist()}, actual={current.tolist()}, delta_rad={errors.tolist()}"
+                )
         return command
 
     def hold_target_from_feedback(self, joints: Any) -> np.ndarray:

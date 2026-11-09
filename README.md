@@ -12,6 +12,12 @@
 驱动与设备配置，主进程使用 `nero` 环境，模型子进程使用 `act` 环境。
 运行方式见 `/home/lab404/dex-mani/lerobot/README.md` 的“本机 NERO + L20 双侧 ACT”一节。
 
+cloth agent 可调用 `robo.run_act(policy="fold", steps=500)` 执行固定步数的双臂 ACT。
+模型解释器、脚本和命名 checkpoint 位于 `configs/cloth_agent.yaml` 的 `act` 配置；
+模型首次调用时加载，设备连接由 cloth 控制进程统一持有，调用结束后确认位置保持。
+返回的 `completed` 仅表示执行结束，agent 随后使用 `observe()` / `show()` 判断任务效果。
+接口和时间限制见 `cloth_agent/robot_operations.md`。原独立推理脚本仍可单独使用。
+
 ## Pico 4 输入（当前默认）
 
 完整启动步骤见 [notes-zyd.md](notes-zyd.md)。头显打开 robo、勾选手部追踪并 reconnect；USB 连接时执行 `adb reverse tcp:63901 tcp:63901`。先在一个终端保持运行原 AnyDex 转发：
@@ -472,7 +478,7 @@ stdout 和运动反馈在 cell 返回后更新，图片为观测快照；详细�
 
 旧 app-server、普通子任务脚本提交、参数回信、demo 与对应执行后端已删除，不再提供原来的 `demo/script` 命令或 `cloth_agent.tools` 接口。
 
-`geometry.py`、`planning.py`、`config.py` 与标定配置已接入新任务主流程。`move_J` 在 worker 求一次 IK，再由设备进程发送关节 PTP；`move_L` 把虚拟 TCP 转为法兰目标，使用原厂 `move_l`，配合固件空闲、启动确认、有界重发和 TCP 到位监督，不再使用逐点 IK/J 分段。L 的位置到位阈值沿用实测脚本的 0.02 m，可在 `motion.linear_position_tolerance_m` 调整。几何函数仍供现有 TCP/相机标定使用；独立规划器的 TOPPRA 保留供规划脚本使用。`configs/cloth_agent_mock.yaml` 仅作为规划测试的数值输入，不对应假设备运行或 demo。
+`geometry.py`、`planning.py`、`config.py` 与标定配置已接入新任务主流程。`move_J` 接收 7 元七轴 rad 数组直接作为目标，或对 6 元 xyz-rpy / 4×4 TCP 位姿在 worker 求一次 IK，再由设备进程发送关节 PTP；`move_L` 把虚拟 TCP 转为法兰目标，使用原厂 `move_l`，配合固件空闲、启动确认、有界重发和 TCP 到位监督，不再使用逐点 IK/J 分段。L 的位置到位阈值沿用实测脚本的 0.02 m，可在 `motion.linear_position_tolerance_m` 调整。几何函数仍供现有 TCP/相机标定使用；独立规划器的 TOPPRA 保留供规划脚本使用。`configs/cloth_agent_mock.yaml` 仅作为规划测试的数值输入，不对应假设备运行或 demo。
 
 ## 目录
 

@@ -142,6 +142,41 @@ def _resolve_startup_poses(config):
         raise ValueError("Startup requires startup.tcp_poses for every arm and workspace.start_pose_file.")
 
 
+def _resolve_act(config):
+    """ACT 是可选能力；只解析配置，不加载模型、不创建设备或子进程。"""
+    act = config.get("act")
+    if act is None:
+        return
+    if not isinstance(act, dict):
+        raise ValueError("act must be a mapping or null.")
+    if set(config["arms"]) != {"left", "right"}:
+        raise ValueError("ACT requires both left and right arms.")
+    camera = config.get("camera", {})
+    if not camera.get("enabled") or (camera.get("height"), camera.get("width")) != (480, 640):
+        raise ValueError("ACT requires camera.enabled=true and 640x480 RGB.")
+    for name in ("python", "script"):
+        if not isinstance(act.get(name), str) or not act[name].strip():
+            raise ValueError(f"act.{name} must be a non-empty path.")
+        act[name] = str(_relative_file(config, act[name]))
+    policies = act.get("policies")
+    if (not isinstance(policies, dict) or not policies
+            or any(not isinstance(name, str) or not name.strip()
+                   or not isinstance(path, str) or not path.strip() for name, path in policies.items())):
+        raise ValueError("act.policies must map policy names to checkpoint directories.")
+    act["policies"] = {name: str(_relative_file(config, path)) for name, path in policies.items()}
+    if act.setdefault("device", "cuda") not in {"cuda", "cpu"}:
+        raise ValueError("act.device must be cuda or cpu.")
+    for name, default in (("startup_timeout_s", 120.), ("inference_timeout_s", 5.),
+                          ("control_hz", 20.), ("hand_feedback_poll_hz", 20.),
+                          ("hand_feedback_max_age_s", .25)):
+        act[name] = positive(act.get(name, default), f"act.{name}")
+    if act["control_hz"] != float(config["control_hz"]):
+        raise ValueError("act.control_hz must match the cloth control_hz and policy recording rate.")
+    step = act.setdefault("hand_max_raw_step", 10)
+    if isinstance(step, bool) or not isinstance(step, int) or not 1 <= step <= 255:
+        raise ValueError("act.hand_max_raw_step must be an integer in [1, 255].")
+
+
 def load_config(path=DEFAULT_CONFIG) -> dict:
     path = Path(path).resolve()
     with path.open() as stream:
@@ -207,6 +242,7 @@ def load_config(path=DEFAULT_CONFIG) -> dict:
         raise ValueError("startup.enabled must be a boolean.")
     startup["timeout_s"] = positive(startup.get("timeout_s", 120.), "startup.timeout_s")
     _resolve_startup_poses(config)
+    _resolve_act(config)
     if config["observations"].get("task_from_camera") is not None:
         transform(config["observations"]["task_from_camera"])
     return config

@@ -7,6 +7,7 @@ from threading import RLock
 import time
 
 from robot_control.errors import CommandRejected
+from .act import ActExecution, prepare_act_hands
 from .hardware import RobotController as ArmController
 
 
@@ -21,6 +22,7 @@ class RobotController:
         self._active_cell = None
         self._ended = False
         self._on_control_sample = None
+        self.act = ActExecution(self)
         try:
             for name in (config or {}).get("arms", {"right": {}}):
                 settings = deepcopy(config) if config else None
@@ -75,10 +77,10 @@ class RobotController:
             report.update({name: (value or {}).get(name, "pending") for name, value in reports.items()})
         # 顶层 joints/tcp 等保留默认右侧视图；arms 始终包含所有侧。
         return {**default, "arms": states, "hardware_connected": self.connected,
-                "quiescent": all(state["quiescent"] for state in states.values()),
+                "quiescent": not self.act.active and all(state["quiescent"] for state in states.values()),
                 "hold_confirmed": all(state["hold_confirmed"] for state in states.values()),
                 "fault": "; ".join(f"{name}: {state['fault']}" for name, state in states.items() if state["fault"]),
-                "manual_hold_report": report}
+                "manual_hold_report": report, "act": self.act.snapshot()}
 
     _observe = ArmController._observe
     _capture_observation = ArmController._capture_observation
@@ -144,6 +146,7 @@ class RobotController:
                     if not self.snapshot()["quiescent"] or self._ended:
                         raise CommandRejected("控制状态不允许新 cell Arms are not ready for a new cell")
                 elif operation in {"cell_end", "end_task"}:
+                    self.act.cancel(request.get("reason", "cell 已结束 Cell ended"))
                     self._active_cell = None
                     self._ended = self._ended or operation == "end_task"
                 else:
@@ -170,6 +173,14 @@ class RobotController:
             return self._observe()
         if operation == "pause":
             return self.pause(request["reason"])
+        if operation == "act_status":
+            return self.act.status(request["run_id"])
+        if operation == "start_act":
+            return self.act.start(cell_id, request["policy"], request["steps"])
+        if self.act.active:
+            raise CommandRejected("ACT 正在独占双臂与双手，请先等待或暂停 ACT is running")
+        if operation == "prepare_act_hands":
+            return prepare_act_hands(self, cell_id)
         if operation == "start_motions":
             if set(request["plans"]) != {"left", "right"}:
                 raise CommandRejected("双臂请求需要左右两个目标 Both arm targets are required")
@@ -192,6 +203,7 @@ class RobotController:
 
     def pause(self, reason):
         with self._trajectory_lock:
+            self.act.cancel(reason)
             errors = []
             for arm in self.arms.values():
                 if arm.cell_paused:
@@ -205,6 +217,7 @@ class RobotController:
             return self.snapshot()
 
     def fail(self, reason):
+        self.act.cancel(reason)
         errors = []
         with self._trajectory_lock:
             for arm in self.arms.values():
@@ -221,6 +234,7 @@ class RobotController:
     def manual_hold(self, reason):
         # 不取得普通轨迹锁；先撤销两侧权限，再分别捕获各自固定目标。
         self.manual_stop.set()
+        self.act.cancel(reason)
         for arm in self.arms.values():
             arm.manual_hold(reason)
         return self.snapshot()
@@ -231,6 +245,11 @@ class RobotController:
 
     def close(self):
         errors = []
+        self._ended = True
+        try:
+            self.act.close()
+        except Exception as exc:
+            errors.append(f"ACT: {exc}")
         if self.camera is not None:
             try:
                 self.camera.stop()

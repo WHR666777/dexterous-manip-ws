@@ -145,7 +145,7 @@ class Planner:
             return plan
 
     def plan_startup_ptp(self, seed, *, target_joints=None, target_tcp=None, arm="right"):
-        """保留固定启动流程的内部关节入口，不向 agent 公开关节目标。"""
+        """固定启动流程的 PTP 入口；普通 move_J 使用 plan_ptp。"""
         return self.plan_ptp(seed, target_joints=target_joints, target_tcp=target_tcp,
                              mode="startup_ptp", arm=arm)
 

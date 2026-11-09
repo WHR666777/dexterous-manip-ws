@@ -187,7 +187,8 @@ class Robo:
             return self._planner.plan_startup_ptp(state["joints"], target_joints=target_joints,
                                                  target_tcp=target_tcp, arm=arm)
         if ptp:
-            return self._planner.plan_ptp(state["joints"], target_tcp=target_tcp, arm=arm)
+            return self._planner.plan_ptp(state["joints"], target_joints=target_joints,
+                                          target_tcp=target_tcp, arm=arm)
         return self._planner.plan_linear(state["joints"], target_tcp, arm=arm)
 
     def _move(self, *, target_joints=None, target_tcp=None, wait=True, startup_ptp=False, ptp=False,
@@ -209,8 +210,17 @@ class Robo:
         return handle.wait() if wait else handle
 
     def move_J(self, target_tcp, wait=True, *, arm="right"):
-        """task 系虚拟 TCP 位姿；一次 IK + 关节 PTP，SE(3)/xyz-rpy，m/rad。"""
-        return self._move(target_tcp=transform(target_tcp), wait=wait, ptp=True, arm=arm)
+        """关节 PTP：7 元数组为七轴 rad；6 元 xyz-rpy / 4×4 为 task 系 TCP。
+
+        关节目标直接校验并执行，TCP 目标先求一次 IK。两者共用限位、工作区、
+        起点与到位检查，支持 wait=False；保留 target_tcp 参数名兼容已有关键字调用。
+        """
+        target = np.asarray(target_tcp, dtype=float)
+        if target.shape == (7,):
+            if not np.isfinite(target).all():
+                raise ValueError("关节目标必须为七个有限 rad 值 Expected seven finite joint values in rad")
+            return self._move(target_joints=target.copy(), wait=wait, ptp=True, arm=arm)
+        return self._move(target_tcp=transform(target), wait=wait, ptp=True, arm=arm)
 
     def move_L(self, target_tcp, wait=True, *, arm="right"):
         """task 系 TCP 目标转法兰后使用厂家 move_l；SE(3)/xyz-rpy，m/rad。
@@ -246,6 +256,31 @@ class Robo:
         """拇指/食指到配置张开姿态，阻塞检查到位并有限重试 Open and wait."""
         self._check_arm(arm)
         return self._call("set_gripper", preset="open", arm=arm)
+
+    def prepare_act_hands(self):
+        """阻塞设置左右 ACT 五指起始手型，返回按侧索引的反馈 dict。
+
+        使用训练 episode 36 / frame 0 的固定 16 槽位手型，按 hand_max_raw_step
+        渐进设置，保留 4 个保留位，等待新查询反馈最大误差 <=10 raw（最多 5 s）。
+        机械臂须先停止并确认保持；本调用不回位、不运行 ACT，不声称设备 ACK。
+        """
+        return self._call("prepare_act_hands")
+
+    def run_act(self, policy="fold", steps=500):
+        """阻塞运行配置中的双臂 ACT 固定步数并确认保持；返回 dict，不判断任务成功。
+
+        每次调用重置模型动作队列。结果包含 status、steps_executed、reason、
+        hold_confirmed；completed 仅表示步数执行结束，随后 observe/show 判断效果。
+        """
+        if not isinstance(policy, str) or not policy:
+            raise ValueError("policy 必须是配置中的非空名称 policy must be a configured name")
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+            raise ValueError("steps 必须为正整数 steps must be a positive integer")
+        result = self._call("start_act", policy=policy, steps=steps)
+        while result["status"] == "running":
+            time.sleep(.05)
+            result = self._call("act_status", run_id=result["run_id"])
+        return result
 
     def close_gripper(self, *, arm="right"):
         """到标定闭合姿态，阻塞检查到位并有限重试；不判定抓布成功。"""

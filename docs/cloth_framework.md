@@ -140,9 +140,10 @@ CAN 抓包和单侧计划位于 `arms/left/`、`arms/right/`；公共控制采�
 若 cell 收尾失败，仍保留原始 stdout、异常、robo 调用记录和最后控制快照；
 `execution_status` 记录 worker 原始状态，`control_error` 单独记录收尾错误。
 人工保持联调配置显式禁用 startup；不传 `--execute` 也不会准备或运动。
-公开 `move_J(target_tcp, wait=True)` 与 `move_L(target_tcp, wait=True)` 都接收 task 系虚拟
-TCP 位姿（4×4 SE(3) 或 xyz-rpy，m/rad）。`move_J` 以实测关节为参考，对目标法兰位姿
-求一次 IK，生成 `mode=ptp` 的两个端点；普通 J 仅发送一次终点，由固件完成 PTP 平滑，
+公开 `move_J(target_tcp, wait=True)` 按形状接收 7 元七轴 rad 数组，或 task 系虚拟
+TCP 位姿（4×4 SE(3) / 6 元 xyz-rpy，m/rad）；`move_L` 只接收 TCP 位姿。
+`move_J` 对 TCP 目标以实测关节为参考求一次 IK，对关节数组直接使用指定目标，
+生成 `mode=ptp` 的两个端点；普通 J 仅发送一次终点，由固件完成 PTP 平滑，
 不做 TOPPRA，不保证中途 TCP 直线。PTP 复用启动回位的 2π rad 整体变化上限，
 保留关节限位、工作区、起点与到位检查。agent 无需自行求 IK，IK 失败不发动作。
 `move_L` 使用 `LinearMotionPlan`，只保存实测起始关节和 task 系虚拟 TCP 终点，

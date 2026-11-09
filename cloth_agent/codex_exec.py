@@ -59,9 +59,9 @@ Python 环境预置 robo、np、math、time。变量、函数与允许的 import
 
 EXPERIENCE_FILES = (
     Path(__file__).parent / "grasp_examples" / "experience.md",
-    Path(__file__).parent / "experience" / "experience_easy.md",
+    Path(__file__).parent / "experience" / "experience_easy-2.md",
 )
-TASK_FILE = Path(__file__).parent / "task" / "task.md"
+TASK_FILE = Path(__file__).parent / "task_2" / "task.md"
 
 
 def build_prompt(session, task):

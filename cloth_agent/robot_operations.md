@@ -32,14 +32,15 @@ SDK 返回，不保证五指已到位；正常任务的 `open_gripper()` 仍只�
 
 | 调用 | 含义与结果 |
 | --- | --- |
-| `robo.state()` / `robo.state(arm="left")` | 全局状态含 `arms.left/right`，或指定侧实测 joints、task 系 TCP、手反馈及运动；全局 quiescent/hold_confirmed 要求两侧满足 |
+| `robo.state()` / `robo.state(arm="left")` | 全局状态含 `arms.left/right` 和最近一次 `act` 执行结果，或指定侧实测 joints、task 系 TCP、手反馈及运动；全局 quiescent/hold_confirmed 要求两侧满足 |
 | `obs = robo.observe()` | 固定 RGB-D 快照，含 id、rgb、depth_m、intrinsics、task_from_camera、timestamps、关联 state |
 | `robo.show(obs, crop=None)` | 将 RGB 作为本 cell 返回的 MCP 图片；可选 `[u0,v0,u1,v1]` 原图坐标，右/下边界不包含 |
 | `robo.pixel_to_task(obs, [u,v])` | 使用该快照同一像素深度反投影为 task XYZ；原图整数坐标，零/无效深度直接报错 |
 | `robo.top_down_pose(xyz, yaw=0.0, arm="right")` | 按指定侧参考朝向构造 task 系 TCP 位姿，不发动作 |
-| `robo.move_J(target_tcp, wait=True, arm="right")` | 指定侧内部一次 IK，再发送一次关节 PTP 目标 |
+| `robo.move_J(target_tcp, wait=True, arm="right")` | 7 元关节数组（rad）直接执行 PTP；6 元 xyz-rpy / 4×4 TCP 位姿先求一次 IK，再执行 PTP |
 | `robo.move_L(target_tcp, wait=True, arm="right")` | 指定侧 task 系 TCP 目标转 base 法兰目标；原厂 `move_l` 执行 |
 | `robo.move_both(left=pose_l, right=pose_r, mode="L", wait=True)` | 两侧分别规划、起点复核后同轮软件调度启动；返回 `{"left": result_l, "right": result_r}`，不保证硬件同步或同时到位 |
+| `robo.run_act(policy="fold", steps=500)` | 阻塞执行配置模型的固定步数，独占双臂和双手；结束后确认 J 位置保持，返回执行结果 dict |
 | `robo.open_gripper(arm="right")` / `robo.close_gripper(arm="right")` | 指定侧拇指/食指到共用预设；阻塞检查并有限重发；其余三指不发位置命令 |
 | `robo.gripper_replay_start(arm="right")` | 指定侧到示范第 0 帧手型并等待反馈，不启动回放 |
 | `robo.pause_and_hold(reason)` | 暂停双侧、各自使用反馈作固定保持目标；确认后结束当前 cell |
@@ -58,14 +59,45 @@ right_result = right_handle.wait()
 运动执行失败、普通暂停、人工 hold 和 cell 收尾覆盖两侧。历史折布经验中的数值来自右臂，
 左侧应使用自己的参考朝向、实测状态和工作区。
 
-`move_J` 和 `move_L` 都接收 task 系虚拟 TCP 位姿：4×4 SE(3)，或
-`[x,y,z,roll,pitch,yaw]`（m/rad，scipy 外旋 xyz），不接收七轴关节角。
+`run_act` 用于任务 prompt 指定的 ACT 动作阶段，调用前的布与双手状态由任务 prompt 定义。
+可用模型名称见冻结配置的 `act.policies`，模型路径、解释器和控制频率由配置固定，
+agent 不自行启动服务或修改 checkpoint。第一版默认 `fold`、100 步，20 Hz 下约 5 s，
+实际用时包含推理延迟与末尾保持确认。首次调用加载模型，成功后在本会话内保持加载；
+切换模型会重载，每次调用都先 reset 策略动作队列。
+
+```python
+result = robo.run_act(policy="fold", steps=500)
+print(result)
+obs = robo.observe()
+robo.show(obs)
+```
+
+返回字段包括 `status`（`completed` / `failed` / `paused` / `manual_hold`）、
+`policy`、`run_id`、`steps_requested`、`steps_executed`、`elapsed_s`、`hold_confirmed`、`reason`。
+`steps_executed` 只统计左右机械臂和手部目标调用均返回的完整控制轮数，不表示设备 ACK。
+`completed` 只表示固定步数执行结束并确认位置保持，任务效果由 agent 读取结果后观察判断。
+失败前的动作不回滚，失败或暂停后在下一 cell 读取真实状态再决策。
+ACT 会操作每手 16 个有效位置槽位，覆盖五指；其余 4 个保留位沿用实测值。
+ACT 使用关节 JS 连续目标，沿用关节限位/单步限制和手部 raw 单步限幅，
+并检查目标 TCP 工作区。运行期间不同时发送普通 J/L 或 gripper 命令。
+超时、cell/任务结束和人工 hold 均撤销 ACT 权限，停止后续目标；不自动松手或失能。
+调用总时长必须小于当前 cell 的时间上限（默认 60 s）；首次模型加载也计入其中，
+需要更长执行时由操作者通过 `--cell-timeout` 配置，不由 agent 跨 cell 续播。
+ACT 推理日志保存于会话目录的 `act-worker.log`，动作记录进入 `control-samples.jsonl`。
+
+`move_J` 按输入形状区分目标：一维 7 元数组 `[q1,q2,q3,q4,q5,q6,q7]` 是该侧七轴
+关节位置（rad），直接使用关节目标；一维 6 元数组 `[x,y,z,roll,pitch,yaw]` 或
+4×4 SE(3) 是 task 系虚拟 TCP 位姿（m/rad，scipy 外旋 xyz），先求一次 IK。
+保留 `target_tcp=` 关键字兼容已有调用；该参数同样可以传入 7 元关节数组。
+`move_L` 及 `move_both` 的目标仍是 TCP 位姿，不接受七轴关节数组。
 top-down 任务优先使用 `top_down_pose` 构造目标，避免把法兰姿态当成 TCP 姿态。
 例如 `robo.move_J(robo.top_down_pose([x, y, z], yaw=0.0))`。
 `move_J` 以当前实测关节为参考，把 TCP 目标转换成法兰目标并求一次 IK，
-只下发一次最终关节目标，由固件平滑；不要求 agent 求 IK 或提供关节角。
+只下发一次最终关节目标，由固件平滑；传入关节数组时跳过 IK，执行指定七轴目标。
 PTP 整体关节变化上限为 2π rad，并检查限位、工作区与实际起点；中途 TCP 路径不保证直线或避碰。
-IK 失败返回 `planning_failed`，不下发运动。关节目标只保留在宿主启动回位的内部入口。
+IK 或规划检查失败返回 `planning_failed`，不下发运动。关节目标与 TCP 目标共用
+原有检查、到位结果和异步句柄；普通任务可用 `move_J(start_joints, arm="left")` 回到
+冻结配置该侧的 `start_joint_positions`，左右各自回位并检查 `.reached` 后再调用 ACT。
 `move_L` 不再逐点求主机 IK、不做 TOPPRA、不发送 J 分段；原厂 `move_l` 接收一个
 base 系法兰 xyz-rpy 目标。固定朝向平移时，虚拟 TCP 也随法兰沿直线平移。
 同时改变朝向时，工具偏移会影响虚拟 TCP 的中途路径，不保证该虚拟点严格沿直线；

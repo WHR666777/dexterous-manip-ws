@@ -60,18 +60,22 @@ obs = robo.observe()
 robo.show(obs)
 ```
 
-### Cell 3：逐侧闭合后立即小抬，再双侧抬升并确认夹布
+### Cell 3：逐侧闭合留图并小抬，双侧抬升后统一返回图片
+
+两张图分别为左右侧闭合后、该侧抬升前的快照，按 `arms` 顺序在本 cell 结束时一起返回。
 
 ```python
 s = robo.state()
 preclose = {a: np.array(s["arms"][a]["tcp"])[:3, 3].copy() for a in arms}
+close_obs = {}
 for a in arms:
     print(a, robo.close_gripper(arm=a))
+    close_obs[a] = robo.observe()
     reached(robo.move_L(robo.top_down_pose(preclose[a] + [0, 0, 0.010],
                                          yaw=0.0, arm=a), arm=a))
 move_pair({a: preclose[a] + [0, 0, 0.048] for a in arms})
-obs = robo.observe()
-robo.show(obs)
+for a in arms:
+    robo.show(close_obs[a])
 ```
 
 ### Cell 4：保持朝向搬放，目标 X≤-0.47 m，撤离后观察
