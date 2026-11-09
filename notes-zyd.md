@@ -43,3 +43,5 @@ CLI 默认配置也已改为 Pico；原 Quest 链路可继续显式使用 `--con
 联合数据保存在 `data/lerobot/nero_l20_act/`：官方 LeRobot v3.0 状态/动作 Parquet 和 RGB 视频，以及逐 episode 的 `depth/*.h5`、`diagnostics/*.{npz,json}`。状态/动作是 NERO 7＋L20 16＝23 维；深度无损保留但不送入本次 ACT。
 
 遥操作仍用原环境，按 S 时自动调用 `recording.lerobot.python` 指定的 act 环境保存。请先修改配置中的 `recording.lerobot.task` 为实际任务描述。旧 `data/episodes` 不处理。格式和 ACT 离线检查见 [数据格式](docs/dataset_schema.md)。
+
+

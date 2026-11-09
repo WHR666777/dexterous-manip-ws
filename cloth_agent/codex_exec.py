@@ -59,7 +59,7 @@ Python 环境预置 robo、np、math、time。变量、函数与允许的 import
 
 EXPERIENCE_FILES = (
     Path(__file__).parent / "grasp_examples" / "experience.md",
-    Path(__file__).with_name("fold33_experience.md"),
+    Path(__file__).parent / "experience" / "experience_easy.md",
 )
 TASK_FILE = Path(__file__).parent / "task" / "task.md"
 

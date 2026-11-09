@@ -13,7 +13,7 @@ model_reasoning_effort: high
 session:
   # 每轮测试前仅修改此处；所有 CLI 默认共用它。相对配置文件目录 configs/。
   # run/serve 不覆盖旧记录；运行期间保持此值不变，下一轮再换新目录。
-  output_dir: ../data/agent_runs/bi_fold-03
+  output_dir: ../data/agent_runs/bi_fold-08
 control_hz: 20
 # 手指空载到位检查 Gripper arrival check；原始值容差，不是角度。
 # 每次最多等 2 s，失败后重发同一目标；2 次 retry + 首次 = 最多 3 次发送。
