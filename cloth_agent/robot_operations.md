@@ -40,6 +40,7 @@ SDK 返回，不保证五指已到位；正常任务的 `open_gripper()` 仍只�
 | `robo.move_J(target_tcp, wait=True, arm="right")` | 7 元关节数组（rad）直接执行 PTP；6 元 xyz-rpy / 4×4 TCP 位姿先求一次 IK，再执行 PTP |
 | `robo.move_L(target_tcp, wait=True, arm="right")` | 指定侧 task 系 TCP 目标转 base 法兰目标；原厂 `move_l` 执行 |
 | `robo.move_both(left=pose_l, right=pose_r, mode="L", wait=True)` | 两侧分别规划、起点复核后同轮软件调度启动；返回 `{"left": result_l, "right": result_r}`，不保证硬件同步或同时到位 |
+| `robo.prepare_act_hands()` | 双臂停止并确认保持后，阻塞设置左右 ACT 五指起始手型，等待新查询反馈最大误差 ≤10 raw，返回按侧索引的反馈 dict |
 | `robo.run_act(policy="fold", steps=500)` | 阻塞执行配置模型的固定步数，独占双臂和双手；结束后确认 J 位置保持，返回执行结果 dict |
 | `robo.open_gripper(arm="right")` / `robo.close_gripper(arm="right")` | 指定侧拇指/食指到共用预设；阻塞检查并有限重发；其余三指不发位置命令 |
 | `robo.gripper_replay_start(arm="right")` | 指定侧到示范第 0 帧手型并等待反馈，不启动回放 |
@@ -65,7 +66,18 @@ agent 不自行启动服务或修改 checkpoint。第一版默认 `fold`、100 �
 实际用时包含推理延迟与末尾保持确认。首次调用加载模型，成功后在本会话内保持加载；
 切换模型会重载，每次调用都先 reset 策略动作队列。
 
+ACT 前先完成布料摆放、两臂各自回到冻结配置的 `start_joint_positions` 并确认保持，
+然后调用 `prepare_act_hands()`。接口无 `arm` 参数，同时设置左右两手；使用训练
+episode 36 / frame 0 的固定五指手型，按 `act.hand_max_raw_step` 渐进设置 16 个
+有效槽位，4 个保留位沿用反馈。目标发送完成后最多等待 5 s，要求新查询反馈最大
+误差 ≤10 raw；返回 `left/right` 的目标、实际值、最大误差和查询新鲜度，
+`delivery_confirmed` 仍为 false。该调用不回位、不加载模型，`run_act` 不自动设置手型。
+手型与目标不同应先调用此接口准备，不视为能力缺失；超时或反馈异常按普通操作失败处理，
+下一 cell 读取状态并评估恢复，不能在准备失败后继续 ACT。
+
 ```python
+hands = robo.prepare_act_hands()
+print(hands)
 result = robo.run_act(policy="fold", steps=500)
 print(result)
 obs = robo.observe()

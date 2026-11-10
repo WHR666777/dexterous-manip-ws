@@ -34,6 +34,11 @@ robo.state() 的 arms 包含双侧状态。move_both(left=..., right=..., mode="
 规划中的 yaw 是相对该初始抓取姿态、绕 task +Z 的增量，单位 rad；yaw=0 保持其朝向，
 不是把法兰绝对 RPY yaw 设成 0，也不随每个 cell 的当前姿态重新锚定。
 
+ACT 准备：任务进入 ACT 阶段时，用公开 move_J 的七轴 rad 数组形式，将左右臂
+分别回到冻结配置的 start_joint_positions；这是任务回位，不重放启动 cell 000。
+确认双侧 quiescent 后，调用 robo.prepare_act_hands() 主动设置并确认左右五指起始
+手型，正常返回后再调用 robo.run_act(policy="fold")。prepare_act_hands 无 arm 参数，
+不移动机械臂、不运行模型；run_act 不自动设置手型。
 临时调用接口 Temporary tools：通过 cloth_agent MCP 服务的 python(code) 执行 cell，
 通过 finish(status, summary) 结束任务；status 为 success / failure / stuck。
 Python 环境预置 robo、np、math、time。变量、函数与允许的 import 跨 cell 保留。

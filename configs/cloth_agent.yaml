@@ -13,7 +13,7 @@ model_reasoning_effort: high
 session:
   # 每轮测试前仅修改此处；所有 CLI 默认共用它。相对配置文件目录 configs/。
   # run/serve 不覆盖旧记录；运行期间保持此值不变，下一轮再换新目录。
-  output_dir: ../data/agent_runs/bi_fold-013
+  output_dir: ../data/agent_runs/bi_fold-017
 control_hz: 20
 # 模型进程首次 run_act 时加载，本次会话内复用；每次调用前 reset 动作队列。
 # 此处只提供模型推理，设备继续由 cloth 控制进程持有。
