@@ -18,7 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = ["toppra>=0.6,<0.7"]
+agent = ["mcp>=1.8,<2", "uvicorn>=0.30,<1"]
+planning = ["toppra>=0.6,<0.7"]
 vision = [
   "pyrealsense2>=2.50,<2.55",
   "opencv-python>=4.8,<5",
@@ -27,6 +28,9 @@ vision = [
 
 [tool.setuptools.packages.find]
 include = ["robot_control*", "teleop*", "cloth_agent*"]
+
+[tool.setuptools.package-data]
+cloth_agent = ["robot_operations.md", "grasp_experience.md", "experience/*.md", "grasp_examples/*.md", "grasp_examples/*.png", "task/task.md", "task/task_sequence.png", "monitor_assets/*.html", "monitor_assets/*.css", "monitor_assets/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

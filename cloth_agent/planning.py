@@ -1,4 +1,4 @@
-"""Local waypoint planning and TOPPRA retiming; no robot connection."""
+"""运动目标校验、PTP IK 与独立路径规划工具；不连接机器人。"""
 
 from __future__ import annotations
 
@@ -9,11 +9,18 @@ import numpy as np
 from scipy.interpolate import CubicHermiteSpline
 
 from robot_control.nero_ik import NeroIK
+from robot_control.nero import NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD
+from robot_control.errors import CommandRejected
 from .config import effective_arm, joint_vector
 from .geometry import interpolate_poses, tcp_to_flange, transform
 
 
-class PlanningError(ValueError):
+# 与 teleop 的启动回记录位姿一致：PTP 允许较大的整体变化量，不能套用
+# 连续 IK/分段运动的单步限制；官方关节限位仍会独立检查。
+PTP_MAX_JOINT_DELTA_RAD = float(2 * np.pi)
+
+
+class PlanningError(CommandRejected):
     def __init__(self, reason, *, index=None, diagnostics=None):
         super().__init__(reason)
         self.index = index
@@ -25,12 +32,39 @@ class PlanningError(ValueError):
 
 
 @dataclass
+class LinearMotionPlan:
+    """厂家 L 的单个 TCP 目标；没有主机关节轨迹，也没有 TOPPRA 时间表。"""
+
+    arm: str
+    start_joints: np.ndarray
+    target_tcp: np.ndarray
+    mode: str = field(default="native_linear", init=False)
+
+    def __post_init__(self):
+        self.start_joints = joint_vector(self.start_joints, "linear start joints").copy()
+        self.target_tcp = transform(self.target_tcp)
+
+    def as_dict(self):
+        return {"arm": self.arm, "mode": self.mode,
+                "start_joints": self.start_joints.tolist(), "target_tcp": self.target_tcp.tolist()}
+
+    @classmethod
+    def from_dict(cls, value):
+        if value["mode"] != "native_linear":
+            raise ValueError("厂家 L 目标类型无效 Invalid native L mode")
+        return cls(value["arm"], value["start_joints"], value["target_tcp"])
+
+
+@dataclass
 class MotionPlan:
     arm: str
     times: np.ndarray
     positions: np.ndarray
     velocities: np.ndarray
     mode: str
+    # 保留 IK/关节插值产生的几何分段点。普通 J 执行器逐点发送、等待到位，
+    # 不能把 TOPPRA 的 10 ms 密集采样误当作固件的连续位置伺服接口。
+    joint_waypoints: np.ndarray | None = None
     _spline: CubicHermiteSpline = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -45,6 +79,14 @@ class MotionPlan:
                            (self.times, self.positions, self.velocities))):
             raise ValueError("Invalid timed joint trajectory.")
         self._spline = CubicHermiteSpline(self.times, self.positions, self.velocities)
+        if self.joint_waypoints is not None:
+            self.joint_waypoints = np.asarray(self.joint_waypoints, dtype=float).copy()
+            if (self.joint_waypoints.ndim != 2 or self.joint_waypoints.shape[1] != 7
+                    or len(self.joint_waypoints) < 2
+                    or not np.isfinite(self.joint_waypoints).all()
+                    or not np.allclose(self.joint_waypoints[0], self.positions[0], atol=1e-8, rtol=0)
+                    or not np.allclose(self.joint_waypoints[-1], self.positions[-1], atol=1e-8, rtol=0)):
+                raise ValueError("Invalid geometric joint waypoints.")
 
     @property
     def duration(self):
@@ -56,7 +98,8 @@ class MotionPlan:
     def as_dict(self):
         return {"arm": self.arm, "times": self.times.tolist(),
                 "positions": self.positions.tolist(), "velocities": self.velocities.tolist(),
-                "mode": self.mode}
+                "mode": self.mode, "joint_waypoints": (None if self.joint_waypoints is None
+                                                        else self.joint_waypoints.tolist())}
 
     def peak_rates(self):
         """Exact velocity/acceleration extrema of the stored cubic pieces."""
@@ -83,6 +126,72 @@ class Planner:
         self.ik = {name: NeroIK(max_joint_delta_rad=self.motion["max_ik_step_rad"])
                    for name in self.arms}
         self._lock = Lock()  # Pinocchio model data are mutable.
+
+    def plan_linear(self, seed, target_tcp, *, arm="right"):
+        """仅校验实测起点与目标工作区；L 路径规划和 IK 交给 Nero 固件。"""
+        with self._lock:
+            if arm not in self.arms:
+                raise PlanningError(f"Unknown arm: {arm}")
+            plan = LinearMotionPlan(arm, seed, target_tcp)
+            self._check_path(arm, np.asarray([plan.start_joints]), feedback_path=True)
+            bounds = self.arms[arm]["workspace"]
+            if bounds is not None:
+                bounds = np.asarray(bounds, dtype=float)
+                xyz = plan.target_tcp[:3, 3]
+                if np.any(xyz < bounds[0]) or np.any(xyz > bounds[1]):
+                    raise PlanningError("目标 TCP 超出工作区 Target TCP leaves the configured workspace")
+            # 不再逐点求 IK，避免主机的 IK_FK_ERROR 提前拒绝固件可以执行的
+            # L 目标。这里只检查起点/终点，不声称预测了固件路径或完成场景避碰。
+            return plan
+
+    def plan_startup_ptp(self, seed, *, target_joints=None, target_tcp=None, arm="right"):
+        """固定启动流程的 PTP 入口；普通 move_J 使用 plan_ptp。"""
+        return self.plan_ptp(seed, target_joints=target_joints, target_tcp=target_tcp,
+                             mode="startup_ptp", arm=arm)
+
+    def plan_ptp(self, seed, *, target_joints=None, target_tcp=None, mode="ptp", arm="right"):
+        """只生成起点/终点；TCP 目标求一次 IK，固件负责 PTP 平滑，不做 TOPPRA。"""
+        if mode not in {"ptp", "startup_ptp"}:
+            raise PlanningError("PTP 运动类型无效 Invalid PTP mode")
+        if arm not in self.arms:
+            raise PlanningError(f"Unknown arm: {arm}")
+        with self._lock:
+            seed = joint_vector(seed, "PTP seed")
+            if (target_joints is None) == (target_tcp is None):
+                raise PlanningError("PTP 必须提供一个目标 Provide one PTP target")
+            if target_tcp is not None:
+                settings = self.arms[arm]
+                flange = tcp_to_flange(target_tcp, settings["task_from_base"],
+                                       settings["flange_from_tcp"])
+                # 一次求解最终姿态，以当前实测关节为参考选择相近的解；
+                # 不再沿 TCP 直线逐点求 IK。使用 PTP 上限，避免把整体调整
+                # 误判为连续 IK 的单周期跳变；IK 的限位与 FK 精度检查不变。
+                # 镜像初始姿态可能包含大幅腕部转动；PTP 的一次目标 IK
+                # 允许更多迭代，遥操作的默认预算、FK 精度和限位保持不变。
+                solver = NeroIK(max_joint_delta_rad=PTP_MAX_JOINT_DELTA_RAD, max_nfev=240)
+                target = solver.solve(flange, seed)
+                if target is None:
+                    raise PlanningError("目标位姿 IK 失败 PTP IK failed",
+                                        diagnostics=solver.last_diagnostics.copy())
+            else:
+                target = joint_vector(target_joints, "PTP target")
+            if np.max(np.abs(target - seed)) > PTP_MAX_JOINT_DELTA_RAD:
+                raise PlanningError("PTP 关节变化过大 PTP joint delta exceeded")
+            # 插值点只检查关节限位与 TCP 工作区，绝不下发给机器人。
+            # 这不是固件实际路径预测，也没有场景避碰保证。
+            checked = [seed.copy()]
+            self._append_joint_segment(checked, target)
+            # 真正下发的终点严格限位；实测起点和仅用于检查的插值点允许
+            # 1 mrad 反馈边界差异，避免 fold-30 保持后仍无法向限位内回撤。
+            # 不截断/改写 seed，工作区 FK 仍检查原始位置。
+            self._check_path(arm, np.asarray([target]))
+            self._check_path(arm, np.asarray(checked), feedback_path=True)
+            endpoints = np.asarray([seed, target])
+            # 复用现有 MotionPlan/到位监督协议。时间字段仅满足存储格式，
+            # 不代表 PTP 用时或速度；执行器只发送 endpoints[1] 一次。
+            return MotionPlan(arm, [0, 1 / self.config["control_hz"]],
+                              endpoints, np.zeros((2, 7)), mode,
+                              joint_waypoints=endpoints)
 
     def plan(self, arm, seed, *, waypoints=None, mode="cartesian", target_joints=None):
         if arm not in self.arms:
@@ -135,29 +244,45 @@ class Planner:
                                    / self.motion["joint_step_rad"])))
         points.extend(np.linspace(points[-1], target, count + 1)[1:])
 
-    def _check_path(self, arm, points):
+    def _check_path(self, arm, points, *, feedback_path=False):
         solver, settings = self.ik[arm], self.arms[arm]
+        points = np.asarray(points, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 7:
+            raise PlanningError("Path must contain seven-joint vectors.")
+        # 批量做数值/限位判断；固定标定矩阵与工作区只校验一次。原先逐点
+        # 重复 transform() 会为每个点反复做 allclose/det，长启动路径约需
+        # 半秒，挤占同一设备进程中的 CAN 接收线程，触发真实反馈过期保护。
+        # 仅真实反馈/未下发的 PTP 检查点使用反馈容差；调用方必须另外
+        # 严格检查实际下发的终点。普通关节分段和 agent 目标默认不放宽。
+        tolerance = NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD if feedback_path else 0.
+        valid = (np.isfinite(points).all(axis=1)
+                 & (points >= solver.limits[:, 0] - tolerance).all(axis=1)
+                 & (points <= solver.limits[:, 1] + tolerance).all(axis=1))
+        if not valid.all():
+            raise PlanningError("Path violates joint limits.", index=int(np.flatnonzero(~valid)[0]))
+        if settings["workspace"] is None:
+            return
+        bounds = np.asarray(settings["workspace"], dtype=float)
+        if bounds.shape != (2, 3) or not np.isfinite(bounds).all() or np.any(bounds[0] >= bounds[1]):
+            raise PlanningError("workspace must be [minimum_xyz, maximum_xyz].")
+        task_base = transform(settings["task_from_base"])
+        flange_tcp = transform(settings["flange_from_tcp"])
         for index, q in enumerate(points):
-            if not solver.in_limits(q):
-                raise PlanningError("Path violates joint limits.", index=index)
-            if settings["workspace"] is not None:
-                tcp = (transform(settings["task_from_base"]) @ solver.forward(q)
-                       @ transform(settings["flange_from_tcp"]))[:3, 3]
-                bounds = np.asarray(settings["workspace"], dtype=float)
-                if bounds.shape != (2, 3) or not np.isfinite(bounds).all() or np.any(bounds[0] >= bounds[1]):
-                    raise PlanningError("workspace must be [minimum_xyz, maximum_xyz].")
-                if np.any(tcp < bounds[0]) or np.any(tcp > bounds[1]):
-                    raise PlanningError("TCP leaves the configured task workspace.", index=index)
+            tcp = (task_base @ solver.forward(q) @ flange_tcp)[:3, 3]
+            if np.any(tcp < bounds[0]) or np.any(tcp > bounds[1]):
+                raise PlanningError("TCP leaves the configured task workspace.", index=index)
 
     def _retime(self, arm, points, mode):
         import toppra as ta
         from toppra import algorithm, constraint
 
+        # 只删除真正相同的点；不能按到位容差删除细小笛卡尔位移。
         keep = np.r_[True, np.max(np.abs(np.diff(points, axis=0)), axis=1) > 1e-10]
         points = points[keep]
         if len(points) == 1:
             return MotionPlan(arm, [0, 1 / self.config["control_hz"]],
-                              np.repeat(points, 2, axis=0), np.zeros((2, 7)), mode)
+                              np.repeat(points, 2, axis=0), np.zeros((2, 7)), mode,
+                              joint_waypoints=np.repeat(points, 2, axis=0))
         settings = self.arms[arm]
         velocity = joint_vector(settings["velocity_limits"], "velocity_limits")
         acceleration = joint_vector(settings["acceleration_limits"], "acceleration_limits")
@@ -178,7 +303,7 @@ class Planner:
         duration = float(trajectory.duration) * scale
         times = np.linspace(0, duration, max(3, int(np.ceil(duration / .01)) + 1))
         plan = MotionPlan(arm, times, trajectory(times / scale),
-                          trajectory(times / scale, 1) / scale, mode)
+                          trajectory(times / scale, 1) / scale, mode, joint_waypoints=points)
         # Retiming interpolation can introduce small extrema. Slow the final
         # stored cubic by its exact extrema, rather than claiming TOPPRA's
         # constraints also bound a different interpolation automatically.
@@ -187,5 +312,5 @@ class Planner:
                          float(np.sqrt(np.max(peak_a / acceleration)))) * 1.001
         if correction > 1:
             plan = MotionPlan(arm, times * correction, plan.positions,
-                              plan.velocities / correction, mode)
+                              plan.velocities / correction, mode, joint_waypoints=plan.joint_waypoints)
         return plan

@@ -5,7 +5,7 @@
 - `AnyDexRetarget/example/input/quest3.py`：唯一 Quest TCP listener、CSV parser 和 Unity 左手系到右手系转换；保留已验证的 AnyDex 输入路径，并额外公开线程安全的完整手帧快照。
 - `teleop.coordinate_frames`：不重复转换 Quest 坐标，只把现场 `R_base_quest` 应用于 AnyDex 已转换的右手系腕姿。
 - `teleop.wrist_tracker`：从参考 `vr_teleop` 迁移的相对锚定。第一次帧锁定 Quest 原点，平移残差使用 `alpha*current + (1-alpha)*previous`，旋转使用当前相对初始腕姿。
-- `robot_control.nero_ik`：基于固定 Nero URDF 的七轴局部 IK。Pinocchio 计算 FK 和解析 Jacobian，SciPy `least_squares` 保留原有目标函数、关节限位、连续性检查、误差验收与超时回退。模型只加载一次，不加载 mesh 或连接硬件；[离线轨迹对比](ik_benchmark.md)记录验证方法与结果。
+- `robot_control.nero_ik`：基于固定 Nero URDF 的七轴局部 IK。Pinocchio 计算 FK 和解析 Jacobian，SciPy `least_squares` 使用原有目标函数、连续性检查、误差验收与超时回退；命令边界默认在 URDF 内各留 2°，容许最多 1° 的反馈越界作为向内恢复的起点。模型只加载一次，不加载 mesh 或连接硬件；[离线轨迹对比](ik_benchmark.md)记录既有验证方法与结果。
 - `teleop.hand_retarget`：只包装根目录 `AnyDexRetarget`；输出 qpos 后调用其公开 `l20_qpos_to_can_slots` 和 `slew_l20_command`。
 - `teleop.controller`：拥有唯一控制循环；`both` 按 Nero 后 L20 顺序发送，记录各自发送时间，因此不宣称跨设备原子同步。
 - `teleop.realsense_camera`：后台读取 L515 的 RGB8/Z16，将深度对齐到彩色像素网格，发布带时间戳的完整帧快照；不参与机械臂/手控制。
@@ -16,7 +16,10 @@
 ```text
 start → validate recorded joints → move_joints to recorded pose → wait in tolerance → paused
 paused --R + fresh frame--> streaming
-streaming --Quest timeout / target step violation / IK failure--> paused
+streaming --IK_FAILED / IK_FK_ERROR / IK_JUMP--> IK hold (skip sends and recording)
+IK hold --fresh reachable target + original gates pass--> streaming
+IK hold --R + fresh frame--> streaming (new anchor at current pose)
+streaming / IK hold --input timeout / target gate violation / invalid IK feedback--> paused
 streaming --B--> streaming + recording
 recording --S/Q/exception--> save episode
 any --Q/Ctrl+C/exception--> stop sends → disconnect (no auto disable/e-stop)
@@ -31,7 +34,9 @@ L515 以硬件支持的 30 FPS 采集；控制周期仍由现有 `control_hz` �
 独立保存进程使用现有 act 环境；不把硬件依赖装入 act，也不把 Torch 装入遥操作环境。每次成功保存都 finalize 并用官方加载器重新打开、解码验证。深度、完整 20 槽诊断和原始时钟在附件中保留，训练只读取 RGB＋23 维状态/动作。缺帧、写入错误或既有数据集接口不兼容时拒绝导出，保留暂存文件。详见 [数据格式](dataset_schema.md)。
 
 
-锁定是有意的：数据恢复后不会自动沿旧锚点继续运动，必须由操作者观察现场并按 `R`。
+输入丢失、目标门越界和无效 IK 输入仍锁定暂停，必须由操作者处理原因后按 `R`。普通 IK 求解失败不锁定，按控制周期尝试新的目标；目标重新可达且原有限位、步长、工作区和输入时效检查通过后恢复。保持期间不发送失败解、不沿用旧解发送，也不追加样本。小幅反馈越限容许向内求解，超过恢复容差才返回 `IK_JOINT_LIMIT` 并列出具体关节。终端直接读取单字节按键，避免文本预读让已输入的 R 滞留。
+
+`arm.ik_joint_limit_margin_deg` 默认 2°，限制优化器边界与所有返回目标；`arm.ik_feedback_limit_tolerance_deg` 默认 1°，仅用于接纳小幅超出 URDF 的输入反馈。优化初值可投影到命令区间，正则项和所有直接关节步长仍相对于未经修改的真实反馈；静止快捷返回和超时回退同样验收命令边界、FK 精度和真实步长。这样既避免主动下发贴着硬边界的目标，也消除小幅反馈越界后连向内目标都无法求解的状态。没有扩大输出硬限位、裁剪求解结果、重置硬件或清除控制器故障。
 
 启动点到点运动显式覆盖遥操作的 10° 单周期关节增量限制，但仍受官方关节限位、低速百分比、到位容差和超时约束。进入 `move_js` 后立即恢复原单周期限制。运行中的 `R` 使用当前七轴反馈的 URDF/FK flange 重置 Quest 相对锚点，不执行返回起始姿态的运动；SDK flange 只作为 preflight 的独立一致性观测，避免两套近似模型混入同一次 IK。
 
@@ -47,6 +52,6 @@ L515 以硬件支持的 30 FPS 采集；控制周期仍由现有 `control_hz` �
 
 每轮携带唯一编号：同一份锁内双手快照 → 并行 PREPARE → 双方成功且输入未过期 → 并行 COMMIT → 收齐同轮 RESULT → 追加一条联合记录。最多一轮在途；取消或迟到的回复不进入下一轮。双方 CAN 调用仍不具备硬件原子性。
 
-任一侧追踪、IK 或目标门失败都会设置共享暂停事件，R 仅在两侧输入有效且均完成重新锚定后清除。计算/发送等待上限使用 `pico4.max_age_s`；通信超时、进程退出或 SDK 异常使整套控制退出。退出先协作停止两个 worker，5 s 内未退出的进程再终止，随后保存已完成样本并停止相机和输入；不自动失能。
+任一侧追踪、无效 IK 输入或目标门失败都会设置共享暂停事件，R 仅在两侧输入有效且均完成重新锚定后清除。普通 IK 求解失败返回 IK hold，协调器收齐双方准备结果；若另一侧硬暂停或异常，优先处理故障，否则取消双方本轮并继续尝试新鲜输入，不发送 COMMIT。取消的目标不推进目标门基准，已准备的手部 slew 基准恢复为本轮发送前反馈；成功下发后才更新机械臂目标基准。计算/发送等待上限使用 `pico4.max_age_s`；通信超时、进程退出或 SDK 异常使整套控制退出。退出先协作停止两个 worker，5 s 内未退出的进程再终止，随后保存已完成样本并停止相机和输入；不自动失能。
 
 双侧名义调度为 20 Hz，实际周期取决于各阶段较慢侧加通信和记录开销。当前实现不改变单臂 IK、手部 retarget 或 CAN 协议，也不承诺稳定 20 Hz。

@@ -1,0 +1,376 @@
+反馈就绪
+  [motion_status 0→1] t=0.517s phase=PTP→nero_start_pose mode_fb=1 (开始运动)
+  [motion_status 1→0] t=0.927s phase=PTP→nero_start_pose mode_fb=1 (运动完成)
+PTP PTP→nero_start_pose: joint_error=0.0020rad
+  move_l 已发送 上升4cm→测试原点 (attempt 1)
+  [motion_status 0→1] t=0.986s phase=上升4cm→测试原点:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=3.466s phase=上升4cm→测试原点 mode_fb=2 (运动完成)
+测试原点就位: pos_err=0.17mm ang_err=0.05deg
+  move_l 已发送 T1→+0.1m (attempt 1)
+  [motion_status 0→1] t=3.784s phase=T1→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=7.045s phase=T1→+0.1m mode_fb=2 (运动完成)
+Trial 1 +z: pos=0.54mm ang=0.06deg PASS
+  move_l 已发送 T1→-0.1m (attempt 1)
+  [motion_status 0→1] t=7.311s phase=T1→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=11.512s phase=T1→-0.1m mode_fb=2 (运动完成)
+Trial 1 -z: pos=0.41mm ang=0.05deg PASS
+  move_l 已发送 T1→origin (attempt 1)
+  [motion_status 0→1] t=11.828s phase=T1→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=15.092s phase=T1→origin mode_fb=2 (运动完成)
+Trial 1 回原点: pos=0.26mm ang=0.05deg
+  move_l 已发送 T2→+0.1m (attempt 1)
+  [motion_status 0→1] t=15.359s phase=T2→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=18.668s phase=T2→+0.1m mode_fb=2 (运动完成)
+Trial 2 +z: pos=0.15mm ang=0.03deg PASS
+  move_l 已发送 T2→-0.1m (attempt 1)
+  [motion_status 0→1] t=18.934s phase=T2→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=23.068s phase=T2→-0.1m mode_fb=2 (运动完成)
+Trial 2 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T2→origin (attempt 1)
+  [motion_status 0→1] t=23.327s phase=T2→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=26.623s phase=T2→origin mode_fb=2 (运动完成)
+Trial 2 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T3→+0.1m (attempt 1)
+  [motion_status 0→1] t=26.937s phase=T3→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=30.241s phase=T3→+0.1m mode_fb=2 (运动完成)
+Trial 3 +z: pos=0.36mm ang=0.05deg PASS
+  move_l 已发送 T3→-0.1m (attempt 1)
+  [motion_status 0→1] t=30.506s phase=T3→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=34.695s phase=T3→-0.1m mode_fb=2 (运动完成)
+Trial 3 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T3→origin (attempt 1)
+  [motion_status 0→1] t=34.963s phase=T3→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=38.277s phase=T3→origin mode_fb=2 (运动完成)
+Trial 3 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T4→+0.1m (attempt 1)
+  [motion_status 0→1] t=38.596s phase=T4→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=41.853s phase=T4→+0.1m mode_fb=2 (运动完成)
+Trial 4 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T4→-0.1m (attempt 1)
+  [motion_status 0→1] t=42.173s phase=T4→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=46.328s phase=T4→-0.1m mode_fb=2 (运动完成)
+Trial 4 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T4→origin (attempt 1)
+  [motion_status 0→1] t=46.599s phase=T4→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=49.910s phase=T4→origin mode_fb=2 (运动完成)
+Trial 4 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T5→+0.1m (attempt 1)
+  [motion_status 0→1] t=50.232s phase=T5→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=53.500s phase=T5→+0.1m mode_fb=2 (运动完成)
+Trial 5 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T5→-0.1m (attempt 1)
+  [motion_status 0→1] t=53.755s phase=T5→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=57.925s phase=T5→-0.1m mode_fb=2 (运动完成)
+Trial 5 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T5→origin (attempt 1)
+  [motion_status 0→1] t=58.193s phase=T5→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=61.468s phase=T5→origin mode_fb=2 (运动完成)
+Trial 5 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T6→+0.1m (attempt 1)
+  [motion_status 0→1] t=61.722s phase=T6→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=65.020s phase=T6→+0.1m mode_fb=2 (运动完成)
+Trial 6 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T6→-0.1m (attempt 1)
+  [motion_status 0→1] t=65.275s phase=T6→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=69.470s phase=T6→-0.1m mode_fb=2 (运动完成)
+Trial 6 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T6→origin (attempt 1)
+  [motion_status 0→1] t=69.782s phase=T6→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=73.092s phase=T6→origin mode_fb=2 (运动完成)
+Trial 6 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T7→+0.1m (attempt 1)
+  [motion_status 0→1] t=73.357s phase=T7→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=76.684s phase=T7→+0.1m mode_fb=2 (运动完成)
+Trial 7 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T7→-0.1m (attempt 1)
+  [motion_status 0→1] t=76.947s phase=T7→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=81.118s phase=T7→-0.1m mode_fb=2 (运动完成)
+Trial 7 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T7→origin (attempt 1)
+  [motion_status 0→1] t=81.435s phase=T7→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=84.728s phase=T7→origin mode_fb=2 (运动完成)
+Trial 7 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T8→+0.1m (attempt 1)
+  [motion_status 0→1] t=84.984s phase=T8→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=88.290s phase=T8→+0.1m mode_fb=2 (运动完成)
+Trial 8 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T8→-0.1m (attempt 1)
+  [motion_status 0→1] t=88.545s phase=T8→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=92.731s phase=T8→-0.1m mode_fb=2 (运动完成)
+Trial 8 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T8→origin (attempt 1)
+  [motion_status 0→1] t=92.999s phase=T8→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=96.306s phase=T8→origin mode_fb=2 (运动完成)
+Trial 8 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T9→+0.1m (attempt 1)
+  [motion_status 0→1] t=96.574s phase=T9→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=99.884s phase=T9→+0.1m mode_fb=2 (运动完成)
+Trial 9 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T9→-0.1m (attempt 1)
+  [motion_status 0→1] t=100.141s phase=T9→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=104.313s phase=T9→-0.1m mode_fb=2 (运动完成)
+Trial 9 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T9→origin (attempt 1)
+  [motion_status 0→1] t=104.571s phase=T9→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=107.862s phase=T9→origin mode_fb=2 (运动完成)
+Trial 9 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T10→+0.1m (attempt 1)
+  [motion_status 0→1] t=108.116s phase=T10→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=111.394s phase=T10→+0.1m mode_fb=2 (运动完成)
+Trial 10 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T10→-0.1m (attempt 1)
+  [motion_status 0→1] t=111.656s phase=T10→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=115.846s phase=T10→-0.1m mode_fb=2 (运动完成)
+Trial 10 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T10→origin (attempt 1)
+  [motion_status 0→1] t=116.162s phase=T10→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=119.427s phase=T10→origin mode_fb=2 (运动完成)
+Trial 10 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T11→+0.1m (attempt 1)
+  [motion_status 0→1] t=119.694s phase=T11→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=123.007s phase=T11→+0.1m mode_fb=2 (运动完成)
+Trial 11 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T11→-0.1m (attempt 1)
+  [motion_status 0→1] t=123.272s phase=T11→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=127.448s phase=T11→-0.1m mode_fb=2 (运动完成)
+Trial 11 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T11→origin (attempt 1)
+  [motion_status 0→1] t=127.756s phase=T11→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=131.005s phase=T11→origin mode_fb=2 (运动完成)
+Trial 11 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T12→+0.1m (attempt 1)
+  [motion_status 0→1] t=131.266s phase=T12→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=134.590s phase=T12→+0.1m mode_fb=2 (运动完成)
+Trial 12 +z: pos=0.36mm ang=0.05deg PASS
+  move_l 已发送 T12→-0.1m (attempt 1)
+  [motion_status 0→1] t=134.851s phase=T12→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=139.017s phase=T12→-0.1m mode_fb=2 (运动完成)
+Trial 12 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T12→origin (attempt 1)
+  [motion_status 0→1] t=139.322s phase=T12→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=142.618s phase=T12→origin mode_fb=2 (运动完成)
+Trial 12 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T13→+0.1m (attempt 1)
+  [motion_status 0→1] t=142.925s phase=T13→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=146.230s phase=T13→+0.1m mode_fb=2 (运动完成)
+Trial 13 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T13→-0.1m (attempt 1)
+  [motion_status 0→1] t=146.489s phase=T13→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=150.663s phase=T13→-0.1m mode_fb=2 (运动完成)
+Trial 13 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T13→origin (attempt 1)
+  [motion_status 0→1] t=150.970s phase=T13→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=154.277s phase=T13→origin mode_fb=2 (运动完成)
+Trial 13 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T14→+0.1m (attempt 1)
+  [motion_status 0→1] t=154.532s phase=T14→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=157.837s phase=T14→+0.1m mode_fb=2 (运动完成)
+Trial 14 +z: pos=0.36mm ang=0.05deg PASS
+  move_l 已发送 T14→-0.1m (attempt 1)
+  ⚠ move_l 发送后 1.0s 无 motion_status 0→1 (attempt 1/3)，重试发送 T14→-0.1m
+  move_l 已发送 T14→-0.1m (attempt 2)
+  [motion_status 0→1] t=159.106s phase=T14→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=163.229s phase=T14→-0.1m mode_fb=2 (运动完成)
+Trial 14 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T14→origin (attempt 1)
+  [motion_status 0→1] t=163.486s phase=T14→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=166.783s phase=T14→origin mode_fb=2 (运动完成)
+Trial 14 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T15→+0.1m (attempt 1)
+  [motion_status 0→1] t=167.100s phase=T15→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=170.408s phase=T15→+0.1m mode_fb=2 (运动完成)
+Trial 15 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T15→-0.1m (attempt 1)
+  [motion_status 0→1] t=170.714s phase=T15→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=174.836s phase=T15→-0.1m mode_fb=2 (运动完成)
+Trial 15 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T15→origin (attempt 1)
+  [motion_status 0→1] t=175.143s phase=T15→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=178.443s phase=T15→origin mode_fb=2 (运动完成)
+Trial 15 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T16→+0.1m (attempt 1)
+  [motion_status 0→1] t=178.750s phase=T16→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=182.055s phase=T16→+0.1m mode_fb=2 (运动完成)
+Trial 16 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T16→-0.1m (attempt 1)
+  [motion_status 0→1] t=182.311s phase=T16→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=186.473s phase=T16→-0.1m mode_fb=2 (运动完成)
+Trial 16 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T16→origin (attempt 1)
+  [motion_status 0→1] t=186.779s phase=T16→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=190.086s phase=T16→origin mode_fb=2 (运动完成)
+Trial 16 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T17→+0.1m (attempt 1)
+  [motion_status 0→1] t=190.393s phase=T17→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=193.697s phase=T17→+0.1m mode_fb=2 (运动完成)
+Trial 17 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T17→-0.1m (attempt 1)
+  [motion_status 0→1] t=193.953s phase=T17→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=198.111s phase=T17→-0.1m mode_fb=2 (运动完成)
+Trial 17 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T17→origin (attempt 1)
+  [motion_status 0→1] t=198.418s phase=T17→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=201.720s phase=T17→origin mode_fb=2 (运动完成)
+Trial 17 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T18→+0.1m (attempt 1)
+  [motion_status 0→1] t=202.026s phase=T18→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=205.324s phase=T18→+0.1m mode_fb=2 (运动完成)
+Trial 18 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T18→-0.1m (attempt 1)
+  [motion_status 0→1] t=205.629s phase=T18→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=209.737s phase=T18→-0.1m mode_fb=2 (运动完成)
+Trial 18 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T18→origin (attempt 1)
+  [motion_status 0→1] t=209.992s phase=T18→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=213.292s phase=T18→origin mode_fb=2 (运动完成)
+Trial 18 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T19→+0.1m (attempt 1)
+  [motion_status 0→1] t=213.603s phase=T19→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=216.900s phase=T19→+0.1m mode_fb=2 (运动完成)
+Trial 19 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T19→-0.1m (attempt 1)
+  [motion_status 0→1] t=217.206s phase=T19→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=221.318s phase=T19→-0.1m mode_fb=2 (运动完成)
+Trial 19 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T19→origin (attempt 1)
+  [motion_status 0→1] t=221.575s phase=T19→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=224.891s phase=T19→origin mode_fb=2 (运动完成)
+Trial 19 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T20→+0.1m (attempt 1)
+  [motion_status 0→1] t=225.149s phase=T20→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=228.453s phase=T20→+0.1m mode_fb=2 (运动完成)
+Trial 20 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T20→-0.1m (attempt 1)
+  [motion_status 0→1] t=228.777s phase=T20→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=232.937s phase=T20→-0.1m mode_fb=2 (运动完成)
+Trial 20 -z: pos=0.33mm ang=0.04deg PASS
+  move_l 已发送 T20→origin (attempt 1)
+  [motion_status 0→1] t=233.192s phase=T20→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=236.489s phase=T20→origin mode_fb=2 (运动完成)
+Trial 20 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T21→+0.1m (attempt 1)
+  [motion_status 0→1] t=236.745s phase=T21→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=240.041s phase=T21→+0.1m mode_fb=2 (运动完成)
+Trial 21 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T21→-0.1m (attempt 1)
+  [motion_status 0→1] t=240.299s phase=T21→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=244.508s phase=T21→-0.1m mode_fb=2 (运动完成)
+Trial 21 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T21→origin (attempt 1)
+  [motion_status 0→1] t=244.813s phase=T21→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=248.114s phase=T21→origin mode_fb=2 (运动完成)
+Trial 21 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T22→+0.1m (attempt 1)
+  [motion_status 0→1] t=248.419s phase=T22→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=251.718s phase=T22→+0.1m mode_fb=2 (运动完成)
+Trial 22 +z: pos=0.36mm ang=0.05deg PASS
+  move_l 已发送 T22→-0.1m (attempt 1)
+  [motion_status 0→1] t=252.031s phase=T22→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=256.140s phase=T22→-0.1m mode_fb=2 (运动完成)
+Trial 22 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T22→origin (attempt 1)
+  [motion_status 0→1] t=256.395s phase=T22→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=259.692s phase=T22→origin mode_fb=2 (运动完成)
+Trial 22 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T23→+0.1m (attempt 1)
+  [motion_status 0→1] t=259.998s phase=T23→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=263.301s phase=T23→+0.1m mode_fb=2 (运动完成)
+Trial 23 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T23→-0.1m (attempt 1)
+  [motion_status 0→1] t=263.607s phase=T23→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=267.715s phase=T23→-0.1m mode_fb=2 (运动完成)
+Trial 23 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T23→origin (attempt 1)
+  [motion_status 0→1] t=267.975s phase=T23→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=271.272s phase=T23→origin mode_fb=2 (运动完成)
+Trial 23 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T24→+0.1m (attempt 1)
+  [motion_status 0→1] t=271.582s phase=T24→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=274.878s phase=T24→+0.1m mode_fb=2 (运动完成)
+Trial 24 +z: pos=0.36mm ang=0.05deg PASS
+  move_l 已发送 T24→-0.1m (attempt 1)
+  [motion_status 0→1] t=275.184s phase=T24→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=279.288s phase=T24→-0.1m mode_fb=2 (运动完成)
+Trial 24 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T24→origin (attempt 1)
+  [motion_status 0→1] t=279.545s phase=T24→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=282.856s phase=T24→origin mode_fb=2 (运动完成)
+Trial 24 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T25→+0.1m (attempt 1)
+  [motion_status 0→1] t=283.163s phase=T25→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=286.454s phase=T25→+0.1m mode_fb=2 (运动完成)
+Trial 25 +z: pos=0.36mm ang=0.05deg PASS
+  move_l 已发送 T25→-0.1m (attempt 1)
+  [motion_status 0→1] t=286.759s phase=T25→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=290.912s phase=T25→-0.1m mode_fb=2 (运动完成)
+Trial 25 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T25→origin (attempt 1)
+  [motion_status 0→1] t=291.217s phase=T25→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=294.509s phase=T25→origin mode_fb=2 (运动完成)
+Trial 25 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T26→+0.1m (attempt 1)
+  [motion_status 0→1] t=294.815s phase=T26→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=298.110s phase=T26→+0.1m mode_fb=2 (运动完成)
+Trial 26 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T26→-0.1m (attempt 1)
+  [motion_status 0→1] t=298.415s phase=T26→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=302.517s phase=T26→-0.1m mode_fb=2 (运动完成)
+Trial 26 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T26→origin (attempt 1)
+  [motion_status 0→1] t=302.772s phase=T26→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=306.067s phase=T26→origin mode_fb=2 (运动完成)
+Trial 26 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T27→+0.1m (attempt 1)
+  [motion_status 0→1] t=306.322s phase=T27→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=309.620s phase=T27→+0.1m mode_fb=2 (运动完成)
+Trial 27 +z: pos=0.36mm ang=0.04deg PASS
+  move_l 已发送 T27→-0.1m (attempt 1)
+  [motion_status 0→1] t=309.926s phase=T27→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=314.034s phase=T27→-0.1m mode_fb=2 (运动完成)
+Trial 27 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T27→origin (attempt 1)
+  [motion_status 0→1] t=314.288s phase=T27→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=317.582s phase=T27→origin mode_fb=2 (运动完成)
+Trial 27 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T28→+0.1m (attempt 1)
+  [motion_status 0→1] t=317.836s phase=T28→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=321.132s phase=T28→+0.1m mode_fb=2 (运动完成)
+Trial 28 +z: pos=0.33mm ang=0.03deg PASS
+  move_l 已发送 T28→-0.1m (attempt 1)
+  [motion_status 0→1] t=321.386s phase=T28→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=325.542s phase=T28→-0.1m mode_fb=2 (运动完成)
+Trial 28 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T28→origin (attempt 1)
+  [motion_status 0→1] t=325.796s phase=T28→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=329.091s phase=T28→origin mode_fb=2 (运动完成)
+Trial 28 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T29→+0.1m (attempt 1)
+  [motion_status 0→1] t=329.345s phase=T29→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=332.636s phase=T29→+0.1m mode_fb=2 (运动完成)
+Trial 29 +z: pos=0.36mm ang=0.05deg PASS
+  move_l 已发送 T29→-0.1m (attempt 1)
+  [motion_status 0→1] t=332.941s phase=T29→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=337.097s phase=T29→-0.1m mode_fb=2 (运动完成)
+Trial 29 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T29→origin (attempt 1)
+  [motion_status 0→1] t=337.351s phase=T29→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=340.693s phase=T29→origin mode_fb=2 (运动完成)
+Trial 29 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T30→+0.1m (attempt 1)
+  [motion_status 0→1] t=340.998s phase=T30→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=344.287s phase=T30→+0.1m mode_fb=2 (运动完成)
+Trial 30 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T30→-0.1m (attempt 1)
+  [motion_status 0→1] t=344.593s phase=T30→-0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=348.695s phase=T30→-0.1m mode_fb=2 (运动完成)
+Trial 30 -z: pos=0.51mm ang=0.07deg PASS
+  move_l 已发送 T30→origin (attempt 1)
+  [motion_status 0→1] t=348.949s phase=T30→origin:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=352.294s phase=T30→origin mode_fb=2 (运动完成)
+Trial 30 回原点: pos=0.27mm ang=0.05deg
+  move_l 已发送 T31→+0.1m (attempt 1)
+  [motion_status 0→1] t=352.603s phase=T31→+0.1m:confirm_start mode_fb=2 (开始运动)
+  [motion_status 1→0] t=355.893s phase=T31→+0.1m mode_fb=2 (运动完成)
+Trial 31 +z: pos=0.34mm ang=0.05deg PASS
+  move_l 已发送 T31→-0.1m (attempt 1)
+  [motion_status 0→1] t=356.198s phase=T31→-0.1m:confirm_start mode_fb=2 (开始运动)

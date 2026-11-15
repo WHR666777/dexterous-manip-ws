@@ -272,20 +272,15 @@ def test_arm_startup_timeouts_disconnect(monkeypatch, fake_arm, arm_config, stag
 
 
 @pytest.mark.parametrize("execute", [False, True])
-def test_cli_requires_execute_and_matching_confirmation(monkeypatch, episode_path, execute):
+def test_cli_execute_flag_selects_hardware(monkeypatch, episode_path, execute):
     calls = []
     args = ["replay_episode.py", str(episode_path)] + (["--execute"] if execute else [])
     monkeypatch.setattr(replay.sys, "argv", args)
-    monkeypatch.setattr("builtins.input", lambda message: "NO")
     monkeypatch.setattr(replay, "replay", lambda *args, **kwargs: calls.append(kwargs))
-    if execute:
-        with pytest.raises(SystemExit) as error:
-            replay.main()
-        assert error.value.code == 1
-        assert not calls
-    else:
-        replay.main()
-        assert calls == [{"arm_config": None, "hand_config": None}]
+    replay.main()
+    assert len(calls) == 1
+    assert (calls[0]["arm_config"] is not None) == execute
+    assert calls[0]["hand_config"] is None
 
 
 @pytest.fixture
@@ -428,7 +423,6 @@ def test_cli_routes_selected_hardware(monkeypatch, episode_path, control):
     calls = []
     monkeypatch.setattr(replay.sys, "argv", ["replay_episode.py", str(episode_path),
                                            "--control", control, "--execute"])
-    monkeypatch.setattr("builtins.input", lambda message: "EXECUTE")
     monkeypatch.setattr(replay, "replay", lambda *args, **kwargs: calls.append(kwargs))
     replay.main()
     assert (calls[0]["arm_config"] is not None) == (control in ("arm", "both"))

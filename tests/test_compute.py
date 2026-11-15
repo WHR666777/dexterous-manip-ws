@@ -29,15 +29,18 @@ class FakeIK:
         if MODE == "startup_failure":
             raise ValueError("model initialization failed")
         self.last_diagnostics = {}
+        self.solve_count = 0
 
     def forward(self, _): return np.eye(4)
 
     def solve(self, target, seed):
+        self.solve_count += 1
         if BARRIER is not None:
             BARRIER.wait(5.)
-        self.last_diagnostics = {"code": "IK_FAILED" if MODE == "ik_failure" else "IK_SUCCESS",
+        failed = MODE == "ik_failure" or (MODE == "ik_recover" and self.solve_count <= 3)
+        self.last_diagnostics = {"code": "IK_FAILED" if failed else "IK_SUCCESS",
                                  "pid": os.getpid()}
-        return None if MODE == "ik_failure" else seed + .01
+        return None if failed else seed + .01
 
 
 class FakeHand:
@@ -75,6 +78,29 @@ def wrong_reply_worker(connection, *_):
     connection.send(dict(id=request["id"] - 1, value=None))
     connection.recv()
     connection.close()
+
+
+def test_real_spawn_ik_recovers_outside_urdf_feedback_with_configured_margin():
+    config = config_for()
+    config['arm']['ik_joint_limit_margin_deg'] = 3.
+    config['arm']['ik_feedback_limit_tolerance_deg'] = .5
+    model = NeroIK()
+    seed = np.array([.2, -.3, .15, 1., -.1, .2, -.4])
+    seed[5] = model.limits[5, 1] + np.deg2rad(.2)
+    goal = seed.copy()
+    goal[5] = model.limits[5, 1] - np.deg2rad(4.)
+    worker = compute.ComputeProcess(config, "arm")
+    try:
+        worker.start()
+        result = worker.ik.solve(model.forward(goal), seed)
+        assert result is not None, worker.ik.last_diagnostics
+        assert worker.ik.last_diagnostics['seed_projected']
+        assert worker.ik.last_diagnostics['feedback_limit_tolerance_rad'] == np.deg2rad(.5)
+        assert np.all(result >= model.limits[:, 0] + np.deg2rad(3.))
+        assert np.all(result <= model.limits[:, 1] - np.deg2rad(3.))
+        assert np.max(np.abs(result - seed)) <= config['arm']['max_joint_delta_rad']
+    finally:
+        worker.close()
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
@@ -204,7 +230,7 @@ def fake_io_worker(side, config, control, connection, paused, stopping):
     dual._worker_main(side, config, control, connection, paused, stopping)
 
 
-@pytest.mark.parametrize("mode", [None, "crash", "ik_failure"])
+@pytest.mark.parametrize("mode", [None, "crash", "ik_failure", "ik_recover"])
 def test_dual_nested_compute_commit_failure_and_cleanup(mode):
     ctx = mp.get_context("spawn")
     configs = select_side_configs(load_config(ROOT / "configs/pico4_bimanual_nero_l20.yaml"))
@@ -227,17 +253,27 @@ def test_dual_nested_compute_commit_failure_and_cleanup(mode):
         group.request("anchor", 1, frames())
         group.collect("anchored", 1, 5.)
         group.paused.clear()
-        group.request("prepare", 2, frames())
-        if mode:
-            with pytest.raises(RuntimeError if mode == "crash" else dual._Pause):
+        cycle = 2
+        if mode == "ik_recover":
+            for cycle in (2, 3, 4):
+                group.request("prepare", cycle, frames())
+                with pytest.raises(dual._IKHold):
+                    group.collect("prepared", cycle, 5.)
+                assert not group.paused.is_set()
+                assert sends[:] == [0, 0, 0, 0]
+                group.request("cancel", cycle)
+            cycle = 5
+        group.request("prepare", cycle, frames())
+        if mode in ("crash", "ik_failure"):
+            with pytest.raises(RuntimeError if mode == "crash" else dual._IKHold):
                 group.collect("prepared", 2, 5.)
-            assert group.paused.is_set()
+            assert group.paused.is_set() == (mode == "crash")
             assert sends[:] == [0, 0, 0, 0]
         else:
-            group.collect("prepared", 2, 5.)
+            group.collect("prepared", cycle, 5.)
             assert sends[:] == [0, 0, 0, 0]
-            group.request("commit", 2)
-            results = group.collect("result", 2, 5.)
+            group.request("commit", cycle)
+            results = group.collect("result", cycle, 5.)
             assert sends[:] == [1, 1, 1, 1]
             for reply in results.values():
                 row = reply["row"]

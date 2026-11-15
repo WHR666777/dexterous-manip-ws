@@ -1,0 +1,36 @@
+反馈就绪
+PTP PTP→nero_start_pose: joint_error=0.0010rad
+测试原点就位: pos_err=0.29mm ang_err=0.03deg
+Trial 1 +y: pos=0.39mm ang=0.07deg PASS
+Trial 1 -y: pos=0.60mm ang=0.07deg PASS
+Trial 1 回原点: pos=0.26mm ang=0.05deg
+Trial 2 +y: pos=0.56mm ang=0.13deg PASS
+Trial 2 -y: pos=0.34mm ang=0.07deg PASS
+Trial 2 回原点: pos=0.27mm ang=0.05deg
+Trial 3 +y: pos=5.11mm ang=0.05deg PASS
+Trial 3 -y: pos=0.58mm ang=0.05deg PASS
+Trial 3 回原点: pos=0.49mm ang=0.08deg
+Trial 4 +y: pos=0.67mm ang=0.12deg PASS
+Trial 4 -y: pos=0.40mm ang=0.03deg PASS
+Trial 4 回原点: pos=0.49mm ang=0.08deg
+Trial 5 +y: pos=0.51mm ang=0.07deg PASS
+Trial 5 -y: pos=0.59mm ang=0.07deg PASS
+Trial 5 回原点: pos=0.35mm ang=0.05deg
+Trial 6 +y: pos=0.67mm ang=0.12deg PASS
+Trial 6 -y: pos=0.43mm ang=0.03deg PASS
+Trial 6 回原点: pos=0.35mm ang=0.05deg
+Trial 7 +y: pos=0.43mm ang=0.07deg PASS
+Trial 7 -y: pos=0.53mm ang=0.07deg PASS
+Trial 7 回原点: pos=0.27mm ang=0.05deg
+Trial 8 +y: pos=0.43mm ang=0.07deg PASS
+Trial 8 -y: pos=0.53mm ang=0.07deg PASS
+Trial 8 回原点: pos=0.33mm ang=0.07deg
+Trial 9 +y: pos=0.34mm ang=0.07deg PASS
+Trial 9 -y: pos=0.60mm ang=0.07deg PASS
+Trial 9 回原点: pos=0.33mm ang=0.07deg
+Trial 10 +y: pos=0.61mm ang=0.13deg PASS
+Trial 10 -y: pos=1.12mm ang=0.12deg PASS
+Trial 10 回原点: pos=0.30mm ang=0.05deg
+Trial 11 +y: pos=1.05mm ang=0.18deg PASS
+^C
+收到 Ctrl+C，将在本轮结束后回原点退出...

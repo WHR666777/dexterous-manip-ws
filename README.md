@@ -1,8 +1,22 @@
 # Pico 4 / Quest 3 → Nero + LinkerHand L20 遥操作
 
-本仓库的遥操作部分用 Pico 4 或 Quest 3 控制 AgileX Nero 七轴机械臂和 LinkerHand L20，并记录后续 OP 训练所需的数据。默认仍是**单臂 + 单手**；Pico 4 另支持显式配置的**双臂 + 双手并行控制及联合录制**。新增的折布 agent 软件入口支持两臂依次运动、普通 Python 脚本监督和参数恢复，当前通过假设备验证；见下方“折布 agent 与普通 Python 程序”。
+本仓库的遥操作部分用 Pico 4 或 Quest 3 控制 AgileX Nero 七轴机械臂和 LinkerHand L20，并记录后续 OP 训练所需的数据。默认仍是**单臂 + 单手**；Pico 4 另支持显式配置的**双臂 + 双手并行控制及联合录制**。折布 agent 使用 `codex exec + MCP + 独立持久 Python worker/控制进程`；已接入右侧 robo、设备控制和观测代码，目前仅检查语法，见 [框架阅读说明](docs/cloth_framework.md)。
 
 `AnyDexRetarget/` 是唯一有效的 VR 输入和手部重定向实现。原 `vr_teleop` 只作为腕部相对锚定和平滑方案的参考，所需跟踪逻辑已经迁入 `teleop/`，不再作为运行依赖。
+
+## LeRobot 训练与推理目录
+
+本工作区保留遥操作、硬件驱动、配置和 `data/` 采集数据。训练在
+`/home/lab404/dex-mani/lerobot` 中进行，训练输出已迁至该项目的 `outputs/`，
+双侧 ACT 推理入口为该项目的 `scripts/infer_act_bimanual.py`。推理复用本工作区的
+驱动与设备配置，主进程使用 `nero` 环境，模型子进程使用 `act` 环境。
+运行方式见 `/home/lab404/dex-mani/lerobot/README.md` 的“本机 NERO + L20 双侧 ACT”一节。
+
+cloth agent 可调用 `robo.run_act(policy="fold", steps=500)` 执行固定步数的双臂 ACT。
+模型解释器、脚本和命名 checkpoint 位于 `configs/cloth_agent.yaml` 的 `act` 配置；
+模型首次调用时加载，设备连接由 cloth 控制进程统一持有，调用结束后确认位置保持。
+返回的 `completed` 仅表示执行结束，agent 随后使用 `observe()` / `show()` 判断任务效果。
+接口和时间限制见 `cloth_agent/robot_operations.md`。原独立推理脚本仍可单独使用。
 
 ## Pico 4 输入（当前默认）
 
@@ -43,7 +57,7 @@ python3 -m teleop.cli --config configs/pico4_bimanual_nero_l20.yaml preflight --
 python3 -m teleop.cli --config configs/pico4_bimanual_nero_l20.yaml run --control both --execute
 ```
 
-两侧都到达各自起始姿态后，R 同时重锚定并恢复，B 开始联合录制，S 保存，Q 保存并退出。任一侧输入失效、IK 失败或越界都会锁定暂停双侧；两侧输入恢复后仍需 R。使能、重置及 preflight 也接受全局 `--side left|right|both`；`record-start-pose` 必须选择单侧。
+两侧都到达各自起始姿态后，R 同时重锚定并恢复，B 开始联合录制，S 保存，Q 保存并退出。普通 IK 求解失败（`IK_FAILED`、`IK_FK_ERROR`、`IK_JUMP`）显示 `IK HOLD`：双方跳过这一轮发送和录制，继续尝试新鲜目标；把手移回最近可达姿态附近，通过 IK 和目标门后自动继续，也可按 R 在机械臂当前位置重新锚定，无需退出或回起始位。IK 目标默认距 URDF 上下限各保留 2° 缓冲；反馈越过 URDF 边界不超过 1° 时，仍允许求向内的有效解，避免连回退目标都被 `IK_JOINT_LIMIT` 拒绝。任一侧输入失效、工作区或目标步长越界、反馈越限超过恢复容差、数值异常仍会锁定暂停。使能、重置及 preflight 也接受全局 `--side left|right|both`；`record-start-pose` 必须选择单侧。
 
 主进程独占 Pico 输入、键盘和相机，两个 `spawn` 控制子进程分别持有左/右侧的反馈线程和 CAN 对象；每侧再使用一个只做 IK 和 retarget 的计算进程，将求解与硬件 I/O 线程隔离。每轮左右并行计算，双方通过后才通知并行下发；失败或过期的一轮不会继续下发。每个计算进程最多处理一个请求，超时、通信异常或进程退出时停止整套控制并保存已有完整样本。CAN 调用不具备跨设备原子性，发送阶段异常可能留下部分已发出的命令，此时整套控制退出。
 
@@ -160,7 +174,7 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml preflight --control 
 
 Nero preflight 会比较当前七轴反馈经本仓库 URDF/FK 算出的 flange 与 SDK flange 反馈；默认允许 `10 mm / 5°`，超出就停止。它是启动一致性检查，不是标定替代品。
 
-确认 preflight 后，可用项目内的“只使能”命令使能 Nero。它不发送关节或笛卡尔目标，但仍需现场监护、急停可达，并要求双重确认：
+确认 preflight 后，可用项目内的“只使能”命令使能 Nero。它不发送关节或笛卡尔目标，指定 `--execute` 后直接执行，仍需现场监护、急停可达：
 
 ```bash
 python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-enable --execute
@@ -201,9 +215,13 @@ python3 -m teleop.cli --config configs/quest3_nero_l20.yaml arm-reset --execute
 
 ## 正式控制与录制
 
-`--control` 必须明确指定，`run` 还要求 `--execute` 并在终端输入 `EXECUTE`。Nero 必须已通过上面的命令或现场批准流程使能；`run` 不会隐式使能或自动失能。
+`--control` 必须明确指定，`run` 指定 `--execute` 后直接执行，无交互确认。Nero 必须已通过上面的命令或现场批准流程使能；`run` 不会隐式使能或自动失能。
 
 对于 `--control arm/both`，程序首先校验记录的七轴目标和官方关节限位，然后使用低速 `move_joints` 到达起始姿态并等待反馈误差收敛。到位后仍保持暂停：操作者摆好 Quest，再按 `R` 才建立腕部零点并开始叠加。运行中再次按 `R` 只在机械臂当前位置重新锚定，不会自动返回起始姿态。
+
+单侧普通 IK 求解失败也使用 `IK HOLD`，不发送当前帧，也不追加录制；继续检查新目标，可达且通过原有步长、工作区和关节连续性检查后自动恢复。输入丢失、越界及数值异常仍锁定暂停，需 R。R/B/S/Q 使用无文本预读的终端按键读取，连续按键不会因文本缓冲而滞留。
+
+关节限位预防与恢复由 `arm.ik_joint_limit_margin_deg`（默认 2°）和 `arm.ik_feedback_limit_tolerance_deg`（默认 1°）控制，双侧配置在 `sides.left.arm` 定义并由右侧继承。旧逻辑要求真实反馈严格落在 URDF 范围内，否则直接拒绝求解；本机 SDK 的部分限位稍宽于 URDF，例如 J6 上限为约 55°，URDF 为 54.431°，因此会出现 SDK 仍合法而 IK 无法向内恢复的状态。现在仅将优化器初值投影到缓冲区内，真实反馈保持原值；求解结果必须位于内侧命令区间，相对于真实反馈通过步长检查，并通过原有 FK 精度验收。不会裁剪求解后的关节角或重设目标姿态来伪造成功。超过恢复容差的反馈仍报 `IK_JOINT_LIMIT` 并打印具体关节；该处理不清除控制器故障或重新使能硬件。
 
 到达起始姿态后，程序用同一时刻的 SDK flange/TCP 反馈求固定的 flange→TCP 偏置，再把它应用到当前关节反馈的 URDF/FK flange，以此建立与 IK 模型一致的起始 TCP 和 Nero base 轴对齐立方体工作区。默认边长为 `safety.tcp_workspace_cube_side_m: 0.30`，即每个轴相对起始 TCP 最多移动 ±0.15 m。任何一轴越界都会在发送机械臂目标前暂停，不会把目标截断到边界。检查现场空间后再调整此值；按 `R` 不会移动或重置立方体中心。
 
@@ -263,20 +281,27 @@ python3 -m teleop.cli --config configs/pico4_nero_l20.yaml \
 
 `P` 从头重播一次两指动作，结束后保持末帧；再次按 `P` 从头开始。`O` 中断重播并回到片段第一帧。其余三指始终保持张开。重播按片段时间选择当前目标，随控制周期发送，不额外阻塞手腕控制；控制周期较慢时会跳过已经过去的片段帧。
 
-输入超时、IK 失败或工作区越界时，两设备按原规则暂停，手指重播同时取消。按 `R` 恢复时保持最后一次发送的手指目标，需要再次按 `P` 才重播，或按 `O` 回到初始姿态。`B/S/Q` 仍用于录制、保存和退出；录制的手部 action 为本模式实际发送的目标。省略 `--hand-mode wrist-only` 时仍使用原来的完整手部跟踪。
+输入超时、IK 失败或工作区越界时，两设备跳过当前帧，手指重播同时取消。普通 IK 求解失败可在目标恢复可达后自动继续，其他暂停需按 R。恢复时保持最后一次发送的手指目标，需要再次按 `P` 才重播，或按 `O` 回到初始姿态。`B/S/Q` 仍用于录制、保存和退出；录制的手部 action 为本模式实际发送的目标。省略 `--hand-mode wrist-only` 时仍使用原来的完整手部跟踪。
 
 ## RGB-D 与拈布 TCP 联合标定
 
 保持 replay 闭合手型，通过 Pico 改变位置和完整腕部姿态，按 `C` 保存静止后的 RGB-D 与 Nero FK；退出采集后人工点选接触点，再联合求解相机外参与 TCP 偏移：
 
 ```bash
-python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-01 \
+python3 scripts/calibrate_tcp_camera.py collect data/calibration/pinch-tmp \
   --config configs/pico4_nero_l20.yaml --execute
-python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-01 --scale 2
-python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-01
+python3 scripts/calibrate_tcp_camera.py annotate data/calibration/pinch-04 --scale 2
+python3 scripts/calibrate_tcp_camera.py solve data/calibration/pinch-04
 ```
 
-默认固定 replay 最后一帧，可用 `--hand-frame` 选择。采集用 `R` 锚定/恢复、`C` 暂停并等待反馈稳定后采样、`Q` 退出；必须包含不同 roll/pitch 倾斜，不能只改变位置和 yaw。结果写入会话目录的 `calibration.yaml`，包含 `base_from_camera` 和完整的 `flange_from_tcp`。坐标约定、点选要求及结果使用见 [标定说明](docs/calibration.md#5-rgb-d-相机外参与拈布虚拟-tcp-联合标定)。
+采集默认固定 replay 第 0 帧；上述命令用 `--hand-frame -1` 显式选择最后一帧闭合手型。采集用 `R` 锚定/恢复、`C` 暂停并等待反馈稳定后采样、`Q` 退出；必须包含不同 roll/pitch 倾斜，不能只改变位置和 yaw。结果写入会话目录的 `calibration.yaml`，包含 `base_from_camera` 和完整的 `flange_from_tcp`。坐标约定、点选要求及结果使用见 [标定说明](docs/calibration.md#5-rgb-d-相机外参与拈布虚拟-tcp-联合标定)。
+
+左手使用 `configs/pico4_nero_l20_left.yaml`，共享右手 CSV 的第 0 帧预抓手型；
+采集目录使用新的 `data/calibration/pinch-left-01`，操作命令见
+[左手标定说明](docs/calibration.md#左手标定复用右手第-0-帧手型)。
+双臂 agent 使用 `configs/cloth_agent_calibration.yaml` 合并标定，公共 task 为右臂基座。
+`move_J` / `move_L` / 手型接口用 `arm="left"` 或 `arm="right"` 选择侧；
+`move_both(left=pose_l, right=pose_r, mode="L")` 一次提交两侧独立目标，软件同时启动。
 
 ## 轨迹重放与视频查看
 
@@ -294,7 +319,7 @@ python3 scripts/replay_episode.py data/episodes/episode_20260929T120000.000000Z 
   --config configs/quest3_nero_l20.yaml --control both --execute
 ```
 
-输入 `EXECUTE` 后，先用 `arm.start_speed_percent` 点到点移动到该 episode 的第一条 `arm_joint_position`，按 `start_tolerance_rad` / `start_timeout_s` 等待到位；不使用 `nero_start_pose.yaml`。必须保证起始移动及整段录制轨迹的现场路径无碰撞。机械臂需已使能；脚本不会自动使能，可通过已有的 `teleop.cli --config ... arm-enable --execute` 命令使能。
+指定 `--execute` 后，先用 `arm.start_speed_percent` 点到点移动到该 episode 的第一条 `arm_joint_position`，按 `start_tolerance_rad` / `start_timeout_s` 等待到位；不使用 `nero_start_pose.yaml`。必须保证起始移动及整段录制轨迹的现场路径无碰撞。机械臂需已使能；脚本不会自动使能，可通过已有的 `teleop.cli --config ... arm-enable --execute` 命令使能。
 
 选中灵巧手时，使用 `hand.can_channel` / `hand.type` 连接，按 `hand.speed` 设置五指速度，并发送第一条 `hand_position_raw`；`both` 模式在 Nero 初始到位后才发送手部首姿态。请确认手部周围无夹持风险、手指已到首姿态，再按空格开始。手部不自动判断到位；仅手模式不连接 Nero。
 
@@ -323,77 +348,137 @@ python3 examples/nero_example.py --can-channel can0
 python3 examples/l20_example.py --can-channel can1 --hand-type right
 ```
 
-它们默认只读。带 `--execute` 的单步动作仍需输入 `EXECUTE`，只用于现场分级验证。
+它们默认只读。带 `--execute` 后直接执行单步动作，只用于现场分级验证。
 
-## 折布 agent 与普通 Python 程序
+## 简单抓取调试
 
-项目说明见 [docs/closth_agent.md](docs/closth_agent.md)，实施与验证进度见 [docs/cloth_agent_plan.md](docs/cloth_agent_plan.md)。agent 为每个子任务生成完整 Python 脚本，通过导入 `cloth_agent.tools` 调用工具，自行组织动作、监督循环和既有恢复分支。
-
-在具备现有 NumPy、SciPy、Pinocchio 等依赖的环境中安装额外的 TOPPRA 依赖：
+复用已有 `robo.move_L`、拍照和拇指/食指开合接口，不启动 Codex/MCP：
 
 ```bash
-python3 -m pip install -e '.[agent]'
+python scripts/nero/debug_grasp.py --execute
 ```
 
-默认任务配置 `configs/cloth_agent.yaml` 已填写当前右臂的实机参数：`can_arm_a` / `can_hand_a`、L515 序列号和官方张开手型；相机外参、虚拟 TCP、闭合手型和参考朝向在启动时从标定文件读取。任务坐标系为该 Nero base。另一条臂尚未标定，当前只配置右臂。
+启动时沿用 agent 的初始回位：回记录关节，再到初始抓取姿态。默认读取
+`configs/cloth_agent.yaml` 的设备/标定/夹爪/运动参数，以及 `configs/pico4_nero_l20.yaml`
+的 `arm.wrist_only_roll_pitch_deg`；可用 `--config`、`--teleop-config` 覆盖。
+准备完成后，在交互终端中**单键控制，无需回车**。方向以 task 坐标轴为准，不是图像方向。
 
-重新标定后只需替换下面的文件路径。相对路径以配置文件所在目录为基准，也支持绝对路径；新任务启动时读取，不在执行途中热更新：
+| 按键 | 操作 |
+| --- | --- |
+| `W` / `S` | TCP 沿 task X 正/负方向移动一步 |
+| `A` / `D` | TCP 沿 task Y 正/负方向移动一步 |
+| `R` / `F` | TCP 沿 task Z 正/负方向移动一步 |
+| `J` / `L` | base 系法兰 yaw 减少/增加一步 |
+| `-` / `+`（或 `=`） | 减小/增大平移步长：1、2、5、10、20 mm；默认 5 mm |
+| `[` / `]` | 减小/增大 yaw 步长：1、2、5、10°；默认 2° |
+| `P` | 拍照并记录实际 TCP |
+| `C` | 闭合，前后自动各拍一张 |
+| `O` | 张开拇指/食指 |
+| `V` | 拇指/食指到遥操作配置 `hand.replay_clip_file` 对应 CSV 的第一帧，不回放 |
+| `B` / `G` | 保存当前实际 TCP 为唯一预设 / 通过 `move_L` 返回预设（含朝向） |
+| `I` / `H` / `Q` | 实际状态 / 帮助 / 结束并生成叠加图 |
+
+按键不区分大小写。平移从最新实测 TCP 位置加减步长，yaw 按实测法兰角度增量调整，
+与 agent `top_down_pose` 相对初始朝向的 yaw 定义不同。每次移动固定配置的法兰 roll/pitch，
+通过现有 `robo.move_L` 执行；同时旋转时虚拟 TCP 的中途路径不保证直线。
+每步同步等待到位，显示 `Ready` 后再按下一键；动作期间积压的按键会丢弃，不补执行。
+运动中的人工停止仍使用启动时打印的独立 `hold` 命令。程序不连接 VR，不自动开合手。
+预设保存在固定文件 `configs/grasp_debug_preset.json`，包含完整 task 系 TCP 位置与朝向，
+下次启动自动加载。`B` 立即写入文件并覆盖旧值；`G` 通过 `move_L` 返回该位姿。
+加载预设不会自动运动；没有预设文件时按 `G` 只提示，不发运动。
+`V` 默认读取 `configs/pico4_nero_l20.yaml` 中的 `hand.replay_clip_file`
+（当前为 `configs/l20_thumb_index_9_10s.csv`），相对路径以项目根目录为基准。
+仅操作 CSV 中的拇指/食指槽位，其他三指不发送位置命令；`O`、`C` 保留原有行为。
+
+闭合使用 `hardware.py` 的同一入口与标定预设，只操作拇指/食指；
+`O/C/V` 均调用 `robot_control/l20.py` 中的阻塞到位检查：发送目标后轮询七个有效槽位，
+每次默认最多等待 2 秒，容差为 5 个原始位置单位，轮询间隔 0.1 秒；超时重试最多 2 次，
+即含首次共发送最多 3 次同一目标。参数在 `configs/cloth_agent.yaml` 顶层 `gripper` 中修改。
+最终失败会抛出异常并停止调试；不自动加力或修改目标。`C` 到位后才拍后照，取消原来的
+固定 1 秒延时。检查针对空载位置，SDK 反馈可能是缓存，不能证明抓住布料；接触阻挡也可能导致超时。
+遥操作仍使用原非阻塞发送接口。照片、深度及关联的实测 TCP/时间戳
+保存在本轮 `observations/`，属于邻近采样，没有相机/CAN 硬件同步。
+默认记录目录是 `data/grasp_debug/时间戳/`，可用 `--output-dir` 指定新目录。
+`photos.json` 记录照片顺序与每次闭合前的 TCP；退出时把全部闭合前 TCP 投到全部照片，
+另存 `annotated/`，原图保留。G1/G2 等编号对应各次闭合，三轴长度 3 cm，X 红/Y 绿/Z 蓝；
+这是固定 TCP 的几何投影，不处理手或布料遮挡。人工 `hold` 入口在启动时打印，
+沿用原有保持和外部支撑确认后的 `release-hold` 流程。
+
+## 折布 agent
+
+架构见 [docs/closth_agent.md](docs/closth_agent.md)，代码阅读与运行说明见 [docs/cloth_framework.md](docs/cloth_framework.md)。唯一主流程使用 `codex exec + MCP + 独立持久 Python worker / 控制进程`，入口为 `python -m cloth_agent`。
+
+使用已配置好的 `nero` 环境运行 agent，连接配置中的左右 Nero/L20 和共享 L515。
+启动前确认右臂已使能、配置中的 CAN 通道/相机序列号与当前设备一致，并使用当前现场标定。
+`run` 先启动 worker/控制进程并公布人工 `hold` 入口，再自动完成起始位姿准备，之后才启动 MCP/Codex，无需预先启动 `serve`。
+默认 `startup.enabled: true`：先调用与 wrist-only 相同的 `open_hand()` 张开整只手，
+再回到各侧记录关节位姿，随后到 `startup.tcp_poses` 明确配置的 task 系 TCP 位姿，
+不再从标定参考角拼接启动目标。右侧保留原启动 TCP 目标，左侧关于
+`task Y=-0.2676408114 m` 仅镜像右侧位置，朝向与右侧一致，两侧 TCP 的 task Z 都为 `0.0077220775 m`。
+此时的抓取朝向定义为 `yaw=0`；后续规划 yaw 是相对它绕 task +Z 的增量，单位 rad。
+准备过程中也会实际运动；未确认到位、规划失败、超时或人工停止时不会启动 agent。
+首轮任务完成一次“观察 → 抓取 → 小幅抬升 → 再观察 → 放回”的闭环：
+
+每轮测试前，在 `configs/cloth_agent.yaml` 中修改一次本轮记录目录。相对路径以配置文件所在的 `configs/` 目录为基准：
 
 ```yaml
-calibration:
-  file: ../data/calibration/pinch-01/calibration_candidate.yaml
-  arm: right
+session:
+  output_dir: ../data/agent_runs/robot-grasp-02
 ```
-
-`demo` 自动使用独立的 `configs/cloth_agent_mock.yaml`。运行两个阶段和一次注入异常的演示：
 
 ```bash
-# 确定性驱动：不调用模型、不连接 CAN 或相机
-python3 -m cloth_agent.cli demo
+conda activate nero
+cd /home/lab404/WHR/dexterous-manip-ws
 
-# 真实 Codex 在同一个 thread 中生成两个程序并处理参数恢复
-python3 -m cloth_agent.cli demo --with-codex
+python -m cloth_agent run \
+  --execute \
+  --task '你的目标是抓起布料一角（图片中的最下方的角），然后将其对折至图像最左边的角。先读取真实机器人状态，获取并展示现场图像；收到图像反馈后，选择清晰可见且深度有效的布料边角抓取点。以 L20 食指、拇指闭合接触点为虚拟 TCP，进行一次 top-down 抓取，沿 task +Z 抬升最多 0.05 m编写的代码中，抓取后就要抬升，因为大拇指闭合后会与台面接触（大拇指低于 tcp 点），若没有抬升会导致大拇指无法闭合。验证后将布料放到折叠放置点、松手并撤离布面，以此类推。最后尽量完成布料的对折。task空间的上下运动可以使用 move_J，折叠的水平运动过程可以使用 move_L，并且与布料保持 0.05 m 左右的距离，防止移动过程中手与桌面接触。遇到异常情况尽量重试或者尝试恢复。'
+
+python -m cloth_agent run \
+  --execute \
+  --task '进行第一次抹布实机抓取调试，你的目标是尽最大努力抓起布料一角（图片中的最下方的角）。先读取真实机器人状态，获取并展示现场图像；收到图像反馈后，选择清晰可见且深度有效的布料边角抓取点。以 L20 食指、拇指闭合接触点为虚拟 TCP，进行一次 top-down 抓取。编写的代码中，抓取后就要抬升，因为大拇指闭合后会与台面接触（大拇指低于 tcp 点），若没有抬升会导致大拇指无法闭合。遇到异常情况尽量重试或者尝试恢复。若没有抓取成功，可以尝试微调 TCP pose，比如roll，然后再次尝试。成功抓取后，需要总结经验。'
+
+python -m cloth_agent run \
+  --execute \
+  --task '你的任务是将毛巾对折并且移动到合适的位置。'
+
 ```
 
-后一条命令需要本机 `codex` 可执行且已登录，沿用现有模型配置，也可在 YAML 中指定模型。程序通过本地 app-server 协议工作，接口依据 [OpenAI 官方文档](https://learn.chatgpt.com/docs/app-server)，动态工具已对照本机 `codex-cli 0.162.1` 验证。
-
-启动自定义任务，或运行已有的普通 Python 子任务脚本：
+另一个终端同样进入 `nero` 环境和项目目录；需要人工停止并保持时，直接通知本次控制进程：
 
 ```bash
-python3 -m cloth_agent.cli run --task "将平铺的矩形抹布折叠两次" --folds 2 --execute
-python3 -m cloth_agent.cli script my_subtask.py --params my_params.json --execute
+python -m cloth_agent hold
+python -m cloth_agent hold-status
 ```
 
-`run` 驱动 Codex；`script` 直接启动现有程序，并在其请求恢复时从终端接收 JSON 回复。脚本可以导入以下接口：
+上面的 `--execute` 会直接连接设备并按配置准备起始抓取位姿，无需输入确认词；程序不自动使能、执行硬件回零或复位。
+固定准备流程及完整反馈保存在 `cells/000.py` / `000.json`，不占 agent 的 cell 预算；准备超时由 `startup.timeout_s` 控制。
+人工示范经验见 [grasp_experience.md](cloth_agent/grasp_experience.md)，会随启动 prompt 全文提供：
+抓前先用 `gripper_replay_start()` 手型比对食指与布边，贴合后再闭合，并用抬升后的图像验证。
+文中的高度是 `pinch-04` 与对应台面条件下的 task Z 参考，不是通用的布面高度偏置。
+`configs/cloth_agent.yaml` 启用相机与自动准备；人工保持测试用的 `configs/cloth_agent_estop.yaml` 关闭了相机和自动准备，不用于这次视觉抓取任务。
+每次重试只需把配置中的 `session.output_dir` 换成新目录，`run` / `serve` / `monitor` / `hold` / `hold-status` / `release-hold` 共用它，旧记录不覆盖。本轮运行期间保持该字段不变。
+默认读取 `configs/cloth_agent.yaml`；使用其他配置时，各命令加同一个 `--config 配置文件`。
+临时覆盖仍可使用 `run/serve --output-dir 目录`、`monitor 目录` 或 `hold/hold-status/release-hold 路径/session.json`，显式参数优先于配置。
+需要改测试目标时修改 `--task`；仅手动使用外部 MCP client 时才使用 `serve`。
 
-- `parameters()`：读取提交时保存的初始参数。
-- `observe(include_images=True)`：取得机器人反馈、运动状态、RGB-D 文件及元数据、可选关键点。
-- `execute_trajectory(plan_id, wait=False)`：后台执行已规划轨迹，返回运动句柄；默认 `wait=True` 等待执行结果。
-- `move_J(arm, target_joints, wait=True)`、`move_L(arm, target_tcp, wait=True)`：通过同一规划器和执行器执行点到点或 TCP 直线运动。
-- `plan_from_current(waypoints=None, arm="left", mode="cartesian", target_joints=None)`：从当前反馈生成关节路径及 TOPPRA 时间参数化，返回计划 ID。`mode` 可选 `joint` 或 `cartesian`。
-- `set_hand_pose(pose, arm="left")`：发送 20 槽 raw 手型，或使用已填写的 `open`/`closed` 预设。
-- `request_agent(reason, observation=None)`：暂停保持后发送反馈，在原 Python 进程中等待恢复参数。回复必须包含 `action: continue/abort`，其余字段由程序既有恢复分支约定。
-- `wait_next_observation(period_s=.05)`、`report_result(status="completed", **result)` 和 `geometry(operation, **values)`：监督循环、结果报告及几何计算辅助工具。
+`robo` 提供状态、RGB-D、附图、像素反投影、top-down 位姿、`move_J` / `move_L`、拇指/食指开合及普通暂停；固定知识随启动 prompt 注入，没有 info、公开 plan/execute 或抓布判定接口。操作约定见 [robot_operations.md](cloth_agent/robot_operations.md)。人工 `hold` 绕过 MCP/Codex，锁定动作后发送一次普通 J 固定关节目标并持续监督反馈，agent 结束后保持进程仍运行。只有机械臂已安全落座或获得外部支撑后，操作者才能 `release-hold`。旧 `estop` 已禁用：Nero 阻尼急停现场出现下落，不用于悬停。人工静止保持已由操作者现场验证，记录见 `data/agent_runs/estop-idle-02/`，其中已连接真实设备、发送固定关节目标且记录的关节误差为 0；该记录没有执行运动 cell，不代替本次视觉抓取与运动中停止验证。保持操作见 [人工保持说明](docs/cloth_estop_test.md)。
 
-`geometry("camera_to_task", points=...)` 使用已配置的相机外参转换相机三维点；`geometry("pixel_to_task", pixel=[u, v], depth_m=z, intrinsics=...)` 先反投影再转换到任务坐标系。深度和内参必须来自所点选的同一份 RGB-D 观测，深度单位为米。原有 `pixel_to_point` 仍返回相机坐标。观测中包含 `images.task_from_camera` 和该臂的 `reference_tcp_rotation`；后者是 replay 抓姿对应的 TCP 参考朝向，可绕任务竖直轴调整 yaw。
+在另一个终端启动只读观察页，默认读取同一配置中的本轮目录：
 
-运动句柄提供 `status()`、`done()`、`wait()` 和 `pause_and_hold(reason)`。`done()` 表示运动已停止运行，包括正常完成、暂停和失败；通过 `wait()` 确认结果，暂停与失败分别抛出 `MotionInterrupted`、`MotionFailed`。这些异常可直接从工具模块导入。后台执行器持续运行，脚本等待或读取观测不会停止轨迹推进；调用暂停保持后原轨迹不再推进，已有恢复分支需要从实际状态规划新的轨迹。
-
-每个任务的源码、初始参数、轨迹、RGB-D 快照、`events.jsonl`、子进程输出和结果保存在 `data/agent_runs/`。真实 Codex 运行还保存 `thread.json` 和便于阅读的 `codex.md`：后者记录实际发送的 developer instructions、工具定义、任务/续接消息、Codex 回复、工具参数/结果及提交的程序源码。
-
-提示词和工具说明以中文为主、保留 English 技术术语，并要求 Codex 的计划、回复、生成代码的注释和说明性日志使用同样形式。`events.jsonl` 增加中英 `description`，任务/子任务/运动状态增加 `status_text`；原有 JSON 字段、工具名和 `completed` / `continue` 等枚举值保持不变，便于程序解析与对照。提示词位于 `cloth_agent/codex.py` 的 `INSTRUCTIONS` 和 `tool_specs()`，demo 任务位于 `cloth_agent/demo.py` 的 `SMOKE_TASK`。新设置对后续运行生效。
-
-同一任务中的活动程序不能替换；程序未处理的异常或未等待运动便退出会触发暂停收尾并结束该任务，不能提交改写后的程序继续尝试。
-
-关键点模块暂未开发。`observations.keypoints_file` 可接收上游原子更新的 JSON，坐标系为 `task` 或 `camera`、单位米，时间戳采用同一主机的单调时钟；`camera` 三维点会使用 `task_from_camera` 自动转换，已经是 `task` 的点保持原值。缺失或过期返回 `null`：
-
-```json
-{"timestamp_monotonic": 12345.0, "frame": "task", "points": {"corner": [0.1, 0.2, 0.3]}}
+```bash
+conda activate nero
+python -m cloth_agent monitor
 ```
 
-`observations.recorded_episode` 可指定现有 `data/episodes/episode_...` 格式的 RGB-D 记录用于假设备测试，需安装视觉依赖；录制输入不用于实机运动。默认假设备图像明确标为 `synthetic`，没有伪造布料关键点。
+浏览器打开 `http://127.0.0.1:8765/`，查看 agent 时间线、当前 cell 代码与反馈、观测图片和任务状态。
+可在 agent 启动前打开，也可回看已经结束的任务；端口冲突时加 `--port 8766`。
+监控不连接机器人、不发送控制命令；关闭页面或监控不会停止机器人。
+stdout 和运动反馈在 cell 返回后更新，图片为观测快照；详细说明见 [实时观察页](docs/cloth_monitor.md)。
 
-当前实机配置引用 `pinch-01/calibration_candidate.yaml` 的候选标定（拟合 RMS 7.142 mm）。关节规划速度/加速度软件上限为 0.2 rad/s、0.4 rad/s²；`workspace.start_pose_file` 和 `workspace.cube_side_m` 定义工作区，启动时按起始关节姿态 FK 和所读 TCP 自动计算 0.9 m 立方体边界，同一任务中保持固定。实机入口仍要求 `--execute` 和原有 `EXECUTE` 确认。关键点输入、实际定位精度、暂停保持及抓布/折布效果仍待现场验证；离线测试不连接设备。需要纯软件任务时显式使用 `--config configs/cloth_agent_mock.yaml`。
+旧 app-server、普通子任务脚本提交、参数回信、demo 与对应执行后端已删除，不再提供原来的 `demo/script` 命令或 `cloth_agent.tools` 接口。
+
+`geometry.py`、`planning.py`、`config.py` 与标定配置已接入新任务主流程。`move_J` 接收 7 元七轴 rad 数组直接作为目标，或对 6 元 xyz-rpy / 4×4 TCP 位姿在 worker 求一次 IK，再由设备进程发送关节 PTP；`move_L` 把虚拟 TCP 转为法兰目标，使用原厂 `move_l`，配合固件空闲、启动确认、有界重发和 TCP 到位监督，不再使用逐点 IK/J 分段。L 的位置到位阈值沿用实测脚本的 0.02 m，可在 `motion.linear_position_tolerance_m` 调整。几何函数仍供现有 TCP/相机标定使用；独立规划器的 TOPPRA 保留供规划脚本使用。`configs/cloth_agent_mock.yaml` 仅作为规划测试的数值输入，不对应假设备运行或 demo。
 
 ## 目录
 
@@ -402,7 +487,7 @@ AnyDexRetarget/              权威手部重定向实现与 Quest3/L20 配置
 assets/nero/                 本项目固定使用的 Nero URDF
 configs/                     唯一遥操作现场配置
 robot_control/               Nero、L20 封装与 Nero IK
-cloth_agent/                 自主程序工具、规划、后台执行、脚本与 Codex 通信
+cloth_agent/                 Codex exec、MCP、独立 worker/控制进程及几何规划底层
 teleop/                      AnyDex 输入适配、现场坐标、锚定、控制、录制、CLI
 examples/                    单设备低层只读/小步诊断
 tests/                       不接硬件的纯逻辑与 wrapper 测试
@@ -414,4 +499,4 @@ docs/review.md               本次改造的代码 review 导航
 
 ## 当前验证边界
 
-本轮执行了离线测试、假设备脚本恢复演示，以及真实 Codex thread 驱动的假设备联调，没有连接 CAN、相机或执行实机运动。遥操作的现场验证顺序见 `docs/calibration.md`，折布 agent 的分级验收见 `docs/cloth_agent_plan.md`。
+双臂扩展已完成离线标定、执行器和 worker/控制进程通信测试，尚未进行双臂实机运动验证；范围见 [docs/cloth_framework.md](docs/cloth_framework.md)。遥操作的现场验证顺序见 `docs/calibration.md`。

@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable Nero, then reset its control state without a motion target",
     )
     reset_parser.add_argument("--execute", action="store_true", help="required acknowledgement")
-    run_parser = subparsers.add_parser("run", help="stream commands after explicit confirmation")
+    run_parser = subparsers.add_parser("run", help="stream commands with --execute")
     run_parser.add_argument("--control", choices=("arm", "hand", "both"), required=True)
     run_parser.add_argument("--execute", action="store_true", help="required acknowledgement")
     run_parser.add_argument("--record-dir")
@@ -105,14 +105,6 @@ def main() -> None:
         return
     if not args.execute:
         raise SystemExit("Refusing to command hardware without --execute.")
-    actions = {
-        "arm-enable": "enable Nero",
-        "arm-reset": "disable and reset Nero",
-        "run": "start command streaming",
-    }
-    action = actions[args.command]
-    if input(f"Type EXECUTE to {action} ({', '.join(selected)}): ").strip() != "EXECUTE":
-        raise SystemExit("Confirmation did not match; no commands were sent.")
     if args.command == "arm-enable":
         for settings in selected.values():
             enable_arm(settings)

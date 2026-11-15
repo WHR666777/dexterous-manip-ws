@@ -197,9 +197,79 @@ def test_invalid_inputs_are_rejected(error, expected_code):
     elif error == 'nan_seed':
         seed[0] = np.nan
     else:
-        seed[0] = solver.limits[0, 1] + .01
+        seed[0] = solver.limits[0, 1] + .03
     assert solver.solve(target, seed) is None
     assert solver.last_diagnostics['code'] == expected_code
+    if error == 'limit':
+        assert solver.last_diagnostics['seed_limit_violations'] == [dict(
+            joint=1, angle_rad=seed[0], lower_rad=solver.limits[0, 0],
+            upper_rad=solver.limits[0, 1],
+        )]
+
+
+@pytest.mark.parametrize("joint, bound", [(1, 1), (3, 1), (5, 1), (5, 0)])
+def test_real_ik_recovers_small_feedback_overshoot_with_inward_command(monkeypatch, joint, bound):
+    monkeypatch.setattr(nero_ik, 'MAX_SOLVE_SECONDS', 1.0)
+    solver = NeroIK()
+    seed = np.array([.2, -.3, .15, 1., -.1, .2, -.4])
+    direction = 1 if bound == 1 else -1
+    seed[joint] = solver.limits[joint, bound] + direction * np.deg2rad(.2)
+    goal = seed.copy()
+    goal[joint] = solver.limits[joint, bound] - direction * np.deg2rad(3.)
+    target = manual_forward(solver, goal)
+
+    solution = solver.solve(target, seed)
+
+    assert solution is not None, solver.last_diagnostics
+    assert solver.last_diagnostics['seed_projected']
+    assert solver.last_diagnostics['seed_limit_violations'][0]['joint'] == joint + 1
+    assert solver.in_limits(solution)
+    assert np.all(solution >= solver.command_limits[:, 0])
+    assert np.all(solution <= solver.command_limits[:, 1])
+    assert np.max(np.abs(solution - seed)) <= solver.max_joint_delta_rad
+    assert direction * (solution[joint] - seed[joint]) < 0
+    p, r = nero_ik.pose_error(manual_forward(solver, solution), target)
+    assert p < nero_ik.MAX_FK_POSITION_ERROR_M
+    assert np.rad2deg(r) < nero_ik.MAX_FK_ROTATION_ERROR_DEG
+
+
+def test_recovery_checks_step_against_actual_feedback_not_projected_seed():
+    solver = NeroIK(max_joint_delta_rad=np.deg2rad(.1))
+    seed = np.zeros(7)
+    seed[5] = solver.limits[5, 1] + np.deg2rad(.2)
+    projected = np.clip(seed, solver.command_limits[:, 0], solver.command_limits[:, 1])
+    assert solver.solve(solver.forward(projected), seed) is None
+    assert solver.last_diagnostics['code'] == 'IK_JUMP'
+    assert not solver.continuous(projected, seed)
+
+
+def test_stationary_target_at_hard_limit_cannot_bypass_command_margin(monkeypatch):
+    solver = NeroIK()
+    seed = np.zeros(7)
+    seed[5] = solver.limits[5, 1]
+    target = solver.forward(seed)
+    calls = []
+
+    def check_initial(residual, initial, *, jac, bounds, max_nfev):
+        calls.append(initial.copy())
+        np.testing.assert_array_equal(bounds[0], solver.command_limits[:, 0])
+        np.testing.assert_array_equal(bounds[1], solver.command_limits[:, 1])
+        return SimpleNamespace(x=seed.copy(), success=True, nfev=1)
+
+    monkeypatch.setattr(nero_ik, 'least_squares', check_initial)
+    assert solver.solve(target, seed) is None
+    assert len(calls) == 1
+    assert calls[0][5] == solver.command_limits[5, 1]
+
+
+@pytest.mark.parametrize('option, value', [
+    ('joint_limit_margin_rad', -1.), ('joint_limit_margin_rad', float('nan')),
+    ('joint_limit_margin_rad', 2.), ('feedback_limit_tolerance_rad', -1.),
+    ('feedback_limit_tolerance_rad', float('inf')),
+])
+def test_invalid_limit_recovery_options_are_rejected(option, value):
+    with pytest.raises(ValueError):
+        NeroIK(**{option: value})
 
 
 def test_analytic_jacobian_deadline_keeps_existing_fallback(monkeypatch):

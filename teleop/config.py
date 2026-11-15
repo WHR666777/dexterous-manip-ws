@@ -117,6 +117,14 @@ def _validate_config(config: dict[str, Any], config_path: Path) -> dict[str, Any
         raise ValueError(f"{section}.side must be 'left' or 'right'.")
     if config["hand"].get("type") != source.get("side"):
         raise ValueError(f"hand.type and {section}.side must select the same side.")
+    for key, default in (("ik_joint_limit_margin_deg", 2.0), ("ik_feedback_limit_tolerance_deg", 1.0)):
+        try:
+            value = float(config["arm"].setdefault(key, default))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"arm.{key} must be finite and nonnegative.") from exc
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"arm.{key} must be finite and nonnegative.")
+        config["arm"][key] = value
     if not np.isfinite(float(config.get("control_hz", 0))) or float(config.get("control_hz", 0)) <= 0:
         raise ValueError("control_hz must be finite and positive.")
     if not np.isfinite(float(source["max_age_s"])) or float(source["max_age_s"]) <= 0:

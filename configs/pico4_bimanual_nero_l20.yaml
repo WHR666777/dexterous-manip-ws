@@ -38,6 +38,9 @@ sides:
       can_interface: socketcan
       can_channel: can_arm_b
       max_joint_delta_rad: 0.3345329252
+      # Keep commands inside URDF limits; small feedback overshoot may recover inward.
+      ik_joint_limit_margin_deg: 2.0
+      ik_feedback_limit_tolerance_deg: 1.0
       # Record this side explicitly; never copy the right arm's joint angles.
       start_pose_file: configs/nero_left_start_pose.yaml
       start_speed_percent: 10

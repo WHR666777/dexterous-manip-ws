@@ -1,0 +1,55 @@
+{
+  "description": "笛卡尔移动可靠性检查 mode=native_l axis=y",
+  "mode": "native_l",
+  "axis": "y",
+  "distance_m": 0.2,
+  "speed_percent": 10,
+  "passed": false,
+  "trials": [
+    {
+      "trial": 1,
+      "leg": "+y",
+      "pos_err_mm": 0.10712479282460413,
+      "ang_err_deg": 0.015751921830867786,
+      "passed": true
+    },
+    {
+      "trial": 1,
+      "leg": "-y",
+      "pos_err_mm": 0.4058986337695555,
+      "ang_err_deg": 0.02819213245895915,
+      "passed": true
+    },
+    {
+      "trial": 2,
+      "leg": "+y",
+      "pos_err_mm": 0.35850452082010525,
+      "ang_err_deg": 0.0713495886756239,
+      "passed": true
+    },
+    {
+      "trial": 2,
+      "leg": "-y",
+      "pos_err_mm": 0.14497957875585288,
+      "ang_err_deg": 0.018095187138678304,
+      "passed": true
+    },
+    {
+      "trial": 3,
+      "leg": "+y",
+      "pos_err_mm": 0.11766011182468512,
+      "ang_err_deg": 0.04692935981267036,
+      "passed": true
+    },
+    {
+      "trial": 3,
+      "leg": "-y",
+      "pos_err_mm": 0.5508538261690976,
+      "ang_err_deg": 0.061364529709735716,
+      "passed": true
+    }
+  ],
+  "pid": 2538814,
+  "error": "TimeoutError: 到位超时 T4→+0.2m: pos=199.6mm ang=0.07deg",
+  "duration_s": 92.31732158712111
+}

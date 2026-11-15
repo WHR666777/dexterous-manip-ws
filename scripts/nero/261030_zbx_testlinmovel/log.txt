@@ -1,0 +1,103 @@
+反馈就绪
+PTP PTP→nero_start_pose: joint_error=0.0010rad
+测试原点就位: pos_err=0.17mm ang_err=0.05deg
+Trial 1 +y: pos=0.21mm ang=0.04deg PASS
+Trial 1 -y: pos=0.32mm ang=0.04deg PASS
+Trial 1 回原点: pos=0.61mm ang=0.05deg
+Trial 2 +y: pos=0.23mm ang=0.03deg PASS
+Trial 2 -y: pos=0.19mm ang=0.04deg PASS
+Trial 2 回原点: pos=0.73mm ang=0.07deg
+Trial 3 +y: pos=0.26mm ang=0.04deg PASS
+Trial 3 -y: pos=0.68mm ang=0.06deg PASS
+Trial 3 回原点: pos=0.28mm ang=0.08deg
+Trial 4 +y: pos=0.30mm ang=0.05deg PASS
+Trial 4 -y: pos=0.70mm ang=0.08deg PASS
+Trial 4 回原点: pos=0.30mm ang=0.04deg
+Trial 5 +y: pos=0.44mm ang=0.05deg PASS
+Trial 5 -y: pos=0.51mm ang=0.05deg PASS
+Trial 5 回原点: pos=0.16mm ang=0.04deg
+Trial 6 +y: pos=0.35mm ang=0.03deg PASS
+Trial 6 -y: pos=0.17mm ang=0.03deg PASS
+Trial 6 回原点: pos=0.37mm ang=0.06deg
+Trial 7 +y: pos=0.35mm ang=0.04deg PASS
+Trial 7 -y: pos=0.58mm ang=0.06deg PASS
+Trial 7 回原点: pos=0.49mm ang=0.07deg
+Trial 8 +y: pos=0.23mm ang=0.04deg PASS
+Trial 8 -y: pos=0.67mm ang=0.07deg PASS
+Trial 8 回原点: pos=0.63mm ang=0.08deg
+Trial 9 +y: pos=0.46mm ang=0.07deg PASS
+Trial 9 -y: pos=0.26mm ang=0.04deg PASS
+Trial 9 回原点: pos=0.49mm ang=0.07deg
+Trial 10 +y: pos=0.48mm ang=0.07deg PASS
+Trial 10 -y: pos=0.44mm ang=0.04deg PASS
+Trial 10 回原点: pos=0.52mm ang=0.07deg
+Trial 11 +y: pos=0.30mm ang=0.06deg PASS
+Trial 11 -y: pos=0.17mm ang=0.03deg PASS
+Trial 11 回原点: pos=0.49mm ang=0.09deg
+Trial 12 +y: pos=0.37mm ang=0.04deg PASS
+Trial 12 -y: pos=0.48mm ang=0.03deg PASS
+Trial 12 回原点: pos=0.36mm ang=0.03deg
+Trial 13 +y: pos=0.06mm ang=0.05deg PASS
+Trial 13 -y: pos=0.62mm ang=0.06deg PASS
+Trial 13 回原点: pos=0.51mm ang=0.08deg
+Trial 14 +y: pos=0.35mm ang=0.03deg PASS
+Trial 14 -y: pos=0.70mm ang=0.07deg PASS
+Trial 14 回原点: pos=0.35mm ang=0.03deg
+Trial 15 +y: pos=0.31mm ang=0.02deg PASS
+Trial 15 -y: pos=0.86mm ang=0.10deg PASS
+Trial 15 回原点: pos=0.57mm ang=0.08deg
+Trial 16 +y: pos=0.10mm ang=0.02deg PASS
+Trial 16 -y: pos=0.77mm ang=0.09deg PASS
+Trial 16 回原点: pos=0.58mm ang=0.05deg
+Trial 17 +y: pos=0.29mm ang=0.02deg PASS
+Trial 17 -y: pos=0.13mm ang=0.04deg PASS
+Trial 17 回原点: pos=0.36mm ang=0.04deg
+Trial 18 +y: pos=0.10mm ang=0.02deg PASS
+Trial 18 -y: pos=0.96mm ang=0.10deg PASS
+Trial 18 回原点: pos=0.37mm ang=0.03deg
+Trial 19 +y: pos=0.28mm ang=0.03deg PASS
+Trial 19 -y: pos=0.65mm ang=0.03deg PASS
+Trial 19 回原点: pos=0.43mm ang=0.03deg
+Trial 20 +y: pos=0.13mm ang=0.03deg PASS
+Trial 20 -y: pos=0.58mm ang=0.06deg PASS
+Trial 20 回原点: pos=0.58mm ang=0.03deg
+Trial 21 +y: pos=0.23mm ang=0.06deg PASS
+Trial 21 -y: pos=0.30mm ang=0.04deg PASS
+Trial 21 回原点: pos=0.39mm ang=0.03deg
+Trial 22 +y: pos=0.17mm ang=0.04deg PASS
+Trial 22 -y: pos=0.36mm ang=0.03deg PASS
+Trial 22 回原点: pos=0.61mm ang=0.03deg
+Trial 23 +y: pos=0.17mm ang=0.04deg PASS
+Trial 23 -y: pos=0.20mm ang=0.04deg PASS
+Trial 23 回原点: pos=0.52mm ang=0.04deg
+Trial 24 +y: pos=0.42mm ang=0.05deg PASS
+Trial 24 -y: pos=0.51mm ang=0.04deg PASS
+Trial 24 回原点: pos=0.32mm ang=0.03deg
+Trial 25 +y: pos=0.22mm ang=0.06deg PASS
+Trial 25 -y: pos=0.55mm ang=0.07deg PASS
+Trial 25 回原点: pos=0.45mm ang=0.06deg
+Trial 26 +y: pos=0.08mm ang=0.04deg PASS
+Trial 26 -y: pos=0.46mm ang=0.04deg PASS
+Trial 26 回原点: pos=0.50mm ang=0.04deg
+Trial 27 +y: pos=0.40mm ang=0.05deg PASS
+Trial 27 -y: pos=0.21mm ang=0.05deg PASS
+Trial 27 回原点: pos=0.41mm ang=0.08deg
+Trial 28 +y: pos=0.20mm ang=0.05deg PASS
+Trial 28 -y: pos=1.02mm ang=0.12deg PASS
+Trial 28 回原点: pos=0.20mm ang=0.03deg
+Trial 29 +y: pos=0.39mm ang=0.06deg PASS
+Trial 29 -y: pos=0.10mm ang=0.03deg PASS
+Trial 29 回原点: pos=0.18mm ang=0.02deg
+Trial 30 +y: pos=0.40mm ang=0.06deg PASS
+Trial 30 -y: pos=0.17mm ang=0.03deg PASS
+Trial 30 回原点: pos=0.47mm ang=0.05deg
+Trial 31 +y: pos=0.12mm ang=0.03deg PASS
+Trial 31 -y: pos=0.47mm ang=0.06deg PASS
+Trial 31 回原点: pos=0.71mm ang=0.05deg
+Trial 32 +y: pos=0.12mm ang=0.03deg PASS
+Trial 32 -y: pos=0.54mm ang=0.04deg PASS
+Trial 32 回原点: pos=0.21mm ang=0.02deg
+Trial 33 +y: pos=0.32mm ang=0.04deg PASS
+Trial 33 -y: pos=0.54mm ang=0.04deg PASS
+^C
+收到 Ctrl+C，将在本轮结束后回原点退出...

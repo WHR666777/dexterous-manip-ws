@@ -8,9 +8,14 @@ from typing import Any, Callable, List, Optional
 
 import numpy as np
 
+from .errors import CommandRejected
+
 
 NERO_DOF = 7
 NERO_MOTOR_FEEDBACK_MAX_AGE_S = 0.5
+# 实测起点/保持目标仅容许反馈在官方边界外最多 1 mrad；不是 agent 目标的限位容差。
+# 使用边界内的整 mrad 值，避免 2.146755 附近的反馈/指令量化再次越界。
+NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD = 0.001
 
 
 def _load_nero_sdk():
@@ -76,6 +81,8 @@ class NeroArm:
             )
             driver = sdk.AgxArmFactory.create_arm(config)
         self._driver = driver
+        self._observed_send_bus = None
+        self._original_bus_send = None
         self._can_channel = can_channel
         self._max_joint_delta = self._validate_delta_setting(max_joint_delta)
         self._driver.set_joint_limits_enabled(True)
@@ -134,6 +141,61 @@ class NeroArm:
         ``is_connected()`` 已为假也让 Driver 清理其内部资源。
         """
         self._driver.disconnect()
+        if self._observed_send_bus is not None:
+            self._observed_send_bus.send = self._original_bus_send
+            self._observed_send_bus = self._original_bus_send = None
+
+    def configure_can_sender(self, observer, *, joint_frame_interval_s=0.) -> None:
+        """记录实际 Bus.send；可为七轴目标的四个 CAN 帧设置最小帧间隔。
+
+        SDK 的 CanComm.send 会吞下 ENOBUFS/ENETDOWN，last_error 又可能被
+        下一帧成功发送或接收清除。因此需要在 python-can 边界记录异常，
+        不能只在七轴目标发送结束时读取一次 get_comm_error()。
+        observer 只允许内存入队。主机发送间隔只作用于 0x155/156/157/170，
+        不重发目标、不修改字节/总线设置，也不在两个几何分段之间添加停稳等待。
+        默认 0 保留原发送节奏；agent 实机对照可显式配置这个间隔。
+        """
+        import socket
+
+        interval = float(joint_frame_interval_s)
+        if not np.isfinite(interval) or interval < 0:
+            raise ValueError("joint_frame_interval_s must be finite and nonnegative")
+        bus = self._driver.get_context().get_comm().send_bus
+        # SDK 默认 local_loopback=False，独立抓包 socket 因此看不到本机
+        # 目标帧。仅对此 SDK socket 开启内核回环，不改变机器人协议或接口
+        # 队列；SDK 自身 receive_own_messages=False，不会把自己的目标当反馈。
+        bus.socket.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_LOOPBACK, 1)
+        original = bus.send
+        self._observed_send_bus, self._original_bus_send = bus, original
+        last_joint_frame_at = None
+
+        def send(message, *args, **kwargs):
+            nonlocal last_joint_frame_at
+            joint_frame = message.arbitration_id in (0x155, 0x156, 0x157, 0x170)
+            pacing_wait = 0.
+            if joint_frame and last_joint_frame_at is not None and interval:
+                # 控制主机 Bus.send 调用的间隔；不是硬实时总线时间保证。
+                # 仅在当前四帧发送组内做毫秒级节拍；完整目标仍受控制
+                # 进程的单次发送锁保护，人工目标不会插进普通目标的四帧之间。
+                pacing_wait = max(0., interval - (time.monotonic() - last_joint_frame_at))
+                if pacing_wait:
+                    time.sleep(pacing_wait)
+            started = time.time()
+            error = None
+            try:
+                return original(message, *args, **kwargs)
+            except Exception as exc:
+                error = {"type": type(exc).__name__, "message": str(exc),
+                         "error_code": getattr(exc, "error_code", None)}
+                raise  # 异常原样交给 SDK，不因节拍处理而吞掉异常或重发帧。
+            finally:
+                if joint_frame:
+                    last_joint_frame_at = time.monotonic()
+                observer(send_started_unix=started, send_finished_unix=time.time(),
+                         can_id=f"0x{message.arbitration_id:03X}",
+                         data=bytes(message.data).hex(), pacing_wait_s=pacing_wait, error=error)
+
+        bus.send = send
 
     def is_connected(self) -> bool:
         """返回官方 Driver 报告的 CAN 连接状态。
@@ -159,7 +221,9 @@ class NeroArm:
 
         Notes
         -----
-        映射七次 ``Driver.get_joint_enable_status(1..7)``；不阻塞。
+        映射 ``Driver.get_joint_enable_status(1..7)``；不阻塞。
+        官方 SDK 在某轴驱动反馈尚未收到时也返回 False，因此 False 不能单独
+        证明物理机械臂未使能。新连接应先等待反馈，再决定是否允许动作。
         """
         return all(
             bool(self._driver.get_joint_enable_status(index))
@@ -763,8 +827,35 @@ class NeroArm:
         if delta is not None:
             current = self.get_joint_positions()
             if np.any(np.abs(command - current) > delta):
-                raise ValueError("Joint command exceeds max_joint_delta.")
+                errors = np.abs(command - current)
+                raise ValueError(
+                    "Joint command exceeds max_joint_delta. "
+                    f"limit_rad={delta}, joints={(np.flatnonzero(errors > delta) + 1).tolist()}, "
+                    f"target={command.tolist()}, actual={current.tolist()}, delta_rad={errors.tolist()}"
+                )
         return command
+
+    def hold_target_from_feedback(self, joints: Any) -> np.ndarray:
+        """将一次真实反馈变为边界内的固定保持目标，不修改原始反馈。
+
+        fold-30 的 J4 实测为 2.147，官方上限为 2.146755。直接回发实测值
+        会被严格限位拒绝。这里只允许不超过 1 mrad 的边界差异，将保持目标
+        收到官方区间内的整 mrad 边界（该例为 2.146）。仅边界附近的值会调整。
+        明显越界或无效反馈仍报控制故障；普通 move_joints 的限位检查不放宽。
+        此函数不读取设备、不发送指令，只供控制进程捕获保持目标时调用。
+        """
+        try:
+            feedback = self._array_from_input(joints, (NERO_DOF,))
+        except ValueError as exc:
+            raise RuntimeError("保持反馈无效 Invalid joint feedback for hold") from exc
+        lower, upper = self._joint_limits.T
+        tolerance = NERO_FEEDBACK_BOUNDARY_TOLERANCE_RAD
+        if np.any(feedback < lower - tolerance - 1e-9) or np.any(feedback > upper + tolerance + 1e-9):
+            raise RuntimeError("保持反馈明显越限 Hold feedback exceeds joint boundary tolerance: "
+                               f"joints={feedback.tolist()}, limits={self._joint_limits.tolist()}")
+        inside_lower = np.ceil(lower / tolerance) * tolerance
+        inside_upper = np.floor(upper / tolerance) * tolerance
+        return np.clip(feedback, inside_lower, inside_upper)
 
     @staticmethod
     def _validate_speed_percent(speed_percent: Any) -> int:
@@ -831,13 +922,22 @@ class NeroArm:
         可选映射 ``set_speed_percent()`` 后映射 ``move_j()`` 一次，不等待完成；
         连续目标频率必须经真机逐级验证。
         """
-        speed = self._prepare_motion(speed_percent)
-        command = self.validate_joint_command(
-            joints, max_joint_delta=max_joint_delta,
-        )
+        # 仅把发送前的参数/目标校验标记为可恢复拒绝。SDK 发送期间的异常不能
+        # 据此宣称“没有执行”，仍原样交给上层作为设备/通信故障处理。
+        try:
+            speed = self._prepare_motion(speed_percent)
+            command = self.validate_joint_command(joints, max_joint_delta=max_joint_delta)
+        except ValueError as exc:
+            raise CommandRejected(str(exc)) from exc
         if speed is not None:
             self._driver.set_speed_percent(speed)
         self._driver.move_j(command.tolist())
+
+        # 与 JS 路径相同：固定 SDK 会缓存部分 CAN 发送错误而不抛异常，
+        # 普通 J 单次下发也必须将该故障报告给调用方。
+        error = self._driver.get_comm_error()
+        if error is not None:
+            raise RuntimeError(f"Nero joint send failed on {self._can_channel}: {error}")
 
     def move_js(self, joints: Any) -> None:
         """验证后以 JS（Follower）模式非阻塞地发送七轴关节目标。
@@ -934,11 +1034,17 @@ class NeroArm:
         可选映射 ``set_speed_percent()`` 后映射 ``move_l()``；不等待完成，官方不
         承诺其可用作连续目标流。
         """
-        speed = self._prepare_motion(speed_percent)
-        command = self._validate_pose(pose)
+        try:
+            speed = self._prepare_motion(speed_percent)
+            command = self._validate_pose(pose)
+        except ValueError as exc:
+            raise CommandRejected(str(exc)) from exc
         if speed is not None:
             self._driver.set_speed_percent(speed)
         self._driver.move_l(command.tolist())
+        error = self._driver.get_comm_error()
+        if error is not None:
+            raise RuntimeError(f"Nero linear send failed on {self._can_channel}: {error}")
 
     def set_tcp_offset(self, pose: List[float]) -> None:
         self._driver.set_tcp_offset(pose)
@@ -958,8 +1064,9 @@ class NeroArm:
 
         Notes
         -----
-        映射 ``Driver.electronic_emergency_stop()``；不等待，急停后 reset 可能
-        造成机械臂下落。
+        映射 ``Driver.electronic_emergency_stop()``。SDK 定义为阻尼急停，
+        不承诺固定位置保持；现场已观察到下落，因此不能用作空中悬停。
+        不等待停止确认；急停后 reset 同样可能造成机械臂下落。
         """
         self._require_connected()
         self._driver.electronic_emergency_stop()

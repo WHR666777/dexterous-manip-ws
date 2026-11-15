@@ -73,6 +73,19 @@ def test_invalid_hand_feedback_settings(tmp_path, key, value):
         load_config(path)
 
 
+@pytest.mark.parametrize('key,value', [
+    ('ik_joint_limit_margin_deg', -1), ('ik_joint_limit_margin_deg', float('nan')),
+    ('ik_feedback_limit_tolerance_deg', -1), ('ik_feedback_limit_tolerance_deg', float('inf')),
+])
+def test_invalid_ik_joint_limit_settings(tmp_path, key, value):
+    config = load_config(Path(__file__).resolve().parents[1] / 'configs/pico4_nero_l20.yaml')
+    config['arm'][key] = value
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match=f'arm.{key}'):
+        load_config(path)
+
+
 @pytest.mark.parametrize("section,key,value", [
     (None, "input_device", "other"), ("pico4", "side", "left"),
     ("pico4", "relay_host", "0.0.0.0"), ("pico4", "relay_port", 0),

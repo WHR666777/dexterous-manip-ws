@@ -36,6 +36,10 @@ class _Pause(Exception):
     """A recoverable failure that requires a new anchor for both sides."""
 
 
+class _IKHold(Exception):
+    """Skip this paired cycle and retry fresh targets without losing the anchor."""
+
+
 class _Quit(Exception):
     pass
 
@@ -90,6 +94,7 @@ class _SideController:
         self.side, self.config, self.control = side, config, control
         self.arm = self.hand = self.feedback = self.ik = self.retargeter = self.compute = None
         self.tracker = self.last_target = self.flange_to_tcp = None
+        self.ik_hold_reason = None
 
     def start(self):
         config = self.config
@@ -143,6 +148,7 @@ class _SideController:
             self.last_target = flange.copy()
         if self.retargeter is not None:
             self.retargeter.reset(self.feedback.get_latest().positions_raw)
+        self.ik_hold_reason = None
 
     def prepare(self, frame):
         if not _fresh(frame, self.config):
@@ -164,6 +170,8 @@ class _SideController:
                 raise _Pause("Anchor required")
             target_position, target_quaternion = self.tracker.update(position, quaternion)
             target = position_quaternion_to_matrix(target_position, target_quaternion)
+            if not self.gate.accept(target, (target @ self.flange_to_tcp)[:3, 3], commit=False):
+                raise _Pause(self.gate.reason)
             stage = time.perf_counter()
             seed = self.arm.get_joint_positions().copy()
             stages["timing_seed_feedback_s"] = time.perf_counter() - stage
@@ -171,11 +179,14 @@ class _SideController:
             action = self.ik.solve(target, seed)
             stages["timing_ik_s"] = time.perf_counter() - stage
             if action is None:
-                single._print_ik_failure_diagnostics(self.ik, seed, target, self.last_target)
-                raise _Pause(self.ik.last_diagnostics.get("code", "IK failed"))
-            if not self.gate.accept(target, (target @ self.flange_to_tcp)[:3, 3]):
-                raise _Pause(self.gate.reason)
-            self.last_target = target.copy()
+                reason = self.ik.last_diagnostics.get("code", "IK failed")
+                if reason != self.ik_hold_reason:
+                    single._print_ik_failure_diagnostics(self.ik, seed, target, self.last_target)
+                if reason in single.RETRYABLE_IK_CODES:
+                    self.ik_hold_reason = reason
+                    raise _IKHold(reason)
+                raise _Pause(reason)
+            self.ik_hold_reason = None
         if self.retargeter is not None:
             stage = time.perf_counter()
             _, hand_action = self.retargeter.retarget(frame.landmarks)
@@ -196,6 +207,11 @@ class _SideController:
             timing_prepare_s=time.perf_counter() - started, **stages, **diagnostics,
         )
 
+    def cancel_prepared(self, row):
+        # Discard the unsent hand slew baseline when the peer could not prepare.
+        if self.retargeter is not None:
+            self.retargeter.reset(row["observation_hand_position_raw"])
+
     def dispatch(self, row, may_send):
         started = time.perf_counter()
         row.update(arm_sent_at=np.nan, hand_sent_at=np.nan)
@@ -211,6 +227,9 @@ class _SideController:
             send()
             row[f"{name}_sent_at"] = time.monotonic()
             row[f"timing_{name}_send_s"] = time.perf_counter() - stage
+        if self.arm is not None:
+            self.last_target = row["target_base_flange"].copy()
+            self.gate.reanchor(self.last_target)
         row["timing_hand_send_wait_s"] = getattr(self.hand, "last_position_send_wait_s", 0.0)
         stage = time.perf_counter()
         row.update(
@@ -272,6 +291,8 @@ def _worker_main(side, config, control, connection, paused, stopping):
             cycle, kind = command["cycle"], command["kind"]
             try:
                 if kind == "cancel":
+                    if pending is not None:
+                        runtime.cancel_prepared(pending[2])
                     pending = None
                     continue
                 if kind == "anchor":
@@ -296,6 +317,9 @@ def _worker_main(side, config, control, connection, paused, stopping):
                     reply = dict(kind="result", cycle=cycle, row=row)
                 else:
                     raise RuntimeError(f"Unknown worker command: {kind}")
+            except _IKHold as exc:
+                pending = None
+                reply = dict(kind="ik_hold", cycle=cycle, reason=str(exc))
             except _Pause as exc:
                 paused.set()
                 pending = None
@@ -354,6 +378,7 @@ class _WorkerGroup:
         deadline = time.monotonic() + timeout_s
         pending = {connection: side for side, connection in self.connections.items()}
         replies = {}
+        holds = []
         while pending:
             check_keys()
             remaining = deadline - time.monotonic()
@@ -375,6 +400,10 @@ class _WorkerGroup:
                 if reply["kind"] == "paused":
                     self.paused.set()
                     raise _Pause(f"{side}: {reply['reason']}")
+                if reply["kind"] == "ik_hold" and kind == "prepared":
+                    holds.append(f"{side}: {reply['reason']}")
+                    del pending[connection]
+                    continue
                 if reply["kind"] != kind:
                     raise RuntimeError(f"{side}: expected {kind}, got {reply['kind']}")
                 replies[side] = reply
@@ -384,6 +413,8 @@ class _WorkerGroup:
                     self.paused.set()
                     raise RuntimeError(f"{side} worker exited ({self.processes[side].exitcode})")
         check_keys()
+        if holds:
+            raise _IKHold("; ".join(holds))
         return replies
 
     def check_health(self):
@@ -469,6 +500,7 @@ def run(config, control, record_dir=None):
     timing = _BimanualTiming(float(config["control_hz"]))
     pending_keys = deque()
     cycle = 0
+    ik_holding = False
     try:
         source = single._input_device(config)
         _check_relay(source, config)
@@ -517,6 +549,7 @@ def run(config, control, record_dir=None):
                         print(f"PAUSED: {exc}; press R with both hands tracked.")
                     else:
                         workers.paused.clear()
+                        ik_holding = False
                         print("Both sides re-anchored; streaming resumed.")
                     continue
                 if workers.paused.is_set():
@@ -536,11 +569,22 @@ def run(config, control, record_dir=None):
                     workers.request("commit", cycle)
                     results = workers.collect("result", cycle, timeout, check_keys)
                     dispatch_wait = time.perf_counter() - stage
+                except _IKHold as exc:
+                    workers.request("cancel", cycle)
+                    if not ik_holding:
+                        print(f"IK HOLD: {exc}; both sides skipped this cycle. Move hands back "
+                              "toward the last reachable pose, or press R to re-anchor.")
+                    ik_holding = True
+                    time.sleep(max(0.0, period - (time.perf_counter() - started)))
+                    continue
                 except _Pause as exc:
                     workers.paused.set()
                     workers.request("cancel", cycle)
                     print(f"PAUSED: {exc}; press R to re-anchor both sides.")
                     continue
+                if ik_holding:
+                    print("Both IK targets reachable again; command streaming resumed.")
+                    ik_holding = False
                 row = dict(timestamp_monotonic=time.monotonic(),
                            observation_timestamp_monotonic=observed_at, cycle_id=cycle,
                            timing_prepare_wait_s=prepare_wait, timing_dispatch_wait_s=dispatch_wait)

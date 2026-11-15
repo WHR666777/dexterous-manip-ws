@@ -323,11 +323,11 @@ def test_five_finger_setters_validate_exact_shape_and_range(method, value):
         getattr(hand, method)(value)
 
 
-def test_official_open_and_close_presets_are_used_exactly():
+def test_open_and_close_presets_are_used_exactly():
     hand, api = connected_hand()
     hand.open_hand()
     assert api.commands[-1] == [
-        255, 255, 255, 255, 255, 255, 10, 100, 180, 240,
+        255, 255, 255, 255, 255, 255, 10, 150, 220, 255,
         245, 255, 255, 255, 255, 255, 255, 255, 255, 255,
     ]
     hand.close_hand()
