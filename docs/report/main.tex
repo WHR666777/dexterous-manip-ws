@@ -1,0 +1,197 @@
+% !TEX program = xelatex
+% !BIB program = bibtex
+\documentclass[UTF8,a4paper,12pt,zihao=-4]{ctexart}
+
+% 页面与版式
+\usepackage[top=2.5cm,bottom=2.5cm,left=2.6cm,right=2.6cm,headheight=15pt]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+
+% 数学与符号
+\usepackage{amsmath,amssymb,amsfonts,mathtools}
+\usepackage{bm}
+\usepackage{siunitx}
+
+% 图表与浮动体
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\captionsetup{font=small,labelfont=bf,labelsep=space}
+
+% 绘图
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric,arrows.meta,positioning,fit,calc,backgrounds}
+
+% 代码列表与颜色
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+
+% 东南大学毕业论文要求的 GB/T 7714 顺序编码制参考文献
+\usepackage[sort&compress]{gbt7714}
+
+% 超链接（置于导言区末尾）
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue!70!black,urlcolor=blue!70!black]{hyperref}
+
+% 待填占位符宏
+\newcommand{\todo}[1]{\textcolor{red!80!black}{\textbf{[待填 #1]}}}
+
+% 常用数学算子
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\clip}{clip}
+\DeclareMathOperator{\wrap}{wrap}
+\newcommand{\SE}{\mathrm{SE}(3)}
+\newcommand{\SO}{\mathrm{SO}(3)}
+\newcommand{\so}{\mathfrak{so}(3)}
+
+% 代码排版样式
+\definecolor{codebg}{RGB}{248,249,250}
+\definecolor{codeframe}{RGB}{218,222,228}
+\definecolor{codekw}{RGB}{0,92,197}
+\definecolor{codecm}{RGB}{106,115,125}
+\definecolor{codestr}{RGB}{3,47,98}
+
+\lstset{
+  language=Python,
+  basicstyle=\footnotesize\ttfamily,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape,
+  stringstyle=\color{codestr},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  breaklines=true,
+  showstringspaces=false,
+  tabsize=4,
+  xleftmargin=1.5em,
+  framexleftmargin=1.2em
+}
+
+% 页眉页脚
+% \pagestyle{plain}
+% \fancyhf{}
+% \fancyfoot[C]{\small 第~\thepage~页\quad 共~\pageref*{LastPage}~页}
+% \renewcommand{\headrulewidth}{0.4pt}
+
+% 章节标题格式
+% \ctexset{
+%   section = {
+%     format = \Large\bfseries\raggedright,
+%     beforeskip = 1.4ex plus 0.4ex minus 0.2ex,
+%     afterskip = 1.0ex plus 0.2ex
+%   },
+%   subsection = {
+%     format = \large\bfseries\raggedright,
+%     beforeskip = 1.1ex plus 0.3ex minus 0.2ex,
+%     afterskip = 0.7ex plus 0.2ex
+%   },
+%   subsubsection = {
+%     format = \normalsize\bfseries\raggedright,
+%     beforeskip = 0.8ex plus 0.2ex minus 0.1ex,
+%     afterskip = 0.5ex plus 0.1ex
+%   }
+% }
+
+\begin{document}
+
+% =============================================================
+% 封面（对齐课程模板 template.docx）
+% =============================================================
+\begin{titlepage}
+  \centering
+  \vspace*{1.2cm}
+  {\zihao{1}\bfseries 东\quad 南\quad 大\quad 学\par}
+  \vspace{0.9cm}
+  {\zihao{2}\bfseries 《智能机器人系统综合设计》\par}
+  \vspace{0.5cm}
+  {\zihao{2}\bfseries 项\quad 目\quad 报\quad 告\par}
+  \vspace{1.5cm}
+
+  {\zihao{3}\bfseries 项目名称\quad 基于 Retargeting 与机器人技能学习的布料关键点检测与灵巧操作\par}
+  \vspace{0.8cm}
+  {\zihao{4} 2026 年 11 月 15 日\par}
+  \vspace{0.5cm}
+  {\zihao{4} 第~\todo{组号}~小组\par}
+  \vspace{1.2cm}
+
+  \renewcommand{\arraystretch}{1.75}
+  \begin{tabular}{p{3.2cm}p{4.5cm}p{2.2cm}p{4.2cm}}
+    组员 1 姓名 & \todo{姓名 1} & 学号 & \todo{学号 1} \\ \cline{2-2}\cline{4-4}
+    组员 2 姓名 & \todo{姓名 2} & 学号 & \todo{学号 2} \\ \cline{2-2}\cline{4-4}
+    组员 3 姓名 & \todo{姓名 3} & 学号 & \todo{学号 3} \\ \cline{2-2}\cline{4-4}
+    组员 4 姓名 & \todo{姓名 4} & 学号 & \todo{学号 4} \\ \cline{2-2}\cline{4-4}
+    评定成绩   &               & 审阅教师 & \todo{教师姓名} \\ \cline{2-2}\cline{4-4}
+  \end{tabular}
+  \vfill
+\end{titlepage}
+
+% =============================================================
+% 摘要与目录
+% =============================================================
+\pagenumbering{Roman}
+\section*{摘\quad 要}
+\addcontentsline{toc}{section}{摘要}
+
+使用双臂多指灵巧手完成柔性毛巾连续折叠，既要适应织物随机初始摆放引起的大范围抓取位姿变化，又要协调多指在双层织物边缘的捏持与翻折动作。本项目基于两台 AgileX Nero 七自由度机械臂、两套 LinkerHand L20 多指灵巧手及单台 Intel RealSense L515 激光雷达相机组成的 46 自由度双臂操作平台，设计并实现了一套结合视觉遥操作、动作分块模仿学习与代码生成智能体的自主折布系统。
+
+在标定与遥操作层面，针对多指灵巧手缺乏固定几何中心的问题，构建了单目 RGB-D 相机外参与指尖虚拟工具中心点（TCP）的九自由度非线性最小二乘联合标定模型，并借助共享相机外参统一双臂公共任务坐标系。基于 Pico 4 手部骨骼追踪搭建了双臂增量遥操作链路，机械臂侧采用基于 Pinocchio 与 $\SO$ 对数映射解析雅可比的七轴局部逆运动学求解器，灵巧手侧采用融合分节骨骼缩放与对指距离权重的解析梯度序列二次规划重定向算法，录制了一次对折与二次对折各 60 条轨迹的多模态示教数据集。在模仿学习层面，基于条件变分自编码器与并行查询解码器训练了 46 维动作分块变换器（ACT）策略，并设计了结合冻结 DINOv3 ViT-S/16 视觉主干与训练期本体状态高斯噪声注入的表征改进模型，缓解小样本训练下网络对本体关节轨迹的过度依赖。在任务规划与系统集成层面，构建了基于模型上下文协议（MCP）与持久 Python 工作进程的双臂折布智能体。系统由智能体通过像素三维反投影与在线补抓完成任意平铺毛巾的一次对折与居中摆正，再经双臂起始关节回位与示范首帧五指手型复现完成起始状态对齐，交由双臂 ACT 策略执行二次对折。模块基准测试与连续实机试验验证了标定精度、逆运动学实时性及双阶段自主折布流程的有效性。
+
+\par\vspace{1em}
+\noindent\textbf{关键词}\quad 双臂灵巧操作；柔性织物折叠；手部运动重定向；动作分块变换器；代码生成智能体
+
+\newpage
+\tableofcontents
+\newpage
+
+% =============================================================
+% 正文各章
+% =============================================================
+\pagenumbering{arabic}
+
+\input{sec1_2_intro_problem}
+\input{sec3_specs}
+\input{sec4_1_calibration}
+\input{sec4_2_teleop}
+\input{sec4_3_act}
+\input{sec4_4_agent_harness}
+\input{sec4_5_integration}
+\input{sec5_6_7_eval_conc}
+
+% =============================================================
+% 参考文献（东南大学毕业论文 GB/T 7714 格式）
+% =============================================================
+\newpage
+\phantomsection
+\addcontentsline{toc}{section}{参考文献}
+\bibliographystyle{gbt7714-numeric}
+\bibliography{refs}
+
+% =============================================================
+% 致谢
+% =============================================================
+\vspace{1.5em}
+\phantomsection
+\section*{致\quad 谢}
+\addcontentsline{toc}{section}{致谢}
+
+感谢《智能机器人系统综合设计》课程授课教师~\todo{指导教师姓名}~老师在课题方案确定、双臂标定设计与阶段检查中给予的指导与修改意见。感谢东南大学相关机器人实验室提供双臂 AgileX Nero 机械臂、LinkerHand L20 灵巧手、深度相机及计算工作站等实验平台支持，同时感谢实验室同学在 CAN 总线配置与实机安全规范方面提供的协助。最后感谢小组成员在数据采集、算法实现与实机调试各阶段的分工合作。
+
+% =============================================================
+% 附录
+% =============================================================
+\newpage
+\appendix
+\input{sec8_appendix}
+
+\end{document}

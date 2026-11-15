@@ -1,0 +1,98 @@
+% -------------------------------------------------------------
+\subsection{动作分块策略网络建模与冻结 DINOv3 视觉表征改进}
+\label{subsec:act}
+% -------------------------------------------------------------
+
+基于采集到的 46 维双臂灵巧手示教数据集，模仿学习模块需要从当前彩色图像与本体反馈直接生成双臂双灵巧手的协同控制目标。常规单步行为克隆策略 $\pi(\bm{a}_t \mid \bm{o}_t)$ 在每拍独立回归单步动作，微小预测偏差会将状态推离训练轨迹邻域，随控制步数增长形成明显的累积误差。同时，人类操作者在遥操作折布时存在合理的速度波动与路径差异，同一视觉观测下未来轨迹呈多峰分布，直接最小化确定性回归损失容易使输出落入不同示范分支之间的无效均值区域。为此，本系统基于 LeRobot 框架~\cite{cadene2026lerobot}构建了面向 46 维动作空间的动作分块变换器（ACT）~\cite{zhao2023learning}，并进一步设计了结合冻结 DINOv3 视觉主干与状态高斯噪声正则的表征改进模型。
+
+\subsubsection{动作分块与条件变分自编码器建模}
+
+动作分块机制将策略单次预测目标从单步动作 $\bm{a}_t \in \mathbb{R}^{D_a}$（$D_a = 46$）扩展为未来连续 $k$ 个时间步的动作块 $\bm{A}_t = \bm{a}_{t:t+k} = [\bm{a}_t, \bm{a}_{t+1}, \dots, \bm{a}_{t+k-1}] \in \mathbb{R}^{k\times D_a}$。本系统取块长度 $k = 60$，对应 $20\,\mathrm{Hz}$ 控制频率下 $3.0\,\mathrm{s}$ 的预测视野，在缩减序列有效决策步数的同时保持多指闭合与抬臂翻折之间的时序连贯关系。
+
+为刻画给定观测 $(\bm{I}_t, \bm{s}_t)$ 下示范动作块 $\bm{A}_t$ 的多模态分布，ACT 采用条件变分自编码器（CVAE）~\cite{kingma2014auto}框架引入连续潜变量 $\bm{z} \in \mathbb{R}^{d_z}$（$d_z = 32$），设先验分布为标准正态分布 $p(\bm{z}) = \mathcal{N}(\bm{0}, \bm{I}_{d_z})$。引入近似后验编码器 $q_{\phi}(\bm{z} \mid \bm{A}_t, \bm{s}_t)$ 与条件生成解码器 $p_{\theta}(\bm{A}_t \mid \bm{I}_t, \bm{s}_t, \bm{z})$，条件对数似然满足如下变分证据下界（ELBO）
+\begin{equation}
+  \log p_{\theta}(\bm{A}_t \mid \bm{I}_t, \bm{s}_t) \ge \mathbb{E}_{q_{\phi}(\bm{z} \mid \bm{A}_t, \bm{s}_t)}\!\left[\log p_{\theta}(\bm{A}_t \mid \bm{I}_t, \bm{s}_t, \bm{z})\right] - D_{\mathrm{KL}}\!\left(q_{\phi}(\bm{z} \mid \bm{A}_t, \bm{s}_t) \,\|\, p(\bm{z})\right).
+  \label{eq:cvae-elbo}
+\end{equation}
+近似后验编码器 $q_{\phi}$ 仅在训练期启用且不接收图像输入，它将可学习汇聚向量 $\bm{e}_{\text{cls}}$、线性投影后的标准化当前状态 $\bar{\bm{s}}_t$ 以及标准化目标动作块 $\bar{\bm{A}}_t$（叠加一维正弦时序位置编码）拼成长度为 $k + 2$ 的序列送入双向 Transformer 编码器，取首位置输出预测对角高斯后验均值 $\bm{\mu}_{\phi} \in \mathbb{R}^{d_z}$ 与对数方差 $\log\bm{\sigma}_{\phi}^2 \in \mathbb{R}^{d_z}$，并按重参数化公式采样潜变量
+\begin{equation}
+  \bm{z} = \bm{\mu}_{\phi}(\bm{A}_t, \bm{s}_t) + \bm{\sigma}_{\phi}(\bm{A}_t, \bm{s}_t) \odot \bm{\xi}, \qquad \bm{\xi} \sim \mathcal{N}(\bm{0}, \bm{I}_{d_z}).
+  \label{eq:cvae-reparam}
+\end{equation}
+
+在解码侧，当采样窗口接近示范轨迹末尾不足 $k$ 步时，超出部分填充零值并记录布尔填充掩码 $\text{pad}_{t+j} \in \{0, 1\}$，记有效步掩码为 $m_{t+j} = 1 - \text{pad}_{t+j}$。参考 Zhao 等~\cite{zhao2023learning}在绝对位置控制中使用拉普拉斯似然假设（对应 $L_1$ 重建误差）以获得更低稳态跟踪偏差的做法，结合对角高斯分布相对于标准正态先验的闭式 KL 散度，单样本训练损失写为
+\begin{equation}
+  \mathcal{L}_{\text{ACT}}(\theta, \phi) = \frac{1}{D_a \sum_{j=0}^{k-1} m_{t+j}} \sum_{j=0}^{k-1} m_{t+j} \left\|\hat{\bm{a}}_{t+j} - \bar{\bm{a}}_{t+j}\right\|_1
+  + \frac{\beta}{2} \sum_{d=1}^{d_z} \left(\mu_{\phi,d}^2 + \sigma_{\phi,d}^2 - 1 - \log\sigma_{\phi,d}^2\right),
+  \label{eq:act-loss}
+\end{equation}
+其中正则系数取 $\beta = 10$。在线推理阶段移除后验编码器 $q_{\phi}$，将潜变量固定置为先验均值 $\bm{z} = \bm{0}$，由确定性映射 $\hat{\bm{A}}_t = \pi_{\theta}(\bm{I}_t, \bm{s}_t, \bm{0})$ 直接生成示范主模态动作序列。
+
+\subsubsection{基于 DETR 并行查询的非自回归解码与分段动作队列}
+
+策略解码器采用 DETR~\cite{carion2020end} 的多模态编码器与并行查询解码器架构，整体数据流与在线动作队列调度见图~\ref{fig:act-arch}。在基线视觉分支中，$480\times 640\times 3$ RGB 图像归一化后输入带固定批归一化统计量（\texttt{FrozenBatchNorm2d}）的 ResNet18 主干，输出空间特征图并经 $1\times 1$ 卷积映射至隐藏维度 $d_{\text{model}} = 512$，重排为 $H'\times W' = 15\times 20$ 共 $300$ 个局部视觉特征向量。为保留织物边缘在图像平面上的二维几何坐标，对网格坐标 $(u', v') \in \{0,\dots,W'-1\}\times\{0,\dots,H'-1\}$ 作归一化累积映射 $(\tilde{u}', \tilde{v}') \in (0, 2\pi]^2$，分别在通道前后各 $d_{\text{model}}/2 = 256$ 维构造二维正弦余弦位置编码
+\begin{equation}
+  \begin{aligned}
+    \bm{P}_{2\text{D}}(v', u', 2i) &= \sin\!\left(\frac{\tilde{u}'}{\omega_i}\right), &\quad
+    \bm{P}_{2\text{D}}(v', u', 2i+1) &= \cos\!\left(\frac{\tilde{u}'}{\omega_i}\right), \\
+    \bm{P}_{2\text{D}}\!\left(v', u', \frac{d_{\text{model}}}{2} + 2i\right) &= \sin\!\left(\frac{\tilde{v}'}{\omega_i}\right), &\quad
+    \bm{P}_{2\text{D}}\!\left(v', u', \frac{d_{\text{model}}}{2} + 2i + 1\right) &= \cos\!\left(\frac{\tilde{v}'}{\omega_i}\right),
+  \end{aligned}
+  \label{eq:pos-embed-2d}
+\end{equation}
+其中波长尺度 $\omega_i = 10000^{4i / d_{\text{model}}}$，$i = 0, 1, \dots, d_{\text{model}}/4 - 1$。随后将 46 维标准化状态 $\bar{\bm{s}}_t$ 与 32 维潜变量 $\bm{z}$ 分别经线性层映射为 $512$ 维向量并叠加可学习模态嵌入，与 300 个视觉特征拼接为长度为 $302$ 的序列，经多层 Transformer 编码器执行跨模态自注意力融合得到上下文记忆矩阵 $\bm{M}_{\text{enc}} \in \mathbb{R}^{302\times 512}$。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  box/.style={rectangle, draw=black!75, rounded corners=3pt, minimum height=0.85cm,
+              align=center, font=\footnotesize, fill=gray!8},
+   arrow/.style={-{Stealth[length=2.3mm]}, semithick}
+]
+  % 输入与编码器
+  \node[box, fill=blue!8, minimum width=2.5cm] (img) at (0, 1.8) {RGB 图像 $\bm{I}_t$\\$480\times 640\times 3$};
+  \node[box, fill=blue!12, minimum width=2.9cm] (backbone) at (3.3, 1.8) {ResNet18 或冻结 DINOv3\\$15\times 20\times 512$ 特征图};
+  \node[box, fill=teal!10, minimum width=2.5cm] (state) at (0, 0.4) {46 维本体状态 $\bar{\bm{s}}_t$};
+  \node[box, fill=purple!8, minimum width=2.5cm] (latent) at (0, -1.0) {潜变量 $\bm{z}$\\训练 $q_{\phi}$ / 推理 $\bm{0}$};
+
+  \node[box, fill=orange!12, minimum width=2.8cm, minimum height=2.2cm] (enc) at (6.9, 0.4) {Transformer\\Encoder\\(302 特征序列)};
+  \node[box, fill=orange!16, minimum width=2.7cm, minimum height=1.5cm] (dec) at (10.3, 0.4) {DETR 并行查询\\Decoder\\($k=60$ 查询向量)};
+  \node[box, fill=green!12, minimum width=3.1cm] (queue) at (10.3, -1.7) {动作队列（容量 $n=20$）\\空时推入前 20 步，逐拍弹出 $\hat{\bm{a}}_t$};
+
+  \draw[arrow] (img) -- (backbone);
+  \draw[arrow] (backbone.east) -- node[above, font=\scriptsize] {300 视觉特征} ([yshift=0.6cm]enc.west);
+  \draw[arrow] (state.east) -- node[above, font=\scriptsize] {状态特征} (enc.west);
+  \draw[arrow] (latent.east) -- ++(2.5,0) |- ([yshift=-0.6cm]enc.west);
+  \draw[arrow] (enc) -- node[above, font=\scriptsize] {$\bm{M}_{\text{enc}}$} (dec);
+  \draw[arrow] (dec.south) -- node[right, font=\scriptsize] {$\hat{\bm{A}}_t \in \mathbb{R}^{60\times 46}$} (queue.north);
+\end{tikzpicture}
+\caption{双臂 ACT 策略网络跨模态编码、非自回归并行解码与动作队列执行机制}
+\label{fig:act-arch}
+\end{figure}
+
+解码器不采用逐步自回归递推，而是配置 $k = 60$ 个可学习时间步位置查询向量 $\bm{Q}_{\text{pos}} \in \mathbb{R}^{60\times 512}$，通过多层交叉注意力一次性从编码器记忆 $\bm{M}_{\text{enc}}$ 中提取各未来时刻特征，再经线性输出层并行预测并按训练集动作均值与标准差 $(\bm{\mu}_a, \bm{\sigma}_a)$ 反归一化得到物理动作块
+\begin{align}
+  \bm{H}_{\text{dec}} &= \mathrm{TransformerDecoder}\!\left(\bm{0}_{k\times 512} + \bm{Q}_{\text{pos}}, \; \bm{M}_{\text{enc}}\right), \notag\\
+  \hat{\bm{A}}_t &= \bm{\sigma}_a \odot \left(\bm{H}_{\text{dec}}\bm{W}_{\text{out}} + \bm{b}_{\text{out}}\right) + \bm{\mu}_a.
+  \label{eq:detr-decode}
+\end{align}
+
+原论文在 14 维平行夹爪平台 ALOHA 上每步重复执行网络前向计算，并对覆盖当前时刻的历史预测按指数权重 $w_m = \exp(-0.01m)$ 作时间加权集成。在 46 维多指灵巧手平台上，相邻时刻独立预测的多指闭合时机若存在轻微偏移，跨时刻加权平均容易削弱指尖捏合力度，且每步跨进程传输未压缩图像与触发 GPU 推理会增加控制周期抖动。本系统因此采用预测块长 $k=60$、队列执行步长 $n=20$ 的分段滚动控制机制。每次启动策略会话时清空内部队列；当队列为空时，读取最新观测 $(\bm{I}_t, \bm{s}_t)$ 执行一次网络推理，将 $\hat{\bm{A}}_t$ 的前 $n = 20$ 步压入队列并舍弃后 $40$ 步远期预测；在随后的 $20$ 个控制周期（$1.0\,\mathrm{s}$）内，每拍直接从队列头部弹出一步 46 维目标下发执行，队列耗尽后再依据现场新图像触发下一轮推理，将 GPU 前向频率降至 $1\,\mathrm{Hz}$。
+
+\subsubsection{基于冻结 DINOv3 视觉主干与状态噪声正则的模型改进}
+
+当单任务示教规模仅为 60 条轨迹且背景桌面相对固定时，端到端微调全部卷积主干参数存在两类过拟合风险。一方面，高容量视觉主干容易直接记忆训练帧的环境亮度或机械臂外壳在画面中的特定像素位置，导致光照微变时视觉注意力偏移；另一方面，由于连续遥操作轨迹中当前关节状态 $\bm{s}_t$ 与紧随其后的动作序列存在强自相关性，解码器容易仅凭本体关节状态外推后续轨迹而弱化对图像中毛巾边缘变化的响应。
+
+针对上述问题，本项目构建了结合冻结预训练自监督主干与状态高斯噪声正则的改进模型 \texttt{DINOv3ACTPolicy}。视觉分支替换为在 16.89 亿张图像（LVD-1689M）上预训练的 DINOv3 ViT-S/16~\cite{simeoni2025dinov3}，训练全程冻结其全部权重并保持评估模式。输入 $H\times W = 480\times 640$ 图像按补丁尺寸 $P = 16$ 划分为网格，提取归一化局部补丁特征并剔除分类与寄存器标记后重排为 $\bm{F}_{\text{patch}} \in \mathbb{R}^{384\times 30\times 40}$。为保持与后续编码器一致的 300 网格长度而避免自注意力计算开销翻倍，对 $\bm{F}_{\text{patch}}$ 执行核尺寸与步长均为 $2$ 的二维空间平均池化，再经一层可训练的 $1\times 1$ 卷积映射至 $512$ 维通道空间
+\begin{equation}
+  \bm{F}_{\text{dino}} = \mathrm{Conv}_{1\times 1}\!\left(\mathrm{AvgPool}_{2\times 2}\!\left(\mathrm{Reshape}\!\left(\Phi_{\text{DINOv3}}^{\text{frozen}}(\bm{I}_t)\right)\right)\right) \in \mathbb{R}^{512\times 15\times 20},
+  \label{eq:dinov3-proj}
+\end{equation}
+再叠加式~\eqref{eq:pos-embed-2d} 所示的二维正弦位置编码接入跨模态 Transformer 编码器。
+
+在训练增广与状态正则设计上，考虑到随机翻转、旋转或裁剪均会改变织物像素与左右固定机械臂基座之间的三维空间对应关系，图像增广仅对亮度、对比度与饱和度在 $[0.9, 1.1]$ 区间内施加不改变像素坐标的光度微扰。同时，在训练前向传播中对归一化后的 46 维本体状态输入 $\bar{\bm{s}}_t$ 注入独立同分布零均值高斯噪声
+\begin{equation}
+  \tilde{\bm{s}}_t = \bar{\bm{s}}_t + \bm{\epsilon}_t, \qquad \bm{\epsilon}_t \sim \mathcal{N}(\bm{0}, \sigma_s^2 \bm{I}_{46}),
+  \label{eq:state-noise}
+\end{equation}
+其中噪声标准差设为 $\sigma_s = 0.01$，而式~\eqref{eq:act-loss} 中的动作监督标签 $\bar{\bm{A}}_t$ 保持无噪真值。该扰动降低了单帧关节反馈对未来轨迹的确定性指示精度，促使解码器通过交叉注意力从 DINOv3 密集视觉特征中读取毛巾折边位置以修正动作预测。

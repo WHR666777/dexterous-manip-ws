@@ -1,0 +1,95 @@
+% -------------------------------------------------------------
+\subsection{基于代码生成与持久工作进程的双臂折布智能体}
+\label{subsec:agent-harness}
+% -------------------------------------------------------------
+
+在连续两次折布的第一阶段，单层矩形毛巾随机平铺于工作垫表面，其中心位置、平面偏航角以及四角展平程度在每次试验间变化跨度较大。前期实验使用 60 条一次对折遥操作轨迹训练端到端 ACT 策略时发现，受限于有限样本在二维桌面位置与偏航角组合空间上的稀疏覆盖，当毛巾初始位置偏离示范密集区数厘米时，神经网络预测的腕部轨迹容易在接近布角时抓空或产生折边错位，且缺乏发现抓空后单独退回补抓的恢复机制。相比之下，平铺单层毛巾的四个角点在对齐 RGB-D 图像中轮廓清晰，可通过三维像素反投影直接计算抓取位姿。参考 Code as Policies~\cite{liang2023code}、ReKep~\cite{huang2024rekep} 与 Code as Monitor~\cite{zhou2024code} 将多模态视觉推理转化为机器人控制程序与运行期状态检查的思路，本系统设计了面向双臂灵巧手的代码生成智能体框架，负责完成大范围初始摆放条件下的一次对折与居中摆正。
+
+\subsubsection{四层多进程解耦架构与独立安全保持通道}
+
+为隔离多模态模型推理延迟、生成代码运行异常与底层周期总线通信，折布智能体在操作系统层面划分为四个独立进程层级，整体结构见图~\ref{fig:agent-arch}。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  proc/.style={rectangle, draw=black!75, rounded corners=3pt, minimum width=3.2cm,
+               minimum height=1.05cm, align=center, font=\footnotesize, fill=gray!8},
+  arrow/.style={-{Stealth[length=2.3mm]}, semithick}
+]
+  \node[proc, fill=blue!8] (codex) at (0, 2.2) {多模态推理客户端\\(\texttt{codex exec})};
+  \node[proc, fill=orange!10] (mcp) at (4.4, 2.2) {MCP 协调服务\\(\texttt{SessionCoordinator})};
+  \node[proc, fill=teal!10] (worker) at (8.8, 2.2) {持久 Python 工作进程\\(\texttt{worker.py}, 共享命名空间)};
+
+  \node[proc, fill=green!10, minimum width=4.6cm] (bimanual) at (8.8, 0.1) {双臂硬件控制进程 (\texttt{bimanual.py})\\双侧周期线程 + 四路 CAN + L515};
+  \node[proc, fill=red!10] (hold) at (2.2, 0.1) {独立人工位置保持端\\(\texttt{cloth-agent hold})};
+
+  \draw[arrow, <->] (codex) -- node[above, font=\scriptsize] {MCP 工具与图像} (mcp);
+  \draw[arrow, <->] (mcp) -- node[above, font=\scriptsize] {代码单元与输出} (worker);
+  \draw[arrow, <->] (worker) -- node[right, font=\scriptsize] {运动与观测请求} (bimanual);
+  \draw[arrow] (mcp.south) |- ([yshift=0.22cm]bimanual.west);
+  \draw[arrow, thick, draw=red!75!black] (hold) -- node[below, font=\scriptsize] {Unix 数据报直达旁路} (bimanual);
+\end{tikzpicture}
+\caption{双臂折布智能体四层进程架构与独立人工位置保持通道}
+\label{fig:agent-arch}
+\end{figure}
+
+第一层为多模态代码推理客户端，依据任务规程与带像素坐标网格的观测图像逐轮编写简短 Python 代码单元。第二层为基于 FastMCP 构建的模型上下文协议协调服务，仅向推理端开放代码单元执行接口与任务结束声明接口，在每轮代码启动前核验双臂静止状态、分配单调递增的单元准入令牌（\texttt{cell\_id}），并将单元保存的观测图像回传给推理端。第三层为持久运行的 Python 工作进程（\texttt{worker.py}），先对传入代码执行抽象语法树安全筛查以拦截文件系统写操作或子进程调用，再在同一个持久全局字典中顺序运行代码并通过受控对象 \texttt{robo} 访问机器人接口，使前序轮次读取的观测快照、标定矩阵与航点变量可跨轮直接复用。第四层为双臂硬件控制进程（\texttt{bimanual.py}），内部运行左右两套周期控制器并共享全局 RealSense L515 相机，独占四路 SocketCAN 接口，负责运动准入核对、工作空间边界校验与实时状态采样。
+
+为保障实机调试安全，系统设置了一条绕开推理客户端、MCP 协调服务与 Python 工作进程的独立人工位置保持通道。操作员在终端执行保持命令后，报文经专用 Unix 域数据报套接字直达双臂硬件控制进程，控制进程立即吊销当前活动准入令牌、中止正在执行的轨迹或子策略，并读取左右机械臂当前真实关节角下发原位保持指令，确保上层任意软件环节阻塞时机械臂仍能受控停稳。
+
+\subsubsection{三维视觉反投影与俯视抓取位姿生成}
+
+智能体每次调用观测接口时，系统将同一时刻采集的彩色图像、米制深度矩阵、相机内参与公共任务系外参封装为只读快照对象。生成代码选取毛巾角点像素 $(u, v)$ 调用 \texttt{pixel\_to\_task} 时，几何模块读取该快照同一像素处的深度值 $z = D(v, u)$ 执行式~\eqref{eq:brown-conrady} 与式~\eqref{eq:camera-backproj} 所示的去畸变反投影，再经公共任务系外参变换输出三维坐标
+\begin{equation}
+  \bm{p}_{\text{task}}(u, v) = \bm{R}_{\text{cam}}^{\text{task}}\bm{c}\!\left(u, v, D(v, u)\right) + \bm{t}_{\text{cam}}^{\text{task}} \in \mathbb{R}^3.
+  \label{eq:agent-pixel-to-task}
+\end{equation}
+若所选像素深度缺失或为零，接口直接抛出异常而不回退至邻域像素或新帧深度，促使上层在有效深度区域内重新选点，避免跨帧错配导致下降高度偏差。
+
+获得毛巾角点的任务系坐标后，需要构造左右灵巧手虚拟 TCP 的六自由度抓取位姿。双臂在台架上关于纵剖面 $y = y_c$ 对称安装，左臂对称初始位置由右臂参考位置经平面镜像给出
+\begin{equation}
+  \bm{p}_{L,\text{sym}} = \diag(1, -1, 1)\bm{p}_{R,\text{init}} + \begin{bmatrix} 0 & 2y_c & 0 \end{bmatrix}^{\top},
+  \label{eq:bimanual-symmetry}
+\end{equation}
+而两侧虚拟工具系在公共任务系下的零偏航俯视基准旋转矩阵已由标定对齐为同一正交阵 $\bm{R}_{\text{ref}}^{\text{task}} \in \SO$。运行期智能体无需手动构造旋转矩阵或四元数，只需指定目标三维位置 $\bm{p} \in \mathbb{R}^3$ 与绕公共任务系 $+Z$ 轴的增量偏航角 $\psi \in \mathbb{R}$，调用 \texttt{top\_down\_pose} 即可生成对应侧虚拟 TCP 的齐次目标位姿
+\begin{equation}
+  \bm{T}_{\text{tcp},s}^{\text{task}}(\bm{p}, \psi) = \begin{bmatrix}
+    \bm{R}_z(\psi)\bm{R}_{\text{ref}}^{\text{task}} & \bm{p} \\[3pt]
+    \bm{0}_{1\times 3} & 1
+  \end{bmatrix} \in \SE, \qquad s \in \{L, R\},
+  \label{eq:top-down-pose}
+\end{equation}
+其中 $\bm{R}_z(\psi) \in \SO$ 为绕 $+Z$ 轴旋转矩阵。调节偏航角 $\psi$ 可使手指捏合平面顺应待折布边切线方向，减小捏角时的织物局部扭转。
+
+\subsubsection{运动原语控制与时间最优轨迹参数化}
+
+在在线折布执行中，工作进程向生成代码提供关节空间点到点原语 \texttt{move\_J}、笛卡尔直线原语 \texttt{move\_L}、双臂同步启动原语 \texttt{move\_both} 以及灵巧手开合原语。对于输入虚拟 TCP 位姿的 \texttt{move\_J} 调用，规划器按式~\eqref{eq:task-tcp-to-base-flange} 换算为基座系法兰目标并调用解析雅可比逆运动学求得终点关节角 $\bm{q}_{\text{goal}}$，在起点与终点之间作离散关节线性内插以校验整段路径不越过关节限位及任务系工作空间立方体，随后将终点交由机械臂固件执行平滑点到点运动。对于近桌面垂直下降与提布所用的 \texttt{move\_L}，当保持俯视姿态 $\bm{R}_{\text{tcp},s}^{\text{task}}$ 恒定从 $\bm{p}_0$ 移至 $\bm{p}_1$ 时，由式~\eqref{eq:task-tcp-to-base-flange} 可知基座系法兰目标姿态同样恒定，法兰原点位移等于虚拟 TCP 位移在基座系下的正交旋转像，因此固件执行的法兰笛卡尔直线插补可保证指尖虚拟 TCP 在任务系中严格沿直线段 $\bm{p}(u) = (1-u)\bm{p}_0 + u\bm{p}_1$（$u \in [0, 1]$）运动。双臂同步原语 \texttt{move\_both} 先在锁外独立完成左右两臂的规划与工作区校验，再在统一互斥锁内核验双侧空闲并在同一单调时钟戳下同步装载两侧轨迹句柄。
+
+除单目标固件原语外，规划模块（\texttt{planning.py}）还实现了面向多笛卡尔航点序列的 $\SE$ 测地线插值与时间最优路径参数化算法。设相邻虚拟 TCP 航点为 $(\bm{p}_0, \bm{R}_0)$ 与 $(\bm{p}_1, \bm{R}_1)$，按位置步长与转角步长确定插值段数后，沿 $\SE$ 测地线生成离散中间位姿（$u \in [0, 1]$）
+\begin{equation}
+  \bm{p}(u) = (1 - u)\bm{p}_0 + u\bm{p}_1, \qquad
+  \bm{R}(u) = \exp\!\left(u\log\!\left(\bm{R}_1\bm{R}_0^{\top}\right)\right)\bm{R}_0,
+  \label{eq:se3-geodesic}
+\end{equation}
+并以相邻前一帧关节解为种子沿途求解逆运动学得到几何关节路径 $\{\bm{q}_m\}_{m=0}^M$。按累积欧氏弧长 $s_m = s_{m-1} + \|\bm{q}_m - \bm{q}_{m-1}\|_2$ 归一化至路径参数 $s \in [0, 1]$ 并构造几何样条 $\bm{q}(s)$ 后，关节速度与加速度由链式法则表出为路径速率 $\dot{s}$ 与路径加速度 $\ddot{s}$ 的函数
+\begin{equation}
+  \dot{\bm{q}}(s) = \bm{q}'(s)\dot{s}, \qquad
+  \ddot{\bm{q}}(s) = \bm{q}''(s)\dot{s}^2 + \bm{q}'(s)\ddot{s}.
+  \label{eq:toppra-chain}
+\end{equation}
+引入平方速率变量 $x(s) = \dot{s}(s)^2 \ge 0$ 与控制变量 $u(s) = \ddot{s}(s)$（满足微分关系 $x'(s) = 2u(s)$），七轴对称速度限位 $|\dot{\bm{q}}| \le \dot{\bm{q}}_{\max}$ 与加速度限位 $|\ddot{\bm{q}}| \le \ddot{\bm{q}}_{\max}$ 在离散弧长网格上转化为关于 $(x, u)$ 的二阶线性不等式组，调用基于可达集分析的 TOPPRA 算法~\cite{pham2018toppra}求解满足边界静止条件 $x(0) = x(1) = 0$ 的时间最优轨线。
+
+为支持任意连续时刻采样，规划器将 TOPPRA 输出时长乘以 $1.05$ 裕量系数后按 $10\,\mathrm{ms}$ 间隔重采样，构建分段三次 Hermite 样条。在第 $r$ 个时间子区间 $\tau = t - t_r \in [0, h_r]$ 上，单关节位置多项式记为 $q_j(\tau) = c_{0,r}\tau^3 + c_{1,r}\tau^2 + c_{2,r}\tau + c_{3,r}$。由于样条重插值可能在网格节点之间产生微幅速度或加速度极值过冲，规划器对每段三次多项式显式求取一阶导数驻点 $\tau_{j,r}^* = \clip(-c_{1,r}/(3c_{0,r}), 0, h_r)$ 及区间端点值，闭式算出整条样条的精确速度峰值与加速度峰值
+\begin{align}
+  v_{\text{peak},j} &= \max_{r}\,\max_{\tau \in \{0,\, h_r,\, \tau_{j,r}^*\}} \left|3c_{0,r}\tau^2 + 2c_{1,r}\tau + c_{2,r}\right|, \notag\\
+  a_{\text{peak},j} &= \max_{r}\,\max_{\tau \in \{0,\, h_r\}} \left|6c_{0,r}\tau + 2c_{1,r}\right|.
+  \label{eq:hermite-extrema}
+\end{align}
+据此计算全局时间拉伸修正系数
+\begin{equation}
+  \gamma = 1.001 \times \max\!\left(1, \; \max_{1 \le j \le 7} \frac{v_{\text{peak},j}}{\dot{q}_{j,\max}}, \; \max_{1 \le j \le 7} \sqrt{\frac{a_{\text{peak},j}}{\ddot{q}_{j,\max}}}\right).
+  \label{eq:time-stretch}
+\end{equation}
+若 $\gamma > 1$，则对时间节点作线性拉伸 $t_r \leftarrow \gamma t_r$ 并将节点速度缩放为 $\dot{\bm{q}}_r / \gamma$（此时二阶导数同步缩放为 $1/\gamma^2$），从代数上保证连续样条在全时段内不超出配置的关节速度与加速度上限。
+
+依托跨单元变量复用与视觉反馈检查，智能体分步执行一次对折与摆正流程。在完成全手张开与双臂起始就位后，智能体从观测图像定位待折边两端的角点，控制灵巧手切换至预抓手型后沿直线下降至角点，闭合手指后先执行小幅垂直抬升并重新取图核验布角是否离垫。若检测到单侧布角滑脱滞留桌面，智能体保持已抓稳一侧不动，仅对滑脱侧重新反投影落点实施原位补抓；确认双侧均提离垫面后，调用 \texttt{move\_both} 同步平移至对侧角点上方释放完成一次对折。随后双臂在双层长方形两端同时夹持上下两层织物，将其整体提起、翻面并移至工作垫中央，使闭合折边与开口边的空间朝向对齐第二阶段策略的训练规范。

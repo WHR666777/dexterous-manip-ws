@@ -1,0 +1,135 @@
+\begin{thebibliography}{15}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{#1}
+\expandafter\ifx\csname urlstyle\endcsname\relax\else
+  \urlstyle{same}\fi
+\expandafter\ifx\csname href\endcsname\relax
+  \def\doi{\begingroup \urlstyle{same}\Url}
+  \def\cstr{\begingroup \urlstyle{same}\Url}
+\else
+  \def\doi#1{\href{https://doi.org/#1}{\nolinkurl{#1}}}
+  \def\cstr#1{\href{https://cstr.cn/#1}{\nolinkurl{#1}}}
+\fi
+
+\bibitem[Zhao et~al.(2023)Zhao，Kumar，Levine，and Finn]{zhao2023learning}
+Zhao T~Z，Kumar V，Levine S，et~al.
+\newblock Learning fine-grained bimanual manipulation with low-cost
+  hardware\allowbreak[C/OL]//\allowbreak
+Proceedings of robotics：science and systems（RSS）.
+\newblock Daegu，Republic of Korea，2023.
+\newblock \url{https://arxiv.org/abs/2304.13705}.
+
+\bibitem[Sim{\'e}oni
+  et~al.(2025)Sim{\'e}oni，Vo，Seitzer，Baldassarre，Oquab，Jose，Khalidov，Szafraniec，Yi，Ramamonjisoa，Massa，Haziza，Wehrstedt，Wang，Darcet，Moutakanni，Sentana，Roberts，Vedaldi，Tolan，Brandt，Couprie，Mairal，J{\'e}gou，Labatut，and
+  Bojanowski]{simeoni2025dinov3}
+Sim{\'e}oni O，Vo H~V，Seitzer M，et~al.
+\newblock DINOv3\allowbreak[PP/OL].
+\newblock arXiv\allowbreak （2025）.
+\newblock \url{https://arxiv.org/abs/2508.10104}.
+
+\bibitem[Carpentier
+  et~al.(2019)Carpentier，Saurel，Buondonno，Mirabel，Lamiraux，Stasse，and
+  Mansard]{carpentier2019pinocchio}
+Carpentier J，Saurel G，Buondonno G，et~al.
+\newblock The pinocchio C++ library：a fast and flexible implementation of
+  rigid body dynamics algorithms and their analytical
+  derivatives\allowbreak[C]//\allowbreak
+2019 IEEE/SICE international symposium on system integration（SII）.
+\newblock 2019：614-619.
+
+\bibitem[Kraft(1988)]{kraft1988software}
+Kraft D.
+\newblock A software package for sequential quadratic
+  programming\allowbreak[J].
+\newblock Forschungsbericht- Deutsche Forschungs- und Versuchsanstalt fur Luft-
+  und Raumfahrt，1988.
+
+\bibitem[Pham et~al.(2018)Pham and Pham]{pham2018toppra}
+Pham H，Pham Q-C.
+\newblock A new approach to time-optimal path parameterization based on
+  reachability analysis\allowbreak[J].
+\newblock IEEE Transactions on Robotics，2018，34\allowbreak
+  （3）：645-659.
+
+\bibitem[Qiu(2025)]{qiu2025anydexretarget}
+Qiu Shiquan.
+\newblock AnyDexRetarget：high-precision hand pose retargeting
+  system\allowbreak[EB/OL].
+\newblock \allowbreak （2025）.
+\newblock \url{https://github.com/qqsq12321/AnyDexRetarget}.
+
+\bibitem[Cadene
+  et~al.(2026)Cadene，Aliberts，Capuano，Aractingi，Zouitine，Kooijmans，Choghari，Russi，Pascal，Palma，Shukor，Moss，Soare，Aubakirova，Lhoest，Gallou{\'e}dec，and
+  Wolf]{cadene2026lerobot}
+Cadene R，Aliberts S，Capuano F，et~al.
+\newblock LeRobot：an open-source library for end-to-end robot
+  learning\allowbreak[C/OL]//\allowbreak
+International conference on learning representations（ICLR）.
+\newblock 2026.
+\newblock \url{https://arxiv.org/abs/2602.22818}.
+
+\bibitem[Umeyama(1991)]{umeyama1991least}
+Umeyama S.
+\newblock Least-squares estimation of transformation parameters between two
+  point patterns\allowbreak[J].
+\newblock IEEE Transactions on Pattern Analysis and Machine
+  Intelligence，1991，13\allowbreak （4）：376-380.
+
+\bibitem[Handa
+  et~al.(2020)Handa，Van~Wyk，Yang，Liang，Chao，Wan，Birchfield，Ratliff，and
+  Fox]{handa2020dexpilot}
+Handa A，Van~Wyk K，Yang Wei，et~al.
+\newblock DexPilot：vision-based teleoperation of dexterous robotic hand-arm
+  system\allowbreak[C]//\allowbreak
+2020 IEEE international conference on robotics and automation（ICRA）.
+\newblock 2020：9164-9170.
+
+\bibitem[Qin et~al.(2023)Qin，Yang，Huang，Van~Wyk，Su，Wang，Chao，and
+  Fox]{qin2023anyteleop}
+Qin Yuzhe，Yang Wei，Huang Binghao，et~al.
+\newblock AnyTeleop：a general vision-based dexterous robot arm-hand
+  teleoperation system\allowbreak[C/OL]//\allowbreak
+Proceedings of robotics：science and systems（RSS）.
+\newblock Daegu，Republic of Korea，2023.
+\newblock \url{https://arxiv.org/abs/2307.04577}.
+
+\bibitem[Kingma et~al.(2014)Kingma and Welling]{kingma2014auto}
+Kingma D~P，Welling M.
+\newblock Auto-encoding variational bayes\allowbreak[C]//\allowbreak
+International conference on learning representations（ICLR）.
+\newblock 2014.
+
+\bibitem[Carion
+  et~al.(2020)Carion，Massa，Synnaeve，Usunier，Kirillov，and
+  Zagoruyko]{carion2020end}
+Carion N，Massa F，Synnaeve G，et~al.
+\newblock End-to-end object detection with
+  transformers\allowbreak[C]//\allowbreak
+Computer vision -- ECCV 2020.
+\newblock Cham：Springer International Publishing，2020：213-229.
+
+\bibitem[Liang
+  et~al.(2023)Liang，Huang，Xia，Xu，Hausman，Ichter，Florence，and
+  Zeng]{liang2023code}
+Liang J，Huang Wenlong，Xia Fei，et~al.
+\newblock Code as policies：language model programs for embodied
+  control\allowbreak[C]//\allowbreak
+2023 IEEE international conference on robotics and automation（ICRA）.
+\newblock 2023：9493-9500.
+
+\bibitem[Huang et~al.(2024)Huang，Wang，Li，Zhang，and
+  Fei-Fei]{huang2024rekep}
+Huang Wenlong，Wang Chen，Li Yunzhu，et~al.
+\newblock ReKep：spatio-temporal reasoning of relational keypoint constraints
+  for robotic manipulation\allowbreak[C]//\allowbreak
+Proceedings of the conference on robot learning（CoRL）.
+\newblock 2024.
+
+\bibitem[Zhou et~al.(2024)Zhou，Song，Gao，et~al.]{zhou2024code}
+Zhou Enshen，Song Qiayuan，Gao Yiran，et~al.
+\newblock Code as monitor：constraint-aware visual programming for reactive
+  and proactive robotic failure detection\allowbreak[PP/OL].
+\newblock arXiv\allowbreak （2024）.
+\newblock \url{https://arxiv.org/abs/2412.04455}.
+
+\end{thebibliography}

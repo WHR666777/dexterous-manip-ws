@@ -1,0 +1,179 @@
+% =============================================================
+\section{项目指标}
+\label{sec:specs}
+% =============================================================
+
+% -------------------------------------------------------------
+\subsection{总体设计与架构}
+\label{subsec:overall-arch}
+% -------------------------------------------------------------
+
+本系统根据两个折布子任务的物理特点组合显式三维几何规划与隐式多模态模仿学习。在初始位置跨度大、角点几何清晰且需要在线补抓的一次对折与摆正阶段，系统运行基于代码生成的视觉智能体，将对齐深度图上的毛巾角点反投影至三维公共任务坐标系，调用运动原语完成抓取、对折、翻面与居中放置。在接触耦合紧密的二次对折阶段，系统通过双臂起始关节回位与示范首帧五指手型复现将现场状态拉回训练起始分布，再调用由人类遥操作数据训练得到的双臂 ACT 策略完成双层折叠。图~\ref{fig:system-overview} 给出了离线采集训练链路与在线双阶段执行闭环的总体结构。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  module/.style={rectangle, draw=black!75, rounded corners=3pt, minimum width=3.1cm,
+                 minimum height=1.0cm, align=center, font=\small},
+  stagebox/.style={rectangle, draw=black!45, dashed, rounded corners=5pt, inner sep=8pt},
+  arrow/.style={-{Stealth[length=2.6mm]}, semithick},
+  node distance=0.9cm and 1.1cm
+]
+  % 离线部分
+  \node[module, fill=blue!8] (vr) {Pico 4 双手追踪\\腕部锚定与重定向};
+  \node[module, fill=blue!8, right=of vr] (dataset) {LeRobot v3.0 数据集\\一折/二折各 60 条};
+  \node[module, fill=blue!8, right=of dataset] (train) {双臂 ACT 策略训练\\ResNet18 / DINOv3};
+  \node[module, fill=teal!8, below=1.0cm of vr] (calib) {相机与虚拟 TCP\\九自由度联合标定};
+
+  % 在线部分
+  \node[module, fill=orange!10, below=1.1cm of calib] (agent) {双臂代码智能体\\一次对折与居中摆正};
+  \node[module, fill=yellow!14, right=of agent] (handoff) {起始状态对齐\\关节回位与首帧手型};
+  \node[module, fill=green!10, right=of handoff] (actrun) {双臂 ACT 队列推理\\二次对折闭环执行};
+
+  % 硬件底座
+  \node[module, fill=gray!14, minimum width=11.5cm, minimum height=0.85cm,
+        below=1.0cm of handoff] (hw) {两台 AgileX Nero 七轴机械臂 + 两套 LinkerHand L20 灵巧手 + RealSense L515 相机};
+
+  % 连线
+  \draw[arrow] (vr) -- (dataset);
+  \draw[arrow] (dataset) -- (train);
+  \draw[arrow] (calib.south) -- node[right, font=\scriptsize] {任务系变换} (agent.north);
+  \draw[arrow] (train.south) |- ([yshift=0.45cm]actrun.north) -- (actrun.north);
+  \draw[arrow] (agent) -- (handoff);
+  \draw[arrow] (handoff) -- (actrun);
+
+  \draw[arrow] (vr.west) -- ++(-0.45,0) |- (hw.west);
+  \draw[arrow, <->] (agent.south) -- (agent.south |- hw.north);
+  \draw[arrow, <->] (handoff.south) -- (handoff.south |- hw.north);
+  \draw[arrow, <->] (actrun.south) -- (actrun.south |- hw.north);
+
+  % 分组外框
+  \begin{scope}[on background layer]
+    \node[stagebox, fit=(vr)(dataset)(train)(calib), label={[font=\footnotesize\bfseries]above:离线标定、遥操作采集与策略训练阶段}] {};
+    \node[stagebox, fit=(agent)(handoff)(actrun), label={[font=\footnotesize\bfseries]above:在线双阶段协同折布阶段}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{双臂灵巧手自主折布系统总体架构}
+\label{fig:system-overview}
+\end{figure}
+
+四类数学计算贯穿系统的离线采集与在线运行。第一类是 46 维异构状态与动作空间的统一表示。单侧执行单元包含机械臂 7 个旋转关节与灵巧手 16 个有效主动控制槽位（官方 20 槽通信协议中的索引 $0\sim 10$ 与 $15\sim 19$，其余 4 个保留槽位恒置 255）。对灵巧手第 $j \in \{1,\dots,16\}$ 个主动关节，设其运动学限位区间为 $[q_{\min,j}, q_{\max,j}]$，电机编码方向极性为 $s_j \in \{-1, +1\}$，则连续关节角 $q_{h,j}$ 与底层无量纲整数槽位 $r_j \in [0, 255]$ 之间通过仿射量化相互转换
+\begin{equation}
+  r_j = \operatorname{round}\!\left(255 \cdot \left(\frac{1 - s_j}{2} + s_j \frac{q_{h,j} - q_{\min,j}}{q_{\max,j} - q_{\min,j}}\right)\right), \qquad j = 1,\dots,16.
+  \label{eq:hand-slot-quant}
+\end{equation}
+记左右机械臂关节角向量为 $\bm{q}_L, \bm{q}_R \in \mathbb{R}^7$（单位 $\mathrm{rad}$），左右灵巧手有效槽位向量为 $\bm{r}_L, \bm{r}_R \in [0, 255]^{16}$，则 $t$ 时刻系统的联合本体状态 $\bm{s}_t$ 与联合控制动作 $\bm{a}_t$ 表示为
+\begin{equation}
+  \bm{s}_t = \begin{bmatrix} \bm{q}_{L,t}^{\top} & \bm{r}_{L,t}^{\top} & \bm{q}_{R,t}^{\top} & \bm{r}_{R,t}^{\top} \end{bmatrix}^{\top} \in \mathbb{R}^{46}, \qquad
+  \bm{a}_t = \begin{bmatrix} \hat{\bm{q}}_{L,t}^{\top} & \hat{\bm{r}}_{L,t}^{\top} & \hat{\bm{q}}_{R,t}^{\top} & \hat{\bm{r}}_{R,t}^{\top} \end{bmatrix}^{\top} \in \mathbb{R}^{46}.
+  \label{eq:state-action-46d}
+\end{equation}
+其中 $\bm{s}_t$ 为当前周期下发控制帧前读取的硬件反馈，$\bm{a}_t$ 为当拍实际下发的绝对位置目标，配合空间对齐后的 $480\times 640\times 3$ 彩色图像 $\bm{I}_t$ 构成单步观测与动作样本。
+
+第二类计算是多坐标系刚体配准与手眼工具联合标定。系统选定右臂基座系作为双臂共享的公共任务坐标系 $\mathcal{F}_{\text{task}}$，通过非线性最小二乘联合求解相机外参 $\bm{T}_{\text{cam}}^{\text{base}} \in \SE$ 与法兰下指尖虚拟工具变换 $\bm{T}_{\text{tcp}}^{\text{flange}} \in \SE$，并利用固定相机外参将左臂基座映射至 $\mathcal{F}_{\text{task}}$。
+
+第三类计算是在线运动学求解与轨迹规划，涵盖七自由度机械臂李代数解析雅可比逆运动学、五指灵巧手带被动耦合回传的序列二次规划重定向，以及智能体侧的 $\SE$ 测地线插值与时间最优路径参数化。
+
+第四类计算是条件变分序列动作生成，策略网络以图像 $\bm{I}_t$、本体状态 $\bm{s}_t$ 与潜变量 $\bm{z} \in \mathbb{R}^{32}$ 为条件，并行解码未来 $k=60$ 步动作块 $\hat{\bm{A}}_t \in \mathbb{R}^{60\times 46}$，并在实机闭环中按步长 $n=20$ 的分段队列滚动执行。系统核心技术指标列于表~\ref{tab:system-metrics}。
+
+\begin{table}[htbp]
+\centering
+\caption{双臂灵巧手折布系统核心技术指标}
+\label{tab:system-metrics}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llp{8.4cm}@{}}
+  \toprule
+  指标类别 & 参数名称 & 设计与实测指标 \\
+  \midrule
+  自由度配置 & 双机械臂与双灵巧手联合维度 & $2\times(7 + 16) = 46$ 维主动自由度（另含 $2\times 5$ 个被动指节） \\
+  视觉感知 & 对齐 RGB-D 分辨率与帧率 & $640\times 480$ 像素，硬件采集 $30\,\mathrm{Hz}$，深度向彩色光学系对齐 \\
+  控制节拍 & 遥操作与策略闭环名义频率 & $20\,\mathrm{Hz}$（单周期调度窗口 $50\,\mathrm{ms}$） \\
+  标定精度 & 相机与虚拟 TCP 联合拟合残差 & 右臂 RMS $9.81\,\mathrm{mm}$，左臂 RMS $4.86\,\mathrm{mm}$ \\
+  逆运动学 & 七轴解析雅可比 IK 求解性能 & 均值耗时 $9.57\,\mathrm{ms}$，正运动学验收误差 $<2\,\mathrm{mm}$ 且 $<2^{\circ}$ \\
+  数据集规模 & LeRobot v3.0 双臂示教轨迹 & 一次对折 60 条，二次对折 60 条 \\
+  策略网络 & ACT 预测块长与队列执行步长 & 预测视野 $k=60$ 步（$3\,\mathrm{s}$），单次队列执行 $n=20$ 步（$1\,\mathrm{s}$） \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+
+% -------------------------------------------------------------
+\subsection{任务分配}
+\label{subsec:task-allocation}
+% -------------------------------------------------------------
+
+项目成员围绕硬件标定与遥操作、模仿学习策略训练、代码生成智能体开发以及双阶段系统联调四个模块分工完成研制工作，具体职责划分见表~\ref{tab:team-roles}。
+
+\begin{table}[htbp]
+\centering
+\caption{项目组成员任务分配表}
+\label{tab:team-roles}
+\small
+\begin{tabular}{@{}llp{9.2cm}@{}}
+  \toprule
+  成员姓名 & 学号 & 承担的主要工作任务 \\
+  \midrule
+  \todo{成员 1 姓名} & \todo{学号 1} & 双臂遥操作架构设计、七轴解析雅可比逆运动学与灵巧手重定向集成、示教数据采集导出、ACT 实机集成与项目总报告整理 \\
+  \todo{成员 2 姓名} & \todo{学号 2} & 双臂折布智能体框架设计、MCP 服务与持久工作进程开发、运动原语与轨迹时间参数化实现及异常恢复调试 \\
+  \todo{成员 3 姓名} & \todo{学号 3} & LeRobot 数据管线适配、ResNet18 基线 ACT 策略与冻结 DINOv3 改进策略训练、超参数调优与动作块定量评估 \\
+  \todo{成员 4 姓名} & \todo{学号 4} & 四通道 SocketCAN 总线搭建、RGB-D 相机与虚拟 TCP 联合标定采样、双阶段连续折布实机联调与实验统计 \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+
+% -------------------------------------------------------------
+\subsection{部件与资源列表}
+\label{subsec:bom-resources}
+% -------------------------------------------------------------
+
+系统搭建使用的机械臂、灵巧手、深度相机、追踪头显与计算工作站等硬件部件清单及成本统计见表~\ref{tab:hardware-bom}。
+
+\begin{table}[htbp]
+\centering
+\caption{系统硬件部件清单与成本统计}
+\label{tab:hardware-bom}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}llrrrl@{}}
+  \toprule
+  部件名称 & 平台与型号 & 数量 & 单价（元） & 小计（元） & 用途说明 \\
+  \midrule
+  七自由度轻量机械臂 & AgileX Nero 7-DOF & 2 台 & 14,999 & 29,998 & 左右双臂空间运动执行 \\
+  五指多自由度灵巧手 & LinkerHand L20（左/右手） & 2 套 & 49,900 & 99,800 & 多指拈布与双层织物折叠 \\
+  激光雷达深度相机 & Intel RealSense L515 & 1 台 & 2,800 & 2,800 & 全局对齐 RGB-D 采集 \\
+  VR 手部追踪设备 & PICO 4 一体机 & 1 台 & 2,499 & 2,499 & 双手 26 节点与腕部追踪 \\
+  控制与训练工作站 & RTX 5060 Ti 主机（Ubuntu） & 1 台 & 10,000 & 10,000 & 实时控制、训练与在线推理 \\
+  总线通信与急停附件 & 四通道 SocketCAN 及急停 & 1 套 & 800 & 800 & 双臂双灵巧手总线与急停 \\
+  \midrule
+  \multicolumn{4}{@{}r}{\textbf{硬件总计}} & \textbf{145,897} & \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+软件系统基于开源机器人学运动规划库、计算机视觉库与深度学习框架构建，主要开源软件与预训练模型资源列于表~\ref{tab:software-resources}。
+
+\begin{table}[htbp]
+\centering
+\caption{主要开源软件库与预训练模型资源列表}
+\label{tab:software-resources}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llp{7.6cm}@{}}
+  \toprule
+  资源名称 & 版本或规格 & 在本项目中的用途 \\
+  \midrule
+  Pinocchio~\cite{carpentier2019pinocchio} & 4.1.0 & 机械臂与灵巧手 URDF 运动学解析、正运动学及解析雅可比计算 \\
+  SciPy / NLopt~\cite{kraft1988software} & 1.15.3 / 2.7+ & 机械臂盒约束最小二乘逆运动学与灵巧手 SLSQP 非线性优化 \\
+  TOPPRA~\cite{pham2018toppra} & 0.6+ & 基于可达集分析的多航点关节轨迹时间最优参数化 \\
+  AnyDexRetarget~\cite{qiu2025anydexretarget} & 2025 源码版 & Pico 4 手部骨骼解析、对指距离自适应解析梯度重定向 \\
+  LeRobot~\cite{cadene2026lerobot} & v0.4.4 & v3.0 多模态数据集构建（Parquet + H.264）及 ACT 策略训练框架 \\
+  PyTorch / TorchVision & 2.7.1+cu128 & 神经网络训练、在线 GPU 推理及 ResNet18 权重加载 \\
+  DINOv3~\cite{simeoni2025dinov3} & ViT-S/16 & 改进型 ACT 策略的冻结自监督密集视觉特征主干 \\
+  librealsense2 / OpenCV & 2.54 / 4.12 & L515 彩色与深度流采集、空间对齐与 Brown-Conrady 逆畸变计算 \\
+  pyAgxArm / LinkerHand & 官方驱动包 & Nero 机械臂运动指令收发与 L20 灵巧手槽位状态读写 \\
+  Codex CLI / FastMCP & MCP 客户端/服务 & 折布智能体多模态视觉推理、Python 代码提交与会话管理 \\
+  \bottomrule
+\end{tabular}
+\end{table}

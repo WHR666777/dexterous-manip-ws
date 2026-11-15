@@ -1,0 +1,100 @@
+% =============================================================
+\section{系统设计与集成}
+\label{sec:design}
+% =============================================================
+
+本章围绕总体架构中的核心计算与软件模块，依次阐述双臂相机外参与虚拟 TCP 联合标定、基于视觉手部骨骼追踪的双臂增量遥操作、动作分块策略建模与冻结视觉主干改进、基于代码生成与持久工作进程的双臂折布智能体，以及跨环境系统集成与两阶段起始状态对齐机制。
+
+% -------------------------------------------------------------
+\subsection{双臂相机外参与虚拟拈布 TCP 联合标定}
+\label{subsec:calibration}
+% -------------------------------------------------------------
+
+在视觉引导的双臂折布任务中，系统需要将深度相机采集的二维像素与深度测量值转换为机械臂末端的笛卡尔位姿目标。常规二指平行夹爪具有对称几何中心，可通过棋盘格标定板标定手眼外参并由机械图纸读取夹爪偏移。五指灵巧手在抓取织物时依靠手指指腹配合产生接触，指尖参考点位置随手部预抓构型变化，难以从机械结构上直接量测其相对于机械臂末端法兰 \texttt{link7} 的三维偏移。为此，本系统将固定手型下的指尖参考点建模为固连于法兰坐标系的虚拟工具中心点（TCP），构建了无需外部棋盘格标定板的九自由度相机外参与虚拟 TCP 联合标定方法。在实际标定中，右臂固定为闭合捏持手型（\texttt{closed}），以拇指与食指指尖捏合接触点作为观测参考点；左臂固定为预抓首帧手型（\texttt{replay\_start}），以食指指尖作为观测参考点。
+
+\subsubsection{虚拟工具坐标系正交构造与畸变逆投影}
+
+在标定采样过程中，单侧灵巧手保持上述预设手型不变，指尖参考点相对于机械臂末端法兰坐标系 $\mathcal{F}_F$ 的平移向量记为待估常向量 $\bm{p}_F \in \mathbb{R}^3$。由于单个三维点的位置观测无法约束工具坐标系的旋转自由度，系统在俯视参考姿态下显式定义虚拟工具坐标系 $\mathcal{F}_{\text{tcp}}$ 的正交基方向。设机械臂基座坐标系 $\mathcal{F}_B$ 的 $+Z$ 轴竖直向上，参考姿态下由正运动学求得的法兰旋转矩阵为 $\bm{R}_{BF,\text{ref}} \in \SO$，其第三列 $\bm{r}_3 = \bm{R}_{BF,\text{ref}}\bm{e}_3$ 为法兰主轴方向。令虚拟工具系 $+Z$ 轴竖直向下指向桌面，$+X$ 轴取法兰主轴在水平面上的单位正交投影，再按右手定则构造 $+Y$ 轴，即
+\begin{equation}
+  \bm{z}_{\text{tcp}} = \begin{bmatrix} 0 \\ 0 \\ -1 \end{bmatrix}, \qquad
+  \bm{x}_{\text{tcp}} = \frac{\bm{r}_3 - (\bm{r}_3^{\top}\bm{z}_{\text{tcp}})\bm{z}_{\text{tcp}}}{\left\|\bm{r}_3 - (\bm{r}_3^{\top}\bm{z}_{\text{tcp}})\bm{z}_{\text{tcp}}\right\|_2}, \qquad
+  \bm{y}_{\text{tcp}} = \bm{z}_{\text{tcp}} \times \bm{x}_{\text{tcp}}.
+  \label{eq:tcp-axes}
+\end{equation}
+由此得到法兰坐标系到虚拟工具坐标系的恒定旋转矩阵
+\begin{equation}
+  \bm{R}_{F,\text{tcp}} = \bm{R}_{BF,\text{ref}}^{\top} \begin{bmatrix} \bm{x}_{\text{tcp}} & \bm{y}_{\text{tcp}} & \bm{z}_{\text{tcp}} \end{bmatrix} \in \SO.
+  \label{eq:flange-from-tcp-rot}
+\end{equation}
+
+在视觉测量侧，RealSense L515 深度流在硬件驱动层已向彩色相机光学坐标系 $\mathcal{F}_C$ 对齐。设彩色相机焦距为 $(f_x, f_y)$，主点为 $(c_x, c_y)$，径向畸变系数为 $(k_1, k_2, k_3)$，切向畸变系数为 $(p_1, p_2)$。对第 $i$ 个标定样本中点选的指尖参考点像素 $(u_i, v_i)$，直接读取该像素处的对齐深度测量值 $z_i = D(v_i, u_i) > 0$；若该像素深度为零则直接舍弃该次点击，不使用邻域像素深度填补，以免指尖边缘像素混入后方桌面深度。记含畸变的归一化像平面坐标为 $(x_{d,i}, y_{d,i}) = ((u_i - c_x)/f_x, (v_i - c_y)/f_y)$，其与理想无畸变归一化坐标 $(x_{n,i}, y_{n,i})$ 之间满足 Brown-Conrady 畸变模型（其中 $r_i^2 = x_{n,i}^2 + y_{n,i}^2$）
+\begin{equation}
+  \begin{bmatrix} x_{d,i} \\ y_{d,i} \end{bmatrix}
+  = \left(1 + k_1 r_i^2 + k_2 r_i^4 + k_3 r_i^6\right)\begin{bmatrix} x_{n,i} \\ y_{n,i} \end{bmatrix}
+  + \begin{bmatrix} 2p_1 x_{n,i} y_{n,i} + p_2(r_i^2 + 2x_{n,i}^2) \\ p_1(r_i^2 + 2y_{n,i}^2) + 2p_2 x_{n,i} y_{n,i} \end{bmatrix}.
+  \label{eq:brown-conrady}
+\end{equation}
+通过不动点迭代由 $(x_{d,i}, y_{d,i})$ 逆解出无畸变归一化坐标 $(x_{n,i}, y_{n,i})$ 后，结合深度值 $z_i$ 反投影得到相机光学坐标系下的三维观测点
+\begin{equation}
+  \bm{c}_i = \begin{bmatrix} z_i x_{n,i} \\ z_i y_{n,i} \\ z_i \end{bmatrix} \in \mathbb{R}^3.
+  \label{eq:camera-backproj}
+\end{equation}
+
+\subsubsection{九自由度非线性最小二乘联合求解与可观测性分析}
+
+对单侧机械臂采集 $N$ 组具有不同空间位置与腕部倾角的样本，第 $i$ 组样本由关节角反馈计算正运动学得到基座系法兰位姿 $(\bm{R}_{BF,i}, \bm{t}_{BF,i}) \in \SE$，并由式~\eqref{eq:camera-backproj} 获得相机系观测点 $\bm{c}_i$。记相机相对于该侧机械臂基座的外参旋转与平移分别为 $\bm{R}_{BC} = \exp([\bm{\omega}_{BC}]_{\times}) \in \SO$ 与 $\bm{t}_{BC} \in \mathbb{R}^3$，其中 $\bm{\omega}_{BC} \in \mathbb{R}^3$ 为李代数旋转向量，$[\cdot]_{\times}$ 表示反对称矩阵算子。同一指尖参考点在基座系下的相机变换坐标与运动学推算坐标应当一致，从而构成关于九维未知参数 $\bm{\theta} = [\bm{\omega}_{BC}^{\top}, \bm{t}_{BC}^{\top}, \bm{p}_F^{\top}]^{\top} \in \mathbb{R}^9$ 的非线性最小二乘问题
+\begin{equation}
+  \min_{\bm{\omega}_{BC}, \bm{t}_{BC}, \bm{p}_F} \sum_{i=1}^{N} \left\| \exp([\bm{\omega}_{BC}]_{\times})\bm{c}_i + \bm{t}_{BC} - \left(\bm{R}_{BF,i}\bm{p}_F + \bm{t}_{BF,i}\right) \right\|_2^2.
+  \label{eq:calib-nls}
+\end{equation}
+
+优化初值由刚体点云配准的闭式奇异值分解方法~\cite{umeyama1991least}给出。令虚拟偏移初值 $\bm{p}_F^{(0)} = \bm{0}$，分别对相机点集 $\{\bm{c}_i\}$ 与法兰原点集 $\{\bm{t}_{BF,i}\}$ 去质心得到 $\tilde{\bm{c}}_i = \bm{c}_i - \bar{\bm{c}}$ 与 $\tilde{\bm{t}}_i = \bm{t}_{BF,i} - \bar{\bm{t}}$，对互协方差矩阵 $\bm{H} = \sum_{i=1}^{N} \tilde{\bm{c}}_i \tilde{\bm{t}}_i^{\top}$ 作奇异值分解 $\bm{H} = \bm{U}\bm{\Sigma}\bm{V}^{\top}$，经行列式符号修正后得到初始外参
+\begin{equation}
+  \bm{R}_{BC}^{(0)} = \bm{V}\diag\!\left(1, 1, \det(\bm{V}\bm{U}^{\top})\right)\bm{U}^{\top}, \qquad
+  \bm{t}_{BC}^{(0)} = \bar{\bm{t}} - \bm{R}_{BC}^{(0)}\bar{\bm{c}},
+  \label{eq:umeyama-init}
+\end{equation}
+随后采用带雅可比列尺度自适应的信赖域算法求解式~\eqref{eq:calib-nls}。
+
+若采样过程中末端法兰仅作纯平移运动（$\bm{R}_{BF,i} \equiv \bm{R}_{BF,0}$）或仅绕某一固定轴旋转，则存在非零向量 $\bm{v} \in \mathbb{R}^3$ 使得对所有样本均有 $(\bm{R}_{BF,i} - \bm{R}_{BF,0})\bm{v} = \bm{0}$。此时将 $\bm{p}_F$ 改变 $\Delta\bm{p} = \alpha\bm{v}$ 并将 $\bm{t}_{BC}$ 同步改变 $\bm{R}_{BF,0}\Delta\bm{p}$，目标函数值完全不变，相机平移与法兰工具偏移沿该方向不可分离。为此，算法在优化前构造堆叠旋转差分矩阵
+\begin{equation}
+  \bm{M}_{\text{rot}} = \begin{bmatrix} \bm{R}_{BF,1} - \bm{R}_{BF,0} \\ \vdots \\ \bm{R}_{BF,N-1} - \bm{R}_{BF,0} \end{bmatrix} \in \mathbb{R}^{3(N-1)\times 3},
+  \label{eq:calib-observability}
+\end{equation}
+校验其最小奇异值 $\sigma_{\min}(\bm{M}_{\text{rot}}) \ge \max(10^{-5}, 10^{-3}\sigma_{\max}(\bm{M}_{\text{rot}}))$，要求采样轨迹必须包含绕两个正交水平方向的横滚与俯仰变化。求解收敛后，进一步对残差雅可比矩阵 $\bm{J}_{\bm{\theta}} \in \mathbb{R}^{3N\times 9}$ 按列作欧氏范数归一化以消除弧度与米之间的量纲差异，检验列归一化雅可比的条件数 $\kappa(\bar{\bm{J}}_{\bm{\theta}}) = \sigma_1 / \sigma_9$ 是否处于良态范围。
+
+\subsubsection{基于共享相机的双臂公共任务坐标系融合}
+
+左右两台机械臂与全局 L515 相机在采样期间均固定安装于同一刚性台架。对右臂和左臂分别执行上述九自由度联合标定后，可得到右臂基座下的相机外参 $\bm{T}_{\text{cam}}^{\text{right}} \in \SE$ 与右臂法兰工具变换 $\bm{T}_{\text{tcp},R}^{\text{flange},R}$，以及左臂基座下的相机外参 $\bm{T}_{\text{cam}}^{\text{left}} \in \SE$ 与左臂法兰工具变换 $\bm{T}_{\text{tcp},L}^{\text{flange},L}$。如图~\ref{fig:calib-chain} 所示，系统取右臂基座系作为双臂共享的公共任务坐标系 $\mathcal{F}_{\text{task}}$（即 $\bm{T}_{\text{right}}^{\text{task}} = \bm{I}_4$），利用共享相机光学系即可求得左臂基座在公共任务系下的齐次变换矩阵
+\begin{equation}
+  \bm{T}_{\text{left}}^{\text{task}} = \bm{T}_{\text{cam}}^{\text{right}} \left(\bm{T}_{\text{cam}}^{\text{left}}\right)^{-1}.
+  \label{eq:left-base-in-task}
+\end{equation}
+同时，通过对左臂虚拟工具系施加与右臂对称对齐的参考姿态覆盖，使两侧虚拟 TCP 在公共任务系下具有相同的零偏航基准朝向。当上层规划器在公共任务系下给出任意一侧虚拟 TCP 的目标位姿 $\bm{T}_{\text{tcp},s}^{\text{task}}$（$s \in \{L, R\}$）时，右乘该侧虚拟工具逆变换并左乘该侧基座逆变换，即可换算为对应机械臂逆运动学所需的基座系法兰目标位姿
+\begin{equation}
+  \bm{T}_{\text{flange},s}^{\text{base},s} = \left(\bm{T}_{\text{base},s}^{\text{task}}\right)^{-1} \bm{T}_{\text{tcp},s}^{\text{task}} \left(\bm{T}_{\text{tcp},s}^{\text{flange},s}\right)^{-1}.
+  \label{eq:task-tcp-to-base-flange}
+\end{equation}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  frame/.style={rectangle, draw=black!75, rounded corners=3pt, minimum width=2.8cm,
+                minimum height=0.9cm, align=center, font=\small, fill=gray!8},
+  arrow/.style={-{Stealth[length=2.5mm]}, semithick}
+]
+  \node[frame, fill=blue!10] (cam) at (0, 2.2) {对齐相机光学系 $\mathcal{F}_C$};
+  \node[frame, fill=orange!12] (rightb) at (-3.8, 0.3) {右臂基座系 / 公共任务系\\$\mathcal{F}_R \equiv \mathcal{F}_{\text{task}}$};
+  \node[frame, fill=teal!10] (leftb) at (3.8, 0.3) {左臂基座系\\$\mathcal{F}_L$};
+  \node[frame] (rightf) at (-3.8, -1.6) {右臂法兰与虚拟 TCP\\$\mathcal{F}_{F,R} \to \mathcal{F}_{\text{tcp},R}$};
+  \node[frame] (leftf) at (3.8, -1.6) {左臂法兰与虚拟 TCP\\$\mathcal{F}_{F,L} \to \mathcal{F}_{\text{tcp},L}$};
+
+  \draw[arrow] (cam) -- node[above left, font=\footnotesize] {$\bm{T}_{\text{cam}}^{\text{right}}$} (rightb);
+  \draw[arrow] (cam) -- node[above right, font=\footnotesize] {$\bm{T}_{\text{cam}}^{\text{left}}$} (leftb);
+  \draw[arrow, dashed] (leftb) -- node[above, font=\footnotesize] {$\bm{T}_{\text{left}}^{\text{task}} = \bm{T}_{\text{cam}}^{\text{right}}(\bm{T}_{\text{cam}}^{\text{left}})^{-1}$} (rightb);
+  \draw[arrow] (rightb) -- node[left, font=\footnotesize] {正/逆运动学} (rightf);
+  \draw[arrow] (leftb) -- node[right, font=\footnotesize] {正/逆运动学} (leftf);
+\end{tikzpicture}
+\caption{以共享 RGB-D 相机连接左右机械臂的双臂公共任务坐标系标定链路}
+\label{fig:calib-chain}
+\end{figure}

@@ -1,0 +1,67 @@
+This is BibTeX, Version 0.99d
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: main.aux
+Reallocating 'name_of_file' (item size: 1) to 16 items.
+The style file: gbt7714-numeric.bst
+Reallocating 'name_of_file' (item size: 1) to 5 items.
+Reallocating 'singl_function' (item size: 4) to 100 items.
+Reallocating 'singl_function' (item size: 4) to 150 items.
+Reallocating 'singl_function' (item size: 4) to 200 items.
+Reallocating 'singl_function' (item size: 4) to 100 items.
+Reallocating 'glb_str_end' (item size: 4) to 20 items.
+Reallocating 'glb_str_ptr' (item size: 4) to 20 items.
+Reallocating 'global_strs' (item size: 1) to 4000000 items.
+Reallocating 'singl_function' (item size: 4) to 100 items.
+Reallocating 'singl_function' (item size: 4) to 100 items.
+Reallocating 'wiz_functions' (item size: 4) to 6000 items.
+Reallocating 'singl_function' (item size: 4) to 100 items.
+Reallocating 'wiz_functions' (item size: 4) to 9000 items.
+Reallocating 'singl_function' (item size: 4) to 100 items.
+Reallocating 'singl_function' (item size: 4) to 100 items.
+Reallocating 'wiz_functions' (item size: 4) to 12000 items.
+Database file #1: refs.bib
+Warning--empty urldate in simeoni2025dinov3
+Warning--empty urldate in qiu2025anydexretarget
+Warning--empty urldate in zhou2024code
+You've used 15 entries,
+            9572 wiz_defined-function locations,
+            1841 strings with 19361 characters,
+and the built_in function-call counts, 4272579 in all, are:
+= -- 555421
+> -- 176860
+< -- 69232
++ -- 188192
+- -- 165481
+* -- 67263
+:= -- 246664
+add.period$ -- 51
+call.type$ -- 15
+change.case$ -- 196
+chr.to.int$ -- 62484
+cite$ -- 18
+duplicate$ -- 400972
+empty$ -- 69193
+format.name$ -- 541
+if$ -- 875398
+int.to.chr$ -- 630
+int.to.str$ -- 16
+missing$ -- 0
+newline$ -- 104
+num.names$ -- 45
+pop$ -- 18611
+preamble$ -- 1
+purify$ -- 229
+quote$ -- 0
+skip$ -- 204778
+stack$ -- 0
+substring$ -- 694694
+swap$ -- 466827
+text.length$ -- 10
+text.prefix$ -- 0
+top$ -- 0
+type$ -- 390
+warning$ -- 3
+while$ -- 8049
+width$ -- 0
+write$ -- 211
+(There were 3 warnings)

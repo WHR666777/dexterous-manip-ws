@@ -1,0 +1,118 @@
+% -------------------------------------------------------------
+\subsection{基于视觉手部骨骼追踪的双臂遥操作与示教采集}
+\label{subsec:teleop}
+% -------------------------------------------------------------
+
+ALOHA~\cite{zhao2023learning} 等同构主从遥操作系统使用低成本主侧机械臂直接读取操作者关节角，但该结构难以扩展至五指多自由度灵巧手。本系统参考 DexPilot~\cite{handa2020dexpilot} 与 AnyTeleop~\cite{qin2023anyteleop} 的视觉遥操作方案，利用 Pico 4 头显内置光学追踪获取操作者双手 26 个骨骼节点的空间位姿，经 TCP 流式传输至工作站后，将手腕六自由度增量运动映射至 Nero 机械臂末端法兰，同时通过带解析梯度的序列二次规划将人手关键点重定向至 LinkerHand L20 灵巧手。
+
+\subsubsection{手腕坐标系变换与相对增量锚定}
+
+Pico 4 底层 PXR 手部追踪接口采用 OpenXR 原生右手坐标系（$+X$ 向右、$+Y$ 向上、$+Z$ 向后）。为转换至机器人惯用的前向 $+X$、左向 $+Y$、上向 $+Z$ 右手坐标系 $\mathcal{F}_{\text{rh}}$，首先引入行列式为 $+1$ 的正交旋转矩阵 $\bm{R}_{\text{rh}\leftarrow\text{pxr}}$，对第 $t$ 帧手腕原始平移 $\bm{p}_{\text{raw},t}$ 与原始旋转 $\bm{R}_{\text{raw},t}$ 执行坐标变基，再左乘预先标定的操作现场至第 $s \in \{L, R\}$ 侧机械臂基座系的旋转对齐矩阵 $\bm{R}_{\text{align},s} \in \SO$，即
+\begin{align}
+  \bm{R}_{\text{rh}\leftarrow\text{pxr}} &= \begin{bmatrix} 0 & 0 & -1 \\ -1 & 0 & 0 \\ 0 & 1 & 0 \end{bmatrix}, \notag\\
+  \bm{p}_t^{w} &= \bm{R}_{\text{align},s}\bm{R}_{\text{rh}\leftarrow\text{pxr}}\bm{p}_{\text{raw},t}, \qquad
+  \bm{R}_t^{w} = \bm{R}_{\text{align},s}\bm{R}_{\text{rh}\leftarrow\text{pxr}}\bm{R}_{\text{raw},t}\bm{R}_{\text{rh}\leftarrow\text{pxr}}^{\top}.
+  \label{eq:pico-wrist-transform}
+\end{align}
+
+直接将人手绝对坐标映射至机械臂工作空间会因操作者站位不同引发初始位姿跳变，因此系统采用腕部相对增量锚定机制。当操作者按下重锚键进入遥操作跟随状态时，记录该时刻人手腕部参考量 $(\bm{p}_0^{w}, \bm{R}_0^{w})$ 与机械臂当前法兰正运动学位姿 $(\bm{p}_0^{f}, \bm{R}_0^{f})$ 作为锚点。在随后的第 $t$ 个控制周期内，对腕部平移增量施加系数为 $\alpha_p \in (0, 1]$ 的一阶指数移动平均滤波（实验中取 $\alpha_p = 0.4$）并乘以比例尺度 $s_p$ 后叠加至初始法兰位置；姿态部分在基座系下左乘相对旋转增量，其中 $\bm{R}_t^{w}(\bm{R}_0^{w})^{\top}$ 恰好构成将 $\mathcal{F}_{\text{rh}}$ 系相对旋转变基至机械臂基座系的相似变换，完整更新关系为
+\begin{align}
+  \bar{\bm{\Delta p}}_t &= \alpha_p \left(\bm{p}_t^{w} - \bm{p}_0^{w}\right) + (1 - \alpha_p)\bar{\bm{\Delta p}}_{t-1}, \label{eq:wrist-ema}\\
+  \bm{p}_{\text{des},t}^{f} &= \bm{p}_0^{f} + s_p \bar{\bm{\Delta p}}_t, \qquad
+  \bm{R}_{\text{des},t}^{f} = \left(\bm{R}_t^{w}\left(\bm{R}_0^{w}\right)^{\top}\right)\bm{R}_0^{f}. \label{eq:wrist-relative-pose}
+\end{align}
+操作者中途暂停追踪并再次触发重锚时，系统以当时的手腕位姿与机械臂法兰位姿刷新锚点，实现无跳变的工作空间接力移动。
+
+\subsubsection{基于 Pinocchio 与李代数解析雅可比的七轴局部逆运动学}
+
+Nero 机械臂包含七个旋转关节，相对于六自由度末端位姿目标具有一维运动学冗余。在线遥操作与轨迹跟踪要求逆运动学求解器在数毫秒内求得满足物理关节限位且与当前关节反馈 $\bm{q}_{\text{seed}} \in \mathbb{R}^7$ 邻近的连续解，防止零空间肘部构型突变。
+
+记候选关节向量 $\bm{q} \in \mathbb{R}^7$ 经 Pinocchio~\cite{carpentier2019pinocchio} 正运动学求得的基座系法兰位置与姿态为 $\bm{p}(\bm{q})$ 与 $\bm{R}(\bm{q})$，期望法兰位姿为 $(\bm{p}_{\text{des}}, \bm{R}_{\text{des}})$。为避免欧拉角奇异性，姿态偏差采用基座世界轴表达下的右不变旋转误差矩阵 $\bm{E}_R(\bm{q}) = \bm{R}_{\text{des}}\bm{R}(\bm{q})^{\top} \in \SO$，并经李群对数映射 $\bm{\phi} = \log(\bm{E}_R(\bm{q}))^{\vee} \in \mathbb{R}^3$ 转化为三维旋转向量。引入位置容差尺度 $\sigma_p$、姿态容差尺度 $\sigma_R$ 与抑制零空间漂移的邻近正则权重 $\lambda_q$，构造十三维加权残差向量 $\bm{e}(\bm{q}) \in \mathbb{R}^{13}$ 及带内缩边界 $\Delta\bm{q}_m$ 的盒约束非线性最小二乘问题
+\begin{align}
+  &\min_{\bm{q} \in \mathbb{R}^7} \frac{1}{2}\|\bm{e}(\bm{q})\|_2^2, \quad \text{s.t. } \bm{q}_{\min} + \Delta\bm{q}_m \le \bm{q} \le \bm{q}_{\max} - \Delta\bm{q}_m, \notag\\
+  &\bm{e}(\bm{q}) = \begin{bmatrix}
+    \left(\bm{p}(\bm{q}) - \bm{p}_{\text{des}}\right) / \sigma_p \\[3pt]
+    \log\!\left(\bm{R}_{\text{des}}\bm{R}(\bm{q})^{\top}\right)^{\vee} / \sigma_R \\[3pt]
+    \lambda_q \wrap\!\left(\bm{q} - \bm{q}_{\text{seed}}\right)
+  \end{bmatrix}.
+  \label{eq:nero-ik-lsq}
+\end{align}
+
+若使用有限差分计算 $\bm{e}(\bm{q})$ 的雅可比矩阵，每次迭代需要对七个关节分别施加微小摄动并重复计算正运动学，耗时较长且容易在冗余方向引入截断误差。为此，本系统推导了残差向量的解析雅可比矩阵。调用 Pinocchio 的 \texttt{LOCAL\_WORLD\_ALIGNED} 参考系算法可一次求得法兰原点在基座系下的线速度雅可比 $\bm{J}_v(\bm{q}) \in \mathbb{R}^{3\times 7}$ 与空间角速度雅可比 $\bm{J}_{\omega}(\bm{q}) \in \mathbb{R}^{3\times 7}$。当关节产生一阶无穷小扰动 $\delta\bm{q}$ 时，末端姿态左乘空间角位移变为 $\bm{R}(\bm{q} + \delta\bm{q}) = \exp([\bm{J}_{\omega}(\bm{q})\delta\bm{q}]_{\times})\bm{R}(\bm{q})$，代入旋转误差矩阵得
+\begin{equation}
+  \bm{E}_R(\bm{q} + \delta\bm{q}) = \bm{R}_{\text{des}}\bm{R}(\bm{q})^{\top}\exp\!\left(-[\bm{J}_{\omega}(\bm{q})\delta\bm{q}]_{\times}\right) = \bm{E}_R(\bm{q})\exp\!\left(-[\bm{J}_{\omega}(\bm{q})\delta\bm{q}]_{\times}\right).
+  \label{eq:rot-err-perturb}
+\end{equation}
+设 $\bm{\phi} = \log(\bm{E}_R)^{\vee}$ 且转角模长 $\theta = \|\bm{\phi}\|_2 > 0$，$\SO$ 对数映射的右雅可比算子 $\bm{J}_{\log_3}(\bm{E}_R) \in \mathbb{R}^{3\times 3}$ 具有闭式表达（当 $\theta \to 0$ 时按一阶泰勒展开退化为 $\bm{I}_3 + \frac{1}{2}[\bm{\phi}]_{\times}$）
+\begin{equation}
+  \bm{J}_{\log_3}(\bm{E}_R) = \bm{I}_3 + \frac{1}{2}[\bm{\phi}]_{\times} + \left(\frac{1}{\theta^2} - \frac{1 + \cos\theta}{2\theta\sin\theta}\right)[\bm{\phi}]_{\times}^2.
+  \label{eq:jlog3-closed}
+\end{equation}
+由此可得对数旋转误差关于 $\bm{q}$ 的一阶解析导数为 $-\bm{J}_{\log_3}(\bm{E}_R(\bm{q}))\bm{J}_{\omega}(\bm{q})$，完整残差向量的解析雅可比矩阵 $\bm{J}_{\bm{e}}(\bm{q}) \in \mathbb{R}^{13\times 7}$ 写为
+\begin{equation}
+  \bm{J}_{\bm{e}}(\bm{q}) = \begin{bmatrix}
+    \bm{J}_v(\bm{q}) / \sigma_p \\[3pt]
+    -\bm{J}_{\log_3}\!\left(\bm{R}_{\text{des}}\bm{R}(\bm{q})^{\top}\right)\bm{J}_{\omega}(\bm{q}) / \sigma_R \\[3pt]
+    \lambda_q \bm{I}_7
+  \end{bmatrix}.
+  \label{eq:nero-ik-jacobian}
+\end{equation}
+将该解析雅可比传入信赖域反射求解器迭代寻优，并对候选解执行正运动学位姿误差验收（位置误差 $<2\,\mathrm{mm}$，姿态误差 $<2^{\circ}$）与帧间连续性校验，即可满足双臂实时闭环需求。
+
+\subsubsection{对指距离自适应的灵巧手解析梯度向量重定向}
+
+灵巧手重定向需要兼顾张手时的五指姿态跟随与拈布时的指尖闭合接触。当五指张开运动时，灵巧手各指节应跟随操作者手指弯曲形态；当操作者做出拇指与其余手指捏合动作时，灵巧手指尖必须准确贴合，避免因人机手掌比例差异在指尖之间留下缝隙。本系统集成的 AnyDexRetarget~\cite{qiu2025anydexretarget} 模块从 Pico 4 的 26 个骨骼节点中选取 21 个标准关键点并转换至局部手掌系，建立对指距离自适应混合优化模型。
+
+记五指索引为 $f \in \{0, 1, 2, 3, 4\}$，其中 $0$ 代表拇指，$1\sim 4$ 依次代表食指、中指、无名指与小指。对每根手指从腕部向指尖依次连接的掌指、近端指间、远端指间与指尖四段人手骨骼增量向量 $\{\Delta\bm{x}_{f,m}\}_{m=1}^4$，先沿手掌横向轴施加侧摆压缩算子 $\bm{\Gamma}_{\text{palm}}$（横向缩放因子取 $0.7$）以限制过宽分指，再乘以按人机指骨长度比标定的分节尺度 $s_{f,m}$ 逐段累加，构造腕部指向近端指间（$n_{\text{pip}}=2$）、远端指间（$n_{\text{dip}}=3$）与指尖（$n_{\text{tip}}=4$）的全手目标向量
+\begin{equation}
+  \hat{\bm{v}}_{f,k}^{\text{full}} = \sum_{m=1}^{n_k} s_{f,m}\,\bm{\Gamma}_{\text{palm}}\!\left(\Delta\bm{x}_{f,m}\right), \qquad k \in \{\text{pip}, \text{dip}, \text{tip}\}.
+  \label{eq:segment-bone-scaling}
+\end{equation}
+
+为识别对指意图，计算人手拇指尖 $\bm{x}_0^{\text{tip}}$ 与各非拇指指尖 $\bm{x}_f^{\text{tip}}$ 之间的距离 $d_f = \|\bm{x}_f^{\text{tip}} - \bm{x}_0^{\text{tip}}\|_2$（换算为厘米单位），结合双阈值 $(d_{1,f}, d_{2,f}) = (2.0\,\mathrm{cm}, 4.0\,\mathrm{cm})$ 与权重上限 $\alpha_{\max} = 1.0$，定义各指的对指激活权重
+\begin{equation}
+  \alpha_f = \clip\!\left(\frac{d_{2,f} - d_f}{d_{2,f} - d_{1,f}}, \; 0, \; \alpha_{\max}\right), \quad f \in \{1,2,3,4\}, \qquad
+  \alpha_0 = \max_{1 \le f \le 4} \alpha_f.
+  \label{eq:pinch-alpha}
+\end{equation}
+记当前对指激活权重最大的非拇指手指为 $f^* = \arg\max_{f \ge 1} \alpha_f$。当 $\alpha_{f^*} > 0$ 时，拇指与伙伴指 $f^*$ 的指尖目标位置向量按混合比 $\beta_{\text{pinch}} = \min(\alpha_{f^*}/\alpha_{\max}, 1)$ 由分节缩放向量 $\hat{\bm{v}}_f^{\text{full,tip}}$ 向统一捏合尺度 $s_{\text{pinch}}$ 生成的向量平滑插值过渡，其余手指保持 $\hat{\bm{v}}_f^{\text{tip}} = \hat{\bm{v}}_f^{\text{full,tip}}$，即
+\begin{equation}
+  \hat{\bm{v}}_f^{\text{tip}} = (1 - \beta_{\text{pinch}})\hat{\bm{v}}_f^{\text{full,tip}} + \beta_{\text{pinch}}\, s_{\text{pinch}}\!\left(\bm{x}_f^{\text{tip}} - \bm{x}_{\text{wrist}}\right), \qquad f \in \{0, f^*\},
+  \label{eq:pinch-tip-blend}
+\end{equation}
+从而消除人手对指重合时两指异构缩放系数引起的残余目标间隙。同时提取人手末节指骨单位向量 $\hat{\bm{u}}_f^{\text{dir}} = \Delta\bm{x}_{f,4} / \|\Delta\bm{x}_{f,4}\|_2$ 作为指腹朝向目标。
+
+设 LinkerHand L20 的独立主动关节向量为 $\bm{q}_h \in \mathbb{R}^{16}$。该灵巧手包含 5 个与主动关节呈仿射耦合关系的被动指节，全运动学树关节向量 $\bm{q}_{\text{full}} \in \mathbb{R}^{21}$ 由带限位截断的仿射关系 $\bm{q}_{\text{full}} = \clip(\bm{M}\bm{q}_h + \bm{b}, \bm{q}_{\text{full},\min}, \bm{q}_{\text{full},\max})$ 给出，其中 $\bm{M} \in \mathbb{R}^{21\times 16}$ 为耦合系数矩阵。定义阈值为 $\delta$ 的平滑 Huber 损失函数
+\begin{equation}
+  \rho_{\delta}(r) = \begin{cases}
+    \dfrac{1}{2\delta} r^2, & 0 \le r < \delta, \\[6pt]
+    r - \dfrac{\delta}{2}, & r \ge \delta,
+  \end{cases}
+  \label{eq:huber-def}
+\end{equation}
+则单帧灵巧手重定向问题建模为如下盒约束非线性规划
+\begin{align}
+  \min_{\bm{q}_{h,\min} \le \bm{q}_h \le \bm{q}_{h,\max}} \mathcal{L}_{\text{hand}}(\bm{q}_h)
+  &= \sum_{f=0}^{4} \Big[ \alpha_f L_f^{\text{tip}}(\bm{q}_{\text{full}}) + (1 - \alpha_f) w_{\text{full}} L_f^{\text{full}}(\bm{q}_{\text{full}}) \Big] \notag\\
+  &\quad + w_{\text{contact}} \alpha_{f^*} \left\|\bm{p}_0^{\text{tip}}(\bm{q}_{\text{full}}) - \bm{p}_{f^*}^{\text{tip}}(\bm{q}_{\text{full}})\right\|_2^2
+  + \lambda_{\text{reg}} \left\|\bm{q}_h - \bm{q}_{h,\text{prev}}\right\|_2^2,
+  \label{eq:hand-retarget-total}
+\end{align}
+其中指尖位置与方向匹配项 $L_f^{\text{tip}}$ 及全手三节点姿态项 $L_f^{\text{full}}$ 分别为
+\begin{align}
+  L_f^{\text{tip}}(\bm{q}_{\text{full}}) &= w_{\text{pos}}\,\rho_{\delta_p}\!\left(\left\|\bm{v}_f^{\text{tip}}(\bm{q}_{\text{full}}) - \hat{\bm{v}}_f^{\text{tip}}\right\|_2\right)
+  + w_{\text{dir}}\,\rho_{\delta_d}\!\left(\left\|\bm{u}_f^{\text{dir}}(\bm{q}_{\text{full}}) - \hat{\bm{u}}_f^{\text{dir}}\right\|_2\right), \label{eq:loss-tip}\\
+  L_f^{\text{full}}(\bm{q}_{\text{full}}) &= \frac{1}{3} \sum_{k \in \{\text{pip,dip,tip}\}} \rho_{\delta_p}\!\left(\left\|\bm{v}_{f,k}^{\text{full}}(\bm{q}_{\text{full}}) - \hat{\bm{v}}_{f,k}^{\text{full}}\right\|_2\right). \label{eq:loss-full}
+\end{align}
+由式~\eqref{eq:pinch-alpha} 与式~\eqref{eq:hand-retarget-total} 可见，张手运动（$d_f \ge d_2$）时 $\alpha_f = 0$，优化完全由 $L_f^{\text{full}}$ 主导；闭合捏布（$d_f \le d_1$）时 $\alpha_f = 1$，目标切换至指尖位置、末节指向与接触距离约束。记机器人末节向量为 $\bm{d}_f = \bm{p}_f^{\text{tip}} - \bm{p}_f^{\text{dip}}$，单位方向为 $\bm{u}_f^{\text{dir}} = \bm{d}_f / \|\bm{d}_f\|_2$，利用单位向量投影导数 $\partial \bm{u}_f^{\text{dir}} / \partial \bm{d}_f = (\bm{I}_3 - \bm{u}_f^{\text{dir}}(\bm{u}_f^{\text{dir}})^{\top}) / \|\bm{d}_f\|_2$ 配合各指节线速度雅可比计算全关节梯度 $\nabla_{\bm{q}_{\text{full}}}\mathcal{L}_{\text{hand}}$，再对未触及被动限位截断的分量经 $\bm{M}^{\top}$ 回传至主动关节空间
+\begin{equation}
+  \nabla_{\bm{q}_h}\mathcal{L}_{\text{hand}} = \bm{M}^{\top} \nabla_{\bm{q}_{\text{full}}}\mathcal{L}_{\text{hand}} + 2\lambda_{\text{reg}}(\bm{q}_h - \bm{q}_{h,\text{prev}}).
+  \label{eq:mimic-grad-pullback}
+\end{equation}
+优化器采用序列二次规划算法（SLSQP）~\cite{kraft1988software} 在约 $2\,\mathrm{ms}$ 内求得 $\bm{q}_h^*$，经一阶低通滤波平滑后按式~\eqref{eq:hand-slot-quant} 量化为 16 个有效槽位指令。
+
+\subsubsection{双臂两阶段并行调度与多模态数据集录制}
+
+双臂遥操作需在每个 $20\,\mathrm{Hz}$ 控制周期内完成两套七轴逆运动学、两套五指 SLSQP 重定向、四通道 SocketCAN 总线收发与彩色图像采集。为消除全局解释器锁导致的计算串行化并避免左右侧动作下发偏斜，系统为左右两侧分别拉起独立的运动学计算子进程，并通过两阶段同步协议组织每拍的数据采样与控制下发。
+
+在每个控制周期开始时，主控进程首先抓取当前最新对齐 RGB 相机图像帧，随后并发触发左右两侧进入准备阶段（Prepare）。两侧各自在计算子进程中并行求解当拍机械臂逆运动学目标与灵巧手重定向目标，同时读取下发控制指令前的真实关节与槽位反馈拼接为观测状态 $\bm{s}_t$，此时暂不向 CAN 总线发送动作指令。若任一侧出现可恢复的逆运动学未收敛，主控进程同步取消另一侧待发目标使双臂原地保持；仅当双侧目标均通过限位与连续性校验时，系统进入提交阶段（Commit）同步向双侧机械臂与灵巧手写入目标指令 $\bm{a}_t$，并将同一周期对应的 $(\bm{I}_t, \bm{s}_t, \bm{a}_t)$ 写入录制缓存。录制完成的轨迹经帧率与时间戳核验后批量转换为 LeRobot v3.0 数据集~\cite{cadene2026lerobot}，数值序列与分位数统计量存储为 Parquet 文件，图像序列编码为无 B 帧 H.264 视频文件，合计包含一次对折与二次对折示教轨迹各 60 条。

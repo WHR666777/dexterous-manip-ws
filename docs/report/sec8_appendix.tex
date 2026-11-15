@@ -1,0 +1,152 @@
+% =============================================================
+\section{系统总体设计图}
+\label{app:system-diagram}
+% =============================================================
+
+图~\ref{fig:appendix-full-topology} 给出了双臂灵巧手自主折布系统的硬件通信总线拓扑、跨环境多进程组织结构以及离线采集与在线双阶段执行的数据流向。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  hwbox/.style={rectangle, draw=black!80, rounded corners=3pt, minimum width=3.1cm,
+                minimum height=0.95cm, align=center, font=\footnotesize, fill=gray!12},
+  procbox/.style={rectangle, draw=black!75, rounded corners=3pt, minimum width=3.4cm,
+                  minimum height=1.05cm, align=center, font=\footnotesize},
+  envbox/.style={rectangle, draw=black!50, dashed, rounded corners=5pt, inner sep=8pt},
+  bus/.style={-{Stealth[length=2.3mm]}, semithick},
+  bidir/.style={<->, >=Stealth, semithick}
+]
+  % 上层 离线遥操作端与在线智能体端
+  \node[procbox, fill=blue!8] (pico) at (-4.8, 4.4) {Pico 4 头显追踪端\\TCP 骨骼流 (双手 26 节点)};
+  \node[procbox, fill=blue!10] (teleop) at (-4.8, 2.5) {遥操作采集主进程 + 双侧计算子进程\\增量锚定 / 解析 IK / SLSQP 重定向};
+  \node[procbox, fill=blue!6] (lerobot) at (-4.8, 0.6) {LeRobot v3.0 数据集存储\\Parquet 状态动作 + H.264 视频};
+
+  \node[procbox, fill=orange!10] (codex) at (0.2, 4.4) {Codex 多模态推理客户端\\视觉分析与代码单元编写};
+  \node[procbox, fill=orange!14] (mcp) at (0.2, 2.5) {MCP 协调服务 + 持久工作进程\\准入令牌管理与 \texttt{robo} 轨迹规划};
+  \node[procbox, fill=red!10] (hold) at (5.2, 4.4) {独立人工保持终端\\Unix 数据报原位保持};
+
+  % 中层 硬件控制核心与 GPU 推理子进程
+  \node[procbox, fill=teal!12, minimum width=4.6cm, minimum height=1.2cm] (ctrl) at (0.2, 0.4) {双臂硬件控制主进程 (\texttt{nero} 环境)\\双侧 $20\,\mathrm{Hz}$ 周期控制器 + 工作区校验};
+  \node[procbox, fill=green!12, minimum width=3.8cm, minimum height=1.2cm] (actworker) at (5.5, 0.4) {ACT 常驻推理子进程 (\texttt{act} 环境)\\CVAE/DETR 与冻结 DINOv3 (GPU)};
+
+  % 底层 五路物理硬件接口
+  \node[hwbox] (arml) at (-5.4, -2.1) {左臂 AgileX Nero\\(\texttt{can\_arm\_b})};
+  \node[hwbox] (handl) at (-1.9, -2.1) {左手 LinkerHand L20\\(\texttt{can\_hand\_b})};
+  \node[hwbox] (armr) at (1.7, -2.1) {右臂 AgileX Nero\\(\texttt{can\_arm\_a})};
+  \node[hwbox] (handr) at (5.2, -2.1) {右手 LinkerHand L20\\(\texttt{can\_hand\_a})};
+  \node[hwbox, fill=cyan!10, minimum width=5.2cm] (cam) at (-0.1, -3.6) {Intel RealSense L515 激光雷达相机\\USB 3.1 对齐 RGB-D 流 ($640\times 480$, $30\,\mathrm{Hz}$)};
+
+  % 连接关系
+  \draw[bus] (pico) -- (teleop);
+  \draw[bus] (teleop) -- (lerobot);
+  \draw[bus, dashed] (lerobot.south) |- ([yshift=0.8cm]actworker.north) -- (actworker.north);
+
+  \draw[bidir] (codex) -- (mcp);
+  \draw[bidir] (mcp) -- (ctrl);
+  \draw[bus, thick, draw=red!75!black] (hold.south) |- ([yshift=0.25cm]ctrl.east);
+  \draw[bidir, thick, draw=green!50!black] (ctrl) -- node[above, font=\scriptsize] {二进制管道} node[below, font=\scriptsize] {状态/图像 $\leftrightarrow$ 46 维动作} (actworker);
+
+  % 硬件连线
+  \draw[bidir] (ctrl.south) -- ++(0,-0.45) -| (arml.north);
+  \draw[bidir] (ctrl.south) -- ++(0,-0.45) -| (handl.north);
+  \draw[bidir] (ctrl.south) -- ++(0,-0.45) -| (armr.north);
+  \draw[bidir] (ctrl.south) -- ++(0,-0.45) -| (handr.north);
+  \draw[bus] (cam.north) -- ++(0,0.45) -| ([xshift=-0.4cm]ctrl.south);
+  \draw[bus, dotted] (teleop.east) -| ([xshift=-1.3cm]ctrl.north);
+
+  % 外框标注
+  \begin{scope}[on background layer]
+    \node[envbox, fit=(arml)(handl)(armr)(handr)(cam), label={[font=\scriptsize\bfseries]below:物理执行机构、独立四通道 SocketCAN 总线与全局视觉传感层}] {};
+  \end{scope}
+\end{tikzpicture}%
+}
+\caption{双臂灵巧手折布系统硬件总线拓扑与跨环境多进程交互设计图}
+\label{fig:appendix-full-topology}
+\end{figure}
+
+
+% =============================================================
+\section{核心算法与控制器关键代码片段}
+\label{app:source-code}
+% =============================================================
+
+按照课程报告精简附录代码的要求，以下仅摘录三段核心算法实现片段，完整源码包含于项目代码仓库中。
+
+\subsection{七轴机械臂解析李代数雅可比逆运动学实现}
+
+以下片段取自 \texttt{robot\_control/nero\_ik.py}，对应正文式~\eqref{eq:nero-ik-lsq} 与式~\eqref{eq:nero-ik-jacobian}，实现右不变旋转对数残差及基于 Pinocchio \texttt{Jlog3} 的解析雅可比矩阵计算。
+
+\begin{lstlisting}[caption={七轴逆运动学加权残差与解析雅可比计算片段}]
+def residual(candidate):
+    actual = self.forward(candidate)
+    position = (actual[:3, 3] - target[:3, 3]) / MAX_FK_POSITION_ERROR_M
+    rotation = Rotation.from_matrix(target[:3, :3] @ actual[:3, :3].T).as_rotvec()
+    rotation /= np.deg2rad(MAX_FK_ROTATION_ERROR_DEG)
+    return np.r_[position, rotation,
+                 REGULARIZATION_WEIGHT * wrap_angle(candidate - seed)]
+
+def jacobian(candidate):
+    actual, frame_jacobian = self._forward_and_jacobian(candidate)
+    error_rotation = target[:3, :3] @ actual[:3, :3].T
+    rotation_jacobian = -pin.Jlog3(error_rotation) @ frame_jacobian[3:]
+    return np.vstack((
+        frame_jacobian[:3] / MAX_FK_POSITION_ERROR_M,
+        rotation_jacobian / np.deg2rad(MAX_FK_ROTATION_ERROR_DEG),
+        REGULARIZATION_WEIGHT * np.eye(7),
+    ))
+\end{lstlisting}
+
+\subsection{灵巧手对指距离自适应权重与方向解析梯度实现}
+
+以下片段取自优化器模块 \texttt{analytical\_optimizer.py}，对应正文式~\eqref{eq:pinch-alpha} 与式~\eqref{eq:loss-tip}，实现拇指与其余四指的对指激活权重计算及末节指骨单位方向向量的投影雅可比回传。
+
+\begin{lstlisting}[caption={对指自适应激活权重与末节单位向量解析梯度计算片段}]
+def _compute_pinch_alpha(self, mediapipe_keypoints: np.ndarray) -> np.ndarray:
+    thumb_tip = mediapipe_keypoints[self.MP_TIP_INDICES[0]]
+    non_thumb_mp_indices = self.mp_finger_indices[1:]
+    finger_tips = np.array([mediapipe_keypoints[self.MP_TIP_INDICES[i]]
+                            for i in non_thumb_mp_indices])
+    distances = np.linalg.norm(finger_tips - thumb_tip, axis=1) * M_TO_CM
+    alphas_nt = np.clip((self.d2 - distances) / (self.d2 - self.d1 + 1e-8),
+                        0.0, self.pinch_alpha_max)
+    return np.concatenate([[np.max(alphas_nt)], alphas_nt])
+
+# 末节指骨单位方向向量的投影雅可比与梯度累加
+for i in range(nf):
+    grad_coeff = alphas[i] * self.w_dir * huber_grad_dir[i]
+    u = robot_tip_dirs[i]
+    n = robot_tip_dir_norm[i, 0]
+    J_norm = (np.eye(3) - np.outer(u, u)) / (n + 1e-8)
+    J_diff = J_task[i] - J_link4[i]
+    total_grad += grad_coeff * (diff_normed_dir[i] @ J_norm @ J_diff)
+\end{lstlisting}
+
+\subsection{冻结 DINOv3 密集特征池化与训练期状态噪声注入实现}
+
+以下片段取自策略训练模块 \texttt{train\_act\_dinov3.py}，对应正文式~\eqref{eq:dinov3-proj} 与式~\eqref{eq:state-noise}，实现无梯度提取 DINOv3 局部补丁特征、二维空间平均池化以及训练期标准化本体状态高斯噪声注入。
+
+\begin{lstlisting}[caption={冻结 DINOv3 视觉特征提取与标准化状态噪声注入片段}]
+class FrozenDINOv3(nn.Module):
+    def __init__(self, backbone: nn.Module, pool_stride: int = 2):
+        super().__init__()
+        self.encoder = backbone.requires_grad_(False).eval()
+        self.pool_stride = pool_stride
+
+    def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
+        h, w = images.shape[-2:]
+        p = self.encoder.patch_size
+        with torch.no_grad():
+            tokens = self.encoder.forward_features(images)["x_norm_patchtokens"]
+            feat = tokens.transpose(1, 2).reshape(images.shape[0], -1, h // p, w // p)
+            if self.pool_stride > 1:
+                feat = F.avg_pool2d(feat, self.pool_stride)
+        return {"feature_map": feat}
+
+def forward(self, batch):
+    if self.training and self.config.state_noise_std > 0:
+        batch = dict(batch)
+        state = batch["observation.state"]
+        batch["observation.state"] = state + torch.randn_like(state) * self.config.state_noise_std
+    return super().forward(batch)
+\end{lstlisting}
