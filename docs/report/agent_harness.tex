@@ -1,683 +1,452 @@
-% !TEX encoding = UTF-8
-% agent_harness.tex — Agent Harness 模块报告
-% 对应 cloth_agent 文件夹实现
-\documentclass[12pt,a4paper]{ctexart}
-
-\usepackage{geometry}
-\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
-
-\usepackage{graphicx}
-\usepackage{amsmath,amssymb}
-\usepackage{booktabs}
-\usepackage{longtable}
-\usepackage{enumitem}
-\usepackage{listings}
-\usepackage{xcolor}
-\usepackage{hyperref}
-\usepackage{float}
-\usepackage{caption}
-\usepackage{subcaption}
-\usepackage{tikz}
-\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, calc}
-
-% 代码样式
-\lstset{
-  language=Python,
-  basicstyle=\small\ttfamily,
-  keywordstyle=\color{blue}\bfseries,
-  commentstyle=\color{gray}\itshape,
-  stringstyle=\color{red!70!black},
-  showstringspaces=false,
-  breaklines=true,
-  frame=single,
-  numbers=left,
-  numberstyle=\tiny\color{gray},
-  tabsize=4,
-  captionpos=b,
-  xleftmargin=1em,
-  framexleftmargin=1em,
-}
-
-\hypersetup{
-  colorlinks=true,
-  linkcolor=blue!70!black,
-  citecolor=green!50!black,
-  urlcolor=blue!60!black,
-}
-
-% ============================================================
-\begin{document}
-
-% ------ 封面信息（仅本部分标题，正式合并时删除 maketitle）------
-\begin{center}
-  {\LARGE\bfseries Agent Harness 模块设计与实现}\\[1em]
-  {\large 基于 Code-as-Policy 的灵巧布料操作自主系统}\\[2em]
-\end{center}
-
-\tableofcontents
-\newpage
+% agent_harness.tex
+% 本文件仅包含 Agent Harness 模块的章节内容，
+% 不含 \documentclass、\begin{document} 等全局结构。
+% 合并时由主文件 \input{agent_harness} 引入。
+%
+% 依赖的宏包（需在主文件导言区加载）：
+%   graphicx, amsmath, booktabs, longtable, enumitem,
+%   listings, xcolor, hyperref, float, caption,
+%   tikz (libraries: shapes.geometric, arrows.meta, positioning, fit, calc)
+%
+% 代码样式（建议在主文件中统一定义）：
+% \lstset{language=Python, basicstyle=\small\ttfamily, ...}
 
 % =============================================================
-\section{概述}
+\section{Agent Harness 模块}
+\label{sec:agent-harness}
 % =============================================================
 
-Agent Harness（\texttt{cloth\_agent} 包）是本项目三大功能模块之一，负责将大语言模型（LLM/MLLM）驱动的自主规划能力与底层机器人运动执行系统贯通，实现\textbf{``Code-as-Policy''}风格的灵巧布料操作。与示教模块（数据采集）和 ACT 推理模块（策略回放）不同，Agent Harness 的核心定位是：让 AI agent 自主感知环境状态、分解任务、生成可执行的 Python 程序、监督执行过程并在异常发生时完成参数恢复，从而实现端到端的闭环自主操作。
+前面两个模块分别解决了``怎样采集人类示教数据''和``怎样让策略网络把动作重放出来''的问题。不过，不管是遥操作还是 ACT 推理，本质上都是由人（或人录下的数据）来决定每一步做什么。一旦任务变复杂，比如需要根据布料当前的形状临时调整抓取位置、处理抓滑后的恢复，或者把一个``折叠两次''的高层目标拆成若干子步骤，纯粹靠预录数据就很难应对了。
 
-其设计灵感来源于 Google Research 的 Code-as-Policies~\cite{liang2023code}、ReKep~\cite{huang2024rekep} 以及 Code-as-Monitor~\cite{zhou2024code} 等工作，结合本项目 Nero 七轴机械臂与 LinkerHand L20 灵巧手的硬件特性进行了工程落地。
+Agent Harness 就是为了填补这个缺口而设计的。它把一个大语言模型（LLM）接入机器人控制栈，让 LLM 观察 RGB-D 图像和关节反馈后自行编写 Python 程序，程序直接调用底层规划和执行接口操作 Nero 机械臂和 L20 灵巧手。生成的程序在独立进程中运行，可以一边执行运动一边监督状态；一旦检测到异常就暂停动作，等 LLM 分析后给出新参数继续执行。整个过程不需要人手动写控制脚本或在终端手动输入目标关节角，LLM 既是规划者也是程序员也是监督者。
+
+这个思路来自 Code-as-Policies~\cite{liang2023code}——把 LLM 的输出当作可执行代码而非自然语言指令。我们同时参考了 ReKep~\cite{huang2024rekep} 中使用关键点约束表达任务目标的方式，以及 Code-as-Monitor~\cite{zhou2024code} 中让 LLM 生成的代码既执行动作又监控异常的做法。当然，从论文到能在 Nero + L20 上实际跑起来的系统之间还有不少工程问题，下面分模块说明我们的设计和取舍。
+
 
 % =============================================================
-\section{系统架构}
-\label{sec:architecture}
+\subsection{整体结构与模块划分}
+\label{subsec:agent-arch}
 % =============================================================
 
-\subsection{总体架构}
+\texttt{cloth\_agent} 包的代码按职责分成四层，自上而下是：
 
-Agent Harness 采用分层架构设计，自顶向下包含四个主要层次：
-
-\begin{enumerate}[label=(\arabic*)]
-  \item \textbf{Agent 层}（Codex App-Server 客户端）：通过 JSON-RPC 协议驱动 Codex LLM，完成任务分解、代码生成与恢复决策。
-  \item \textbf{运行时层}（Runtime）：管理设备生命周期、事件调度、子任务进程管理，作为系统的核心协调器。
-  \item \textbf{规划与执行层}（Planner + Executor）：负责运动路径规划（IK 求解 + TOPPRA 时间参数化）和实时轨迹跟踪执行。
-  \item \textbf{硬件抽象层}（Backend + Observations）：统一封装 Mock 仿真后端和真实硬件后端，提供关节读写与 RGB-D 观测接口。
+\begin{enumerate}
+  \item Codex 客户端（\texttt{codex.py}）：和 OpenAI Codex 本地进程通过 JSON-RPC 通信，负责把任务描述送进 LLM、接收 LLM 的工具调用并分发给下层。
+  \item Runtime 运行时（\texttt{runtime.py}）：系统的中枢，管理设备生命周期、子任务进程、事件队列，以及子任务进程和 Runtime 之间的 HTTP 通信桥梁。
+  \item 规划和执行（\texttt{planning.py}、\texttt{executor.py}）：Planner 把 TCP waypoint 转换为满足速度和加速度限制的时间参数化关节轨迹，Executor 在后台线程中按固定周期把轨迹点发给硬件。
+  \item 硬件抽象和观测（\texttt{backends.py}、\texttt{observations.py}）：把 Mock 仿真和真实硬件封装成相同接口，观测模块则统一提供关节反馈、RGB-D 图像和外部关键点。
 \end{enumerate}
 
-图~\ref{fig:architecture} 展示了各模块之间的调用关系与数据流向。
+此外，\texttt{geometry.py} 提供坐标变换和反投影等纯函数工具，\texttt{tools.py} 是生成程序的运行时 SDK，\texttt{config.py} 负责配置加载和校验，\texttt{records.py} 维护中英双语的事件/状态文本，\texttt{demo.py} 实现了一个不连接设备的 smoke test，\texttt{cli.py} 是命令行入口。
+
+图~\ref{fig:agent-arch} 画出了这些模块之间的主要调用关系。为了减少视觉噪音，图中省略了 \texttt{config}、\texttt{records}、\texttt{geometry} 等辅助模块的连线——它们几乎被所有上层模块引用。
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[
-  block/.style={rectangle, draw, rounded corners, minimum width=3.2cm,
-                minimum height=1.0cm, align=center, font=\small},
+  block/.style={rectangle, draw, rounded corners, minimum width=2.8cm,
+                minimum height=0.9cm, align=center, font=\small},
   arrow/.style={-{Stealth[length=3mm]}, thick},
   darrow/.style={Stealth[length=2.5mm]-Stealth[length=2.5mm], thick},
-  node distance=1.2cm and 1.5cm,
+  node distance=1.0cm and 1.5cm,
 ]
   % Agent 层
-  \node[block, fill=blue!15] (codex) {Codex App-Server\\(\texttt{codex.py})};
-  \node[block, fill=blue!15, right=2.0cm of codex] (llm) {Codex LLM\\(外部进程)};
-  \draw[darrow] (codex) -- node[above, font=\scriptsize] {JSON-RPC} (llm);
+  \node[block, fill=blue!12] (codex) {Codex 客户端\\(\texttt{codex.py})};
+  \node[block, fill=blue!12, right=2.2cm of codex] (llm) {Codex LLM\\(外部进程)};
+  \draw[darrow] (codex) -- node[above, font=\scriptsize] {JSON-RPC / stdio} (llm);
 
-  % Runtime 层
-  \node[block, fill=green!15, below=1.5cm of codex] (runtime) {Runtime\\(\texttt{runtime.py})};
-  \draw[arrow] (codex) -- node[left, font=\scriptsize] {工具调用} (runtime);
+  % Runtime
+  \node[block, fill=green!12, below=1.4cm of codex] (runtime) {Runtime\\(\texttt{runtime.py})};
+  \draw[arrow] (codex) -- node[left, font=\scriptsize] {工具分发} (runtime);
 
   % 子任务
-  \node[block, fill=orange!15, right=2.0cm of runtime] (subtask) {子任务进程\\(生成的 Python)};
+  \node[block, fill=orange!12, right=2.2cm of runtime] (subtask) {子任务进程\\(LLM 生成的 .py)};
   \draw[arrow] (runtime) -- node[above, font=\scriptsize] {subprocess} (subtask);
 
-  % Tools 桥接
-  \node[block, fill=orange!15, below=0.8cm of subtask] (tools) {Tools SDK\\(\texttt{tools.py})};
+  % Tools
+  \node[block, fill=orange!12, below=0.7cm of subtask] (tools) {tools SDK\\(\texttt{tools.py})};
   \draw[arrow] (subtask) -- (tools);
-  \draw[arrow] (tools.west) -- node[below, font=\scriptsize] {HTTP Bridge} (tools.west -| runtime.east) -- (runtime.east);
+  \draw[arrow] (tools.west) -- node[below, font=\scriptsize] {HTTP} (tools.west -| runtime.east) -- (runtime.east);
 
-  % 规划层
-  \node[block, fill=yellow!20, below=1.5cm of runtime] (planner) {Planner\\(\texttt{planning.py})};
-  \node[block, fill=yellow!20, right=2.0cm of planner] (executor) {Executor\\(\texttt{executor.py})};
+  % 规划执行
+  \node[block, fill=yellow!15, below=1.4cm of runtime] (planner) {Planner\\(\texttt{planning.py})};
+  \node[block, fill=yellow!15, right=2.2cm of planner] (executor) {Executor\\(\texttt{executor.py})};
   \draw[arrow] (runtime) -- (planner);
   \draw[arrow] (runtime.south east) -- (executor.north);
 
-  % 硬件层
-  \node[block, fill=red!12, below=1.5cm of planner] (backend) {Backend\\(\texttt{backends.py})};
-  \node[block, fill=red!12, right=2.0cm of backend] (obs) {Observations\\(\texttt{observations.py})};
-  \draw[arrow] (executor) -- (backend);
-  \draw[arrow] (planner) -- (backend);
-  \draw[arrow] (runtime) |- (obs);
-  \draw[arrow] (obs) -- (backend);
-
-  % 几何
-  \node[block, fill=purple!10, left=1.5cm of planner] (geom) {Geometry\\(\texttt{geometry.py})};
-  \draw[arrow] (runtime.south west) -- (geom.north);
-  \draw[arrow] (planner.west) -- (geom.east);
-
   % 硬件
-  \node[block, fill=gray!20, below=1.0cm of backend] (hw) {Nero + L20\\(CAN 总线)};
-  \node[block, fill=gray!20, below=1.0cm of obs] (cam) {RealSense L515\\(RGB-D 相机)};
+  \node[block, fill=red!10, below=1.4cm of planner] (backend) {Backend\\(\texttt{backends.py})};
+  \node[block, fill=red!10, right=2.2cm of backend] (obs) {Observations\\(\texttt{observations.py})};
+  \draw[arrow] (executor) -- (backend);
+  \draw[arrow] (runtime) |- (obs);
+
+  % 物理设备
+  \node[block, fill=gray!15, below=0.9cm of backend] (hw) {Nero + L20\\(CAN)};
+  \node[block, fill=gray!15, below=0.9cm of obs] (cam) {RealSense L515\\(RGB-D)};
   \draw[arrow, dashed] (backend) -- (hw);
   \draw[arrow, dashed] (obs) -- (cam);
 \end{tikzpicture}
-\caption{Agent Harness 系统架构图}
-\label{fig:architecture}
+\caption{Agent Harness 模块调用关系。虚线表示硬件通信，实线表示函数或进程间调用。}
+\label{fig:agent-arch}
 \end{figure}
 
-\subsection{工作流程}
 
-整个任务执行遵循如下流程：
+% =============================================================
+\subsection{一次任务的完整流程}
+\label{subsec:agent-workflow}
+% =============================================================
+
+把这些模块串起来，一次折布任务大致经过以下步骤。举例来说，用户在命令行输入``将矩形抹布折叠两次''：
 
 \begin{enumerate}
-  \item 用户通过 CLI 发起任务（如``将矩形抹布折叠两次''）。
-  \item Runtime 初始化硬件后端、规划器、执行器和观测系统。
-  \item Codex App-Server 启动，建立与 LLM 的对话线程（thread）。
-  \item LLM 调用 \texttt{cloth\_observe} 工具获取初始观测，制定阶段计划。
-  \item 对每个子阶段，LLM 依次完成：
+  \item CLI 读取配置、初始化 Runtime。Runtime 依次创建后端（Mock 或 Hardware）、Planner、Executor 和 Observations，并在本地启动一个 HTTP 服务作为子任务通信桥梁。
+  \item Codex 客户端启动本机的 \texttt{codex app-server} 进程，通过 \texttt{initialize} / \texttt{thread/start} 建立一个对话线程，把任务描述作为第一条消息发送给 LLM。
+  \item LLM 首先调用 \texttt{cloth\_observe} 工具，拿到当前的关节位置、TCP 位姿、RGB-D 图像（base64 编码后直接发给多模态模型）和手部状态。根据这些信息，LLM 列出一个简短的子任务阶段清单，比如``抓取布角$\to$提起$\to$折叠$\to$放置$\to$第二次折叠''。
+  \item 对每个阶段，LLM 的工作分三步完成：
     \begin{itemize}
-      \item 调用几何计算工具确定关键位姿；
-      \item 调用 \texttt{cloth\_plan\_motion} 规划运动轨迹；
-      \item 通过 \texttt{cloth\_submit\_subtask} 提交完整 Python 程序；
-      \item 程序异步执行，自行组织监督循环与恢复分支。
+      \item 首先调用 \texttt{cloth\_geometry} 做坐标换算（比如把 RGB-D 图像中点选的像素位置反投影到任务坐标系的三维坐标），结合观测中的参考 TCP 朝向和工作区边界，确定目标 TCP 位姿。
+      \item 然后调用 \texttt{cloth\_plan\_motion} 规划运动轨迹。Planner 从当前关节位置出发，对每个 waypoint 求 IK，用 TOPPRA 做时间参数化，返回一个 \texttt{plan\_id}。如果 IK 求解失败或轨迹越出工作区，工具会返回诊断信息（哪个 waypoint 失败、什么原因），LLM 据此调整 waypoint 重试。
+      \item 最后调用 \texttt{cloth\_submit\_subtask}，把一份完整的 Python 程序和初始参数（包括 \texttt{plan\_id}）提交给 Runtime。
     \end{itemize}
-  \item 子任务完成或异常时，Runtime 产生事件通知 LLM 继续决策。
-  \item 所有阶段完成后，LLM 调用 \texttt{cloth\_finish\_task} 结束任务。
+  \item Runtime 做完语法检查后，以子进程方式启动该程序。程序 \texttt{import cloth\_agent.tools}，通过 HTTP 调用 Runtime 提供的各种接口：异步执行轨迹、在循环中读取观测检查异常、需要时暂停运动并请求 LLM 回复、最终报告子任务结果。
+  \item 子任务完成（或失败）后产生事件。如果任务还没结束，Codex 客户端把事件内容（可能附带最新的 RGB-D 图像）发给 LLM，LLM 继续规划下一个阶段。
+  \item 所有阶段都完成后，LLM 调用 \texttt{cloth\_finish\_task}，附上总结信息。Runtime 将任务标记为完成，保存摘要文件。
 \end{enumerate}
 
+这个流程的核心特点是，LLM 不是一次性输出全部代码然后袖手旁观，而是和生成的程序形成一个闭环：程序在执行过程中可以随时暂停并把当前状态反馈回 LLM，LLM 分析后给出新参数，程序在既有的恢复分支中继续执行。这样就避免了``出了问题只能从头来''的尴尬。
+
+
 % =============================================================
-\section{核心模块设计}
-\label{sec:modules}
+\subsection{配置与标定加载}
+\label{subsec:agent-config}
 % =============================================================
 
-\subsection{配置管理（config.py）}
+系统使用两套 YAML 配置文件：实机配置 \texttt{cloth\_agent.yaml} 和仿真配置 \texttt{cloth\_agent\_mock.yaml}。\texttt{demo} 子命令自动选用后者，其余场景默认使用前者。
 
-配置管理模块负责加载和校验 YAML 配置文件，是系统启动的入口。其设计要点：
+配置加载时做的事不少。首先是基础校验：\texttt{backend} 只能是 \texttt{mock} 或 \texttt{hardware}，控制频率、运动参数（关节到位容差、到位超时、IK 步长、平移步长、旋转步长）都必须是正的有限值，机械臂名只接受 \texttt{left} 或 \texttt{right}。
 
-\begin{itemize}
-  \item \textbf{双配置体系}：默认使用 \texttt{cloth\_agent.yaml}（实机配置），demo 模式自动选用 \texttt{cloth\_agent\_mock.yaml}（Mock 配置）。
-  \item \textbf{标定文件热加载}：启动时从指定标定文件（如 \texttt{calibration\_candidate.yaml}）中读取相机外参 \texttt{base\_from\_camera}、TCP 偏移 \texttt{flange\_from\_tcp}、闭合手型和参考朝向，并计算 \texttt{task\_from\_camera} 变换矩阵。
-  \item \textbf{工作区自动计算}：根据起始关节姿态的正运动学（FK）结果和标定 TCP，结合配置的立方体边长自动计算笛卡尔工作区边界。
-  \item \textbf{严格校验}：对所有物理量进行有限性、正值性、维度一致性检查，包括关节限位（7 维向量）、SE(3) 变换矩阵合法性、CAN 通道唯一性等。
-\end{itemize}
+然后是标定文件的读取。实机配置中 \texttt{calibration.file} 指向一个由 TCP-相机联合标定脚本产生的 YAML，其中包含相机外参（\texttt{base\_from\_camera}）、法兰到 TCP 的偏移（\texttt{flange\_from\_tcp}）、闭合手型和参考朝向角。加载函数把这些值组装成 \texttt{task\_from\_camera} 变换矩阵、把闭合手型存入对应臂的 \texttt{hand\_poses.closed}、把参考朝向换算成任务坐标系下的 TCP 旋转矩阵。路径支持相对和绝对两种写法，相对路径以配置文件所在目录为基准。
 
-核心函数 \texttt{load\_config()} 的校验流程如下：
+最后是工作区计算。实机配置的工作区不是直接给出 $[x_{\min}, y_{\min}, z_{\min}]$ 到 $[x_{\max}, y_{\max}, z_{\max}]$ 的数值，而是指定一个起始关节姿态文件和一个立方体边长。加载时先对起始姿态做正运动学得到 TCP 位置，再以该位置为中心、按边长一半向各方向扩展，得到笛卡尔工作区边界。这种写法的好处是更换起始姿态后不需要手动重算边界。
 
-\begin{lstlisting}[caption={配置加载与校验流程（简化）},label={lst:config}]
-def load_config(path=DEFAULT_CONFIG) -> dict:
-    config = yaml.safe_load(path.open())
-    # 校验 backend: mock 或 hardware
-    # 校验控制频率、运动参数为正有限值
-    # 校验机械臂名称仅限 left/right
-    _load_calibration(config)     # 读取标定文件
-    _resolve_workspaces(config)   # FK 计算工作区
-    return config
-\end{lstlisting}
+Hardware 后端还有一个额外的校验步骤（\texttt{validate\_hardware\_config}）：检查 CAN 通道、坐标变换、速度/加速度限制、工作区和手型预设全部填写，且四个 CAN 通道两两不同。这些字段在 Mock 配置中故意留空，防止有人不小心用 Mock 配置连接了真实设备。
 
-\subsection{硬件抽象层（backends.py）}
 
-系统提供两种后端实现，通过配置中的 \texttt{backend} 字段选择：
+% =============================================================
+\subsection{硬件抽象}
+\label{subsec:agent-backends}
+% =============================================================
 
-\begin{table}[H]
-\centering
-\caption{Mock 与 Hardware 后端对比}
-\label{tab:backends}
-\begin{tabular}{lll}
-  \toprule
-  \textbf{特性} & \textbf{MockBackend} & \textbf{HardwareBackend} \\
-  \midrule
-  设备连接 & 无（纯内存模拟） & CAN 总线连接 Nero + L20 \\
-  关节读取 & 直接返回内存状态 & 调用 \texttt{NeroArm.get\_joint\_positions()} \\
-  关节发送 & 立即更新内存 & 调用 \texttt{NeroArm.move\_js()} \\
-  手型控制 & 内存 20 槽数组 & 调用 \texttt{LinkerHandL20.set\_joint\_positions\_raw()} \\
-  预飞检查 & 无 & FK/SDK preflight 一致性校验 \\
-  线程安全 & Lock 保护 & 底层 SDK 保证 \\
-  \bottomrule
-\end{tabular}
-\end{table}
+为了让同一套上层代码既能在没有硬件的电脑上测试，也能在现场操作真实机械臂，我们把设备交互抽象成四个方法：\texttt{get\_joints(arm)}、\texttt{get\_hand(arm)}、\texttt{send\_joints(arm, positions)}、\texttt{send\_hand(arm, pose)}，再加上一个 \texttt{close()}。
 
-Hardware 后端在构造时即完成设备连接与预飞检查，包括：
-\begin{itemize}
-  \item 等待至多 3 秒获取初始关节反馈；
-  \item 比较本仓库 URDF/FK 正运动学与 SDK 报告的法兰位姿，位置误差需小于 10\,mm、姿态误差小于 5°；
-  \item 确认 Nero 处于使能状态，否则拒绝启动。
-\end{itemize}
+\texttt{MockBackend} 把关节位置和手型都存在内存里。调用 \texttt{send\_joints} 就直接更新存储值（可以理解为``一发就到''的理想设备），调用 \texttt{get\_joints} 就返回上一次存储的值。它还有一个 \texttt{frozen} 集合，可以让某条臂的反馈冻结在旧值不跟随目标——测试暂停保持和运动超时功能时会用到。所有操作通过一把 Lock 保证线程安全，因为执行器线程和主线程会并发访问。
 
-\subsection{几何计算（geometry.py）}
+\texttt{HardwareBackend} 封装了 \texttt{NeroArm} 和 \texttt{LinkerHandL20} 两个已有的硬件驱动类。构造时它会依次为每条配置的臂完成：连接 CAN$\to$等待初始反馈（至多 3 秒）$\to$比对 FK 和 SDK 报告的法兰位姿$\to$连接灵巧手$\to$设置手指速度。如果任何一步失败，已经打开的设备都会被关闭再抛出异常，不会留下半开状态。
 
-几何模块提供一组纯函数式的空间计算工具，位置单位为米、角度单位为弧度：
+FK/SDK 位姿比对是一个预飞检查：我们用本仓库固定的 Nero URDF 做正运动学算出法兰位姿，和 Nero SDK 自己报告的法兰位姿对比，位置偏差要求小于 10\,mm、姿态偏差小于 5°。两者使用的运动学模型略有差异（URDF 参数和 SDK 内部参数不完全一致），如果偏差过大说明关节反馈或模型有问题，直接在连接设备的阶段就把错误暴露出来，避免后续规划用了不准确的运动学。
 
-\begin{itemize}
-  \item \texttt{transform(value)}：将 6 维 $[x,y,z,r,p,y]$ 向量或 $4\times4$ 矩阵统一转换为 SE(3) 齐次变换矩阵，并校验旋转矩阵正交性和行列式。
-  \item \texttt{transform\_points(matrix, points)}：批量刚体变换，支持单点 $(3,)$ 和多点 $(N,3)$。
-  \item \texttt{tcp\_to\_flange(task\_tcp, task\_from\_base, flange\_from\_tcp)}：将任务坐标系下的 TCP 目标位姿换算为法兰目标位姿，供 IK 求解使用。
-  \item \texttt{interpolate\_poses(start, end, ...)}：SE(3) 位姿线性插值，位置使用线性插值、姿态使用旋转向量（指数映射）线性插值。
-  \item \texttt{pixel\_to\_point(pixel, depth, intrinsics)}：像素坐标反投影为相机坐标系 3D 点，支持 Brown-Conrady 畸变校正。
-  \item \texttt{camera\_to\_task(points)}：利用标定的 \texttt{task\_from\_camera} 将相机坐标系点转换到任务坐标系。
-\end{itemize}
 
-TCP 位姿到法兰位姿的换算公式为：
+% =============================================================
+\subsection{几何计算工具}
+\label{subsec:agent-geometry}
+% =============================================================
+
+\texttt{geometry.py} 提供了一组无状态的空间计算函数，位置单位一律为米，角度一律为弧度。这些函数被 Planner、Observations 和 LLM 的 \texttt{cloth\_geometry} 工具共同使用。
+
+其中最常用的是 \texttt{transform()}，它接受两种输入格式：一个 6 维的 $[x, y, z, \text{roll}, \text{pitch}, \text{yaw}]$ 向量（XYZ 外旋欧拉角），或者一个 $4\times4$ 齐次矩阵，统一返回 SE(3) 矩阵。函数会严格检查旋转矩阵的正交性和行列式，不接受缩放或非有限值。
+
+另一个重要函数是 \texttt{tcp\_to\_flange()}，它完成从任务坐标系下的 TCP 目标到 base 坐标系下法兰目标的转换：
 \begin{equation}
-  T_{\text{flange}}^{\text{base}} = \left(T_{\text{task}}^{\text{base}}\right)^{-1} \cdot T_{\text{tcp}}^{\text{task}} \cdot \left(T_{\text{tcp}}^{\text{flange}}\right)^{-1}
-  \label{eq:tcp_to_flange}
+  T_{\text{flange}}^{\text{base}} = \bigl(T_{\text{base}}^{\text{task}}\bigr)^{-1} \cdot T_{\text{tcp}}^{\text{task}} \cdot \bigl(T_{\text{flange}}^{\text{tcp}}\bigr)^{-1}
+  \label{eq:tcp2flange}
 \end{equation}
 
-其中 $T_{\text{task}}^{\text{base}}$ 为基座到任务坐标系的变换（右臂取单位阵），$T_{\text{tcp}}^{\text{flange}}$ 为法兰到 TCP 的标定偏移。
+这里 $T_{\text{base}}^{\text{task}}$ 是 base 到 task 的变换（当前右臂取单位阵，因为任务坐标系就定义在 Nero base 上），$T_{\text{flange}}^{\text{tcp}}$ 是由标定得到的法兰到虚拟 TCP 的固定偏移。LLM 在规划 waypoint 时只需要考虑 TCP 应该在哪、朝向怎样，坐标系之间的换算由这个函数自动完成。
 
-\subsection{观测系统（observations.py）}
+像素反投影函数 \texttt{pixel\_to\_point()} 把 RGB-D 图像中的像素 $(u, v)$ 和对应深度 $z$ 转换成相机坐标系的三维点。对于使用 Brown-Conrady 畸变模型的相机（如 L515），函数会调用 OpenCV 的 \texttt{undistortPoints} 做畸变校正；对于已去畸变的图像则直接用针孔模型公式。\texttt{camera\_to\_task()} 在此基础上再乘以标定的相机外参，得到任务坐标系下的坐标。
 
-观测系统集成了机器人状态反馈、RGB-D 图像采集和外部关键点输入，为 agent 提供统一的环境感知接口。
+位姿插值函数 \texttt{interpolate\_poses()} 在两个 SE(3) 位姿之间做线性插值：平移部分是简单的线性内插，旋转部分用旋转向量（对应旋转矩阵的对数映射）做线性内插。插值点的数量由平移步长（默认 5\,mm）和旋转步长（默认 2°）中较严的那个决定。这个函数在笛卡尔模式的运动规划中被用来在相邻 waypoint 之间密集采样。
 
-\subsubsection{观测快照}
 
-每次调用 \texttt{snapshot()} 返回包含以下信息的字典：
+% =============================================================
+\subsection{观测系统}
+\label{subsec:agent-observations}
+% =============================================================
+
+观测模块的任务是，每次被调用时返回一份当前环境状态的完整快照，让 LLM 和生成的程序都能用同样的接口获取信息。
+
+一份快照包含：
 
 \begin{itemize}
-  \item \textbf{机械臂状态}：各臂的关节角度 \texttt{joints}（7 维 rad）、TCP 位姿 \texttt{tcp}（$4\times4$ SE(3)）、手部原始位置 \texttt{hand\_raw}（20 维 0--255 整数）以及参考 TCP 朝向。
-  \item \textbf{RGB-D 图像}：RGB 图像保存为 PNG 文件路径、深度图保存为 NumPy 数组文件路径，附带相机内参和 \texttt{task\_from\_camera} 外参。
-  \item \textbf{关键点}：来自外部原子更新的 JSON 文件，自动完成相机坐标到任务坐标的转换。
-  \item \textbf{时间戳}：单调时钟时间戳，用于关键点过期判断（默认最大年龄 0.25\,s）。
+  \item 各臂的关节角度（7 维 rad）、TCP 位姿（$4\times4$ 矩阵，由关节角经 FK 和标定偏移算出）、手部 20 槽原始位置（0--255 整数）；
+  \item RGB-D 图像——RGB 保存为磁盘上的 PNG 文件，深度保存为 \texttt{.npy} 文件，附带相机内参和外参；
+  \item 外部关键点——如果配置了 \texttt{keypoints\_file}，从该路径读取一个 JSON，其中包含各关键点的三维坐标和时间戳；超过 0.25 秒未更新的数据视为过期，返回 null。
 \end{itemize}
 
-\subsubsection{多数据源支持}
+图像数据的来源随后端不同而不同。Hardware 模式下，Observations 在初始化时启动 RealSense L515 相机，采集 640$\times$480 的 RGB 和对齐的 Z16 深度。Mock 模式下，它生成一张 64$\times$48 的合成 PNG 图像（一个浅色矩形在深色背景上）和填充了 1000 的深度数组，足以让 LLM 接收到``有图像可用''的信号，但不会误导它以为看到了真实的布料。此外还有一种录制回放模式：通过配置 \texttt{recorded\_episode} 指向一个已有的 episode 目录，Observations 按时间戳从录制的视频和 HDF5 深度文件中取出对应帧，用于离线调试。
 
-观测系统支持三种图像数据源，在运行时自动选择：
+关键点模块目前只实现了消费接口，没有自己的检测和跟踪算法。外部模块（未来接入）通过原子写入一个 JSON 文件来发布关键点，Observations 读取后自动做坐标系转换：如果关键点是在相机坐标系下表达的，就用 \texttt{task\_from\_camera} 变换到任务坐标系。
 
-\begin{enumerate}
-  \item \textbf{实机相机}：Hardware 模式下启动 RealSense L515，实时采集 640$\times$480 RGB-D。
-  \item \textbf{录制回放}：通过 \texttt{recorded\_episode} 配置指定已录制的 episode 目录，按轨迹时间戳索引对应帧。
-  \item \textbf{合成图像}：Mock 模式下生成 64$\times$48 的合成 PNG 图像，用于软件联调。
-\end{enumerate}
 
-\subsection{运动规划（planning.py）}
+% =============================================================
+\subsection{运动规划}
+\label{subsec:agent-planning}
+% =============================================================
 
-运动规划器实现了从 waypoint 到时间参数化关节轨迹的完整管线。
+Planner 把 LLM 给出的 waypoint（任务坐标系下的 TCP 位姿）转换成一条时间参数化的关节轨迹，可以直接交给执行器按时间推进。
 
 \subsubsection{两种规划模式}
 
-\begin{description}
-  \item[关节空间（joint）] agent 提供 TCP waypoint，规划器对每个 waypoint 求 IK 得到关节位置，然后在关节空间等间距插值连接。适用于无需保证末端直线的大范围转移运动。
-  \item[笛卡尔空间（cartesian）] 规划器先在相邻 waypoint 间进行 SE(3) 位姿插值（步长默认：平移 5\,mm、旋转 2°），然后逐插值点求 IK，使用前一点的解作为 seed 保证连续性。适用于末端需要走直线的精细操作。
-\end{description}
+LLM 可以选择两种模式来规划运动：
 
-agent 也可以直接提供 \texttt{target\_joints} 指定关节空间目标，此时不经过 TCP-to-flange 转换。
+关节空间模式（\texttt{mode="joint"}）先对每个 waypoint 做一次 IK 得到关节位置，然后在相邻关节位置之间做等间距线性插值（步长默认 0.08\,rad）。这种模式不保证末端在两个 waypoint 之间走直线，但对于大范围的空间转移来说路径更短、规划更快。
+
+笛卡尔空间模式（\texttt{mode="cartesian"}）先在相邻 TCP 位姿之间做 SE(3) 插值（前面提到的 \texttt{interpolate\_poses}），然后对每个插值点逐点求 IK。每次 IK 用上一个点的关节解作为初始猜测，保证整条路径在关节空间也是连续的。这种模式保证 TCP 近似走直线，适合需要精确末端轨迹的操作（比如把抓住的布角沿直线拉到目标位置）。
+
+LLM 也可以跳过 TCP 层面直接指定 \texttt{target\_joints}，这在已知目标关节角度时更直接。
+
+如果 IK 在某个 waypoint 或中间插值点上求解失败，Planner 会返回一个 \texttt{PlanningError}，其中包含失败的 waypoint 编号和 IK 求解器的诊断信息（比如到达关节限位、收敛失败等）。LLM 看到这些诊断后可以调整 waypoint 的位置或姿态再重试——这比直接告诉它``规划失败了''要有用得多。
 
 \subsubsection{TOPPRA 时间参数化}
 
-在完成关节路径插值后，规划器使用 TOPPRA~\cite{pham2018toppra} 算法进行时间最优参数化：
+得到关节路径后，下一步是确定每个点应该在什么时刻到达。我们使用 TOPPRA 算法~\cite{pham2018toppra}：它在给定关节速度和加速度上限的约束下，沿关节路径求解时间最优的速度剖面。
+
+具体步骤是：先把关节路径用弧长归一化为 $[0, 1]$ 上的样条，然后在 100 个或更多的网格点上建立速度/加速度约束的线性规划问题，用 Seidel 求解器计算通过。如果 TOPPRA 认为这条路径不可行（比如某个关节角变化太大而速度限制太严），就返回失败。
+
+得到 TOPPRA 的输出后，我们做了几步后处理：
 
 \begin{enumerate}
-  \item 以关节路径的弧长为自然参数，构建样条插值器。
-  \item 设定关节速度上限（默认 0.2\,rad/s）和加速度上限（默认 0.4\,rad/s$^2$），使用 Seidel LP 求解器计算时间最优速度剖面。
-  \item 对轨迹施加 5\% 的时间裕量，然后均匀采样生成最终的关节位置和速度序列。
-  \item 构建 Hermite 三次样条存储最终轨迹，并计算精确的速度/加速度峰值进行后验校正。
+  \item 对总时间乘以 1.05 的裕量系数，避免卡在约束边界上。
+  \item 在 TOPPRA 的时间轴上均匀采样，构建 Hermite 三次样条存储最终的关节位置和速度。
+  \item 计算这条三次样条的精确速度/加速度峰值（通过对三次多项式求导取极值）。如果任何关节的峰值超过了配置限制，就按比例拉长整条轨迹的时间直到满足为止。
 \end{enumerate}
 
-最终生成的 \texttt{MotionPlan} 对象包含：
-\begin{itemize}
-  \item 时间序列 $t_0=0, t_1, \ldots, t_N$；
-  \item 对应的 7 维关节位置和速度；
-  \item Hermite 三次样条插值器，支持任意时刻采样。
-\end{itemize}
+之所以要做第三步，是因为 TOPPRA 优化的是它自己的路径参数化，而我们最终存储的 Hermite 样条和 TOPPRA 内部的表示不完全一致，重采样可能引入微小的速度尖峰。与其假设``TOPPRA 说满足那就满足''，不如直接在最终表示上做一次精确检查，发现超限就修正。
+
+当前的速度和加速度上限设为 0.2\,rad/s 和 0.4\,rad/s$^2$，这是软件层面的保守值，不是 Nero 的硬件额定值。后续可以根据实机测试结果调整。
 
 \subsubsection{安全检查}
 
-规划阶段执行以下安全检查，任一违反将返回带诊断信息的 \texttt{PlanningError}：
+规划阶段执行的安全检查包括：初始关节位置在关节限位内（否则说明起始状态就有问题）；整条路径不越过关节限位；TCP 轨迹不超出配置的笛卡尔工作区（一个轴对齐的长方体）；时间参数化后对轨迹做 dense 采样再验证一遍。这些检查是冗余的——同一条路径被检查了两次——但成本可以忽略（几百个点的 FK 和边界比较），多查一遍比漏查一次安全。
 
-\begin{itemize}
-  \item 种子关节位置在关节限位内；
-  \item IK 在每个插值点收敛；
-  \item 整条路径不越过关节限位；
-  \item TCP 轨迹不超出配置的笛卡尔工作区边界（$[x_{\min},y_{\min},z_{\min}]$ 至 $[x_{\max},y_{\max},z_{\max}]$）；
-  \item 时间参数化后的 dense 采样点仍满足上述约束。
-\end{itemize}
 
-\subsection{轨迹执行器（executor.py）}
+% =============================================================
+\subsection{轨迹执行器}
+\label{subsec:agent-executor}
+% =============================================================
 
-执行器是唯一的关节目标发送者，运行在独立的后台线程中，以 \texttt{control\_hz}（默认 20\,Hz）的周期进行控制循环。
+Executor 在一个独立的后台守护线程中运行，以 \texttt{control\_hz}（默认 20\,Hz）的频率做控制循环。每个周期，它做三件事：推进当前运动、保持非运动臂、处理手型命令。
 
-\subsubsection{核心机制}
+推进运动的逻辑是：从 Hermite 样条中按已经过去的时间采样一个关节位置目标，发送给后端。如果某个周期因为操作系统调度延迟了，执行器不会试图``赶上进度''（即一次性发送好几个时间点的目标），而是只发送当前时间对应的那个目标——延迟的周期自然延长了运动的实际持续时间，但不会产生突然的大步跳变。
 
-\begin{itemize}
-  \item \textbf{单臂运动}：任一时刻仅允许一条臂执行轨迹，另一臂持续发送固定保持目标。
-  \item \textbf{轨迹跟踪}：每个控制周期从 Hermite 样条中按已用时间采样关节目标，发送给后端。延迟的 tick 仅延长运动持续时间，不会突发补发。
-  \item \textbf{到位判定}：轨迹时间结束后，检查实际关节反馈与目标终点的偏差；在容差（默认 0.02\,rad）内判定完成，超过超时时间（默认 30\,s）则判定失败。
-  \item \textbf{暂停保持}：收到暂停请求后，立即读取各臂当前反馈作为保持目标，停止推进原轨迹，在下一控制周期确认并通知请求方。
-  \item \textbf{手型命令}：通过执行器线程的统一入口发送，避免在机械臂运动期间对同一臂的手进行写操作。
-\end{itemize}
+当轨迹的时间走完后，执行器开始检查实际关节反馈是否到达了目标终点。默认的到位容差是 0.02\,rad（约 1.1°），等待超时是 30 秒。在 Mock 后端下这个检查是瞬时的（因为 send 就是 set），但在真实硬件上关节需要时间收敛到目标。
 
-\subsubsection{异常处理}
+整个过程中，执行器保证任意时刻只有一条臂在运动，另一条臂持续收到固定的保持目标（上一次读到的反馈位置）。这不是双臂同步的设计限制，而是当前任务模式（两臂依次动作）的有意约束——折布操作中一只手抓着布不能动，另一只手才能做折叠。
 
-执行器线程捕获所有异常后进入故障状态：
-\begin{enumerate}
-  \item 尝试对所有臂发送当前反馈作为保持目标（best-effort hold）；
-  \item 标记当前运动为失败，通知等待者；
-  \item 设置全局故障标记，后续新运动请求将立即拒绝。
-\end{enumerate}
+暂停保持的实现比想象中需要更多考虑。收到暂停请求后，执行器做的事是：立即读取所有臂的当前关节反馈，把它们设为各自的保持目标，把当前运动标记为``已暂停''，然后在下一个控制周期向请求方发送确认信号（通过一个 Event 对象）。请求方（通常是子任务程序中的监督循环）通过 \texttt{pause\_and\_hold()} 调用，这个调用会阻塞直到收到确认——这样调用返回后可以确信轨迹已经停止推进了。确认的等待上限是 2 秒或 4 个控制周期（取较大者），超时则认为执行器出了问题。
 
-\subsection{运行时核心（runtime.py）}
-\label{subsec:runtime}
+如果执行器线程自己抛出了异常（比如后端的 CAN 通信断了），处理方式是：尝试对所有臂发送当前反馈作为保持目标（best-effort，不保证成功），把当前运动标记为失败，设置一个全局故障标记，后续所有新运动请求都会立即被拒绝。这是合理的——执行器是设备的唯一命令发送者，它出了故障意味着整个控制通道不再可靠。
 
-Runtime 是系统的中枢，贯穿设备管理、子任务调度、事件分发和进程间通信。
 
-\subsubsection{子任务管理}
+% =============================================================
+\subsection{Runtime：把所有东西粘合起来}
+\label{subsec:agent-runtime}
+% =============================================================
 
-每个子任务的生命周期如下：
+Runtime 是系统的中枢，它的角色有点像操作系统里的内核：上面的 Codex 客户端和子任务进程通过定义好的接口和 Runtime 交互，下面的 Planner、Executor、Observations 和 Backend 由 Runtime 创建和管理。
 
-\begin{enumerate}
-  \item \textbf{语法检查}：使用 \texttt{compile()} 确保源码无语法错误。
-  \item \textbf{文件准备}：将源码和初始参数分别写入只读文件（\texttt{chmod 0o444}），防止运行时篡改。
-  \item \textbf{进程启动}：以独立 Python 子进程方式启动，通过环境变量注入 HTTP Bridge 地址、认证令牌和子任务 ID。
-  \item \textbf{进程监控}：后台 watcher 线程等待进程退出，根据退出码和运动状态判定子任务结果（完成/失败/放弃）。
-  \item \textbf{互斥约束}：活跃子任务未结束前不允许提交新的子任务；运行期间不允许替换源码。
-\end{enumerate}
+\subsubsection{子任务的生命周期}
+
+子任务进程的管理是 Runtime 最复杂的部分。一个子任务从提交到结束经过这些阶段：
+
+首先，Runtime 对 LLM 提交的 Python 源码做 \texttt{compile()} 语法检查。这发生在任何设备操作之前——如果程序连语法都不对，就不值得启动一个进程去运行它。然后 Runtime 在输出目录下创建一个子目录，把源码写入 \texttt{program.py}、参数写入 \texttt{params.json}，并把两个文件设为只读（\texttt{chmod 0o444}）。只读不是为了防止恶意篡改（子进程有同样的文件权限），而是为了在 debug 时保证磁盘上的文件就是实际执行的版本。
+
+接着 Runtime 启动一个 Python 子进程来运行这个程序。子进程的环境变量中注入了：HTTP Bridge 的 URL（\texttt{CLOTH\_AGENT\_URL}）、认证令牌（\texttt{CLOTH\_AGENT\_TOKEN}）、子任务 ID（\texttt{CLOTH\_AGENT\_SUBTASK}）和参数文件路径（\texttt{CLOTH\_AGENT\_PARAMS}）。子进程的 stdout 和 stderr 分别重定向到日志文件。
+
+一个后台 watcher 线程等待子进程退出。退出后，watcher 检查几个条件：退出码是否为 0、退出时是否还有运动在执行（如果有，说明程序没有等待运动完成就退出了，这是一个错误）。根据这些条件，子任务被标记为 completed、failed 或 aborted，并产生一个事件通知 Codex 客户端。
+
+有一个重要的约束：活跃子任务未结束之前不能提交新的子任务。这个约束是有意的——如果允许替换正在运行的程序，就等于允许 LLM 通过``改代码重试''来绕过异常恢复机制，而我们希望恢复只通过程序内已有的分支完成。
 
 \subsubsection{HTTP Bridge}
 
-Runtime 在本地启动一个 \texttt{ThreadingHTTPServer}（绑定 \texttt{127.0.0.1} 的随机端口），作为子任务进程与 Runtime 之间的通信桥梁：
+子任务进程和 Runtime 之间的通信通过一个本地 HTTP 服务完成。Runtime 在初始化时启动一个 \texttt{ThreadingHTTPServer}，监听 \texttt{127.0.0.1} 的一个随机端口。子任务进程中的 \texttt{tools.py} 通过标准库的 \texttt{urllib.request} 发送 POST 请求。
 
-\begin{itemize}
-  \item 子任务进程通过 \texttt{tools.py} 中的 \texttt{\_call()} 函数发起 HTTP POST 请求。
-  \item 每个请求携带 Bearer Token 认证和子任务 ID，确保只有当前活跃子任务可以调用。
-  \item 支持的方法包括：\texttt{observe}、\texttt{plan\_motion}、\texttt{execute}、\texttt{motion\_status}、\texttt{wait\_motion}、\texttt{pause\_and\_hold}、\texttt{set\_hand\_pose}、\texttt{request\_agent}、\texttt{report\_result}、\texttt{calculate}。
-  \item 恢复等待（\texttt{request\_agent}）使用长轮询，\texttt{timeout=None}，子任务进程在等待期间保持存活。
-\end{itemize}
+选择 HTTP 而不是 Unix socket 或共享内存，主要是因为简单和可移植。每个请求携带 Bearer Token 和子任务 ID，Runtime 验证后分发到对应的内部方法。\texttt{request\_agent} 这个方法比较特殊：子任务进程调用它后，HTTP 连接会一直挂着（\texttt{timeout=None}），直到 LLM 通过 Codex 客户端回复了恢复参数。在这段可能持续几十秒甚至更久的等待中，子进程保持存活，设备保持当前姿势，但不执行任何运动。
 
 \subsubsection{事件系统}
 
-Runtime 维护一个事件队列和 \texttt{events.jsonl} 持久化日志。事件分为两类：
+Runtime 内部维护一个事件队列。所有事件都会写入 \texttt{events.jsonl} 日志文件（每个事件一行 JSON，带单调时间戳和中英双语描述），但只有``需要 LLM 做出决策''的事件才会加入内存队列唤醒等待中的 Codex 客户端。这些决策事件包括：recovery 请求、子任务完成/失败/放弃、执行器故障。运动的启动和完成只写日志不唤醒 LLM，因为这些信息子任务程序自己就能处理。
 
-\begin{enumerate}
-  \item \textbf{日志事件}：所有运动启动/完成/失败、手型命令等，仅写入日志文件。
-  \item \textbf{决策事件}：恢复请求、子任务完成/失败/放弃、执行器故障、任务放弃等，额外加入内存队列，唤醒等待中的 agent。
-\end{enumerate}
+\subsubsection{参数恢复}
 
-每个事件携带单调时间戳和中英双语描述（\texttt{records.py} 提供）。
+参数恢复的流程在第~\ref{subsec:agent-workflow}~节已经概述过，这里说一下实现细节。
 
-\subsubsection{参数恢复机制}
+当子任务程序调用 \texttt{request\_agent(reason, observation)} 时，它必须先通过 \texttt{pause\_and\_hold()} 暂停当前运动——如果运动还在推进，恢复参数基于的状态就是不确定的。Runtime 暂停完毕后拍一份新的观测快照（包含暂停后的 RGB-D），把 reason、观测和子任务 ID 打包成一个 recovery event 放入事件队列。
 
-恢复（recovery）机制是 Agent Harness 的核心特性之一，其工作流如图~\ref{fig:recovery} 所示。
+Codex 客户端从队列中取出这个事件，把它（可能连同图像）发给 LLM。LLM 分析后调用 \texttt{cloth\_reply\_recovery} 工具给出回复。回复必须包含 \texttt{action} 字段，值为 \texttt{continue} 或 \texttt{abort}，其余字段的含义由程序中已有的恢复分支自行定义。
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[
-  block/.style={rectangle, draw, rounded corners, minimum width=2.5cm,
-                minimum height=0.8cm, align=center, font=\small},
-  decision/.style={diamond, draw, aspect=2, align=center, font=\small,
-                   inner sep=1pt},
-  arrow/.style={-{Stealth[length=2.5mm]}, thick},
-  node distance=0.9cm,
-]
-  \node[block, fill=orange!15] (detect) {程序检测到异常};
-  \node[block, fill=yellow!15, below=of detect] (pause) {调用 pause\_and\_hold};
-  \node[block, fill=blue!15, below=of pause] (request) {调用 request\_agent\\发送原因+观测};
-  \node[block, fill=green!15, below=of request] (agent) {Agent 分析并回复\\新参数或 abort};
-  \node[decision, below=of agent] (check) {action?};
-  \node[block, fill=green!20, below left=1cm and 0.5cm of check] (cont) {恢复分支继续\\从当前状态重规划};
-  \node[block, fill=red!15, below right=1cm and 0.5cm of check] (abort) {放弃任务};
+Runtime 收到回复后通知等待中的子任务进程。如果 action 是 continue，程序从 \texttt{request\_agent()} 返回拿到回复 dict，在既有分支中从当前实际关节位置重新规划新轨迹继续执行。如果 action 是 abort，任务被标记为放弃。
 
-  \draw[arrow] (detect) -- (pause);
-  \draw[arrow] (pause) -- (request);
-  \draw[arrow] (request) -- (agent);
-  \draw[arrow] (agent) -- (check);
-  \draw[arrow] (check) -| node[above left, font=\scriptsize] {continue} (cont);
-  \draw[arrow] (check) -| node[above right, font=\scriptsize] {abort} (abort);
-\end{tikzpicture}
-\caption{参数恢复流程}
-\label{fig:recovery}
-\end{figure}
+同一时刻最多只有一个待处理的 recovery 请求。如果子进程在等待 recovery 回复期间意外退出（比如崩溃了），watcher 线程会清理掉悬挂的 recovery 请求。
 
-关键约束：
-\begin{itemize}
-  \item 恢复期间原 Python 进程保持存活，设备保持当前姿势；
-  \item 同一时刻最多一个待处理的恢复请求；
-  \item 恢复回复只能包含 \texttt{action: continue} 或 \texttt{abort}，其余字段由程序既有恢复分支约定；
-  \item 恢复后必须从实际关节反馈重新规划轨迹，不沿用原路径。
-\end{itemize}
 
-\subsection{Codex App-Server 客户端（codex.py）}
+% =============================================================
+\subsection{Codex 客户端与 LLM 接入}
+\label{subsec:agent-codex}
+% =============================================================
 
-该模块实现了与 OpenAI Codex 本地 app-server 的通信协议，是 Agent Harness 的``大脑''接入点。
+Codex 客户端（\texttt{codex.py}）负责和本机的 \texttt{codex app-server} 进程通信。app-server 是 OpenAI Codex CLI 提供的本地服务，通过 stdio 上的 JSON-RPC 协议工作。
 
-\subsubsection{通信协议}
+启动时，客户端先完成 \texttt{initialize} / \texttt{initialized} 握手，然后调用 \texttt{thread/start} 创建一个对话线程。线程参数中有几个值得注意的设定：\texttt{approvalPolicy: "never"} 表示不需要人工审批工具调用（因为所有工具都是我们自己定义的），\texttt{sandbox: "read-only"} 表示 LLM 只能读取文件系统不能写入（它需要写入的唯一方式是通过 \texttt{cloth\_submit\_subtask} 工具提交程序源码）。
 
-采用 stdio JSON-RPC 协议与本机 \texttt{codex app-server} 进程通信：
-\begin{itemize}
-  \item 通过 \texttt{initialize}、\texttt{initialized}、\texttt{thread/start}、\texttt{turn/start} 等方法管理对话线程生命周期。
-  \item agent 的工具调用通过 \texttt{item/tool/call} 消息接收，分发至 Runtime 的对应方法。
-  \item agent 的文本回复通过 \texttt{item/agentMessage/delta} 流式接收。
-  \item 配置 \texttt{approvalPolicy: never} 和 \texttt{sandbox: read-only}，确保 agent 只能通过定义的工具操作设备。
-\end{itemize}
+\subsubsection{为 LLM 注册的工具}
 
-\subsubsection{动态工具定义}
-
-系统为 agent 注册了 8 个应用级工具（表~\ref{tab:tools}），每个工具通过标准 JSON Schema 定义输入参数。
+系统为 LLM 注册了 8 个应用级工具，每个工具用标准 JSON Schema 描述输入参数：
 
 \begin{table}[H]
 \centering
-\caption{Agent 可用的应用工具}
-\label{tab:tools}
+\caption{LLM 可调用的工具}
+\label{tab:agent-tools}
 \small
-\begin{tabular}{lp{8cm}}
+\begin{tabular}{@{}lp{8.5cm}@{}}
   \toprule
-  \textbf{工具名} & \textbf{功能说明} \\
+  工具 & 说明 \\
   \midrule
-  \texttt{cloth\_observe} & 读取当前设备状态、RGB-D 和可选 keypoints 观测 \\
-  \texttt{cloth\_geometry} & 计算 transform、TCP$\to$flange、距离或反投影 \\
-  \texttt{cloth\_plan\_motion} & 从实际反馈规划运动轨迹，返回 plan\_id 或诊断 \\
-  \texttt{cloth\_submit\_subtask} & 启动普通 Python 子任务程序 \\
-  \texttt{cloth\_wait\_event} & 等待程序完成或 recovery request \\
-  \texttt{cloth\_reply\_recovery} & 向存活的原程序回复恢复参数 \\
-  \texttt{cloth\_task\_status} & 读取 task 和 subtask 的状态与结果 \\
-  \texttt{cloth\_abort\_task} / \texttt{cloth\_finish\_task} & 放弃或完成整个 task \\
+  \texttt{cloth\_observe} & 读取关节反馈、TCP 位姿、RGB-D 和关键点 \\
+  \texttt{cloth\_geometry} & 坐标变换、反投影、距离计算 \\
+  \texttt{cloth\_plan\_motion} & 从当前位置规划轨迹，返回 plan\_id 或失败诊断 \\
+  \texttt{cloth\_submit\_subtask} & 提交 Python 程序和初始参数 \\
+  \texttt{cloth\_wait\_event} & 等待子任务完成或 recovery 请求 \\
+  \texttt{cloth\_reply\_recovery} & 回复 recovery 请求 \\
+  \texttt{cloth\_task\_status} & 查看任务和子任务状态 \\
+  \texttt{cloth\_abort/finish\_task} & 放弃或完成任务 \\
   \bottomrule
 \end{tabular}
 \end{table}
 
-\subsubsection{开发者提示词设计}
+\subsubsection{提示词设计}
 
-\texttt{INSTRUCTIONS} 提示词使用中英夹杂的风格，核心要求包括：
+\texttt{INSTRUCTIONS} 是发送给 LLM 的开发者提示词，用中英夹杂的风格书写。它告诉 LLM 的工作方式是：先观测$\to$列出阶段清单$\to$每个阶段先做几何计算和运动规划，确定参数后再提交程序$\to$等待程序执行结果$\to$进入下一阶段。提示词还强调了几条纪律：运动只能通过 cloth tools 完成，不许直接打开设备或跑 shell 命令；已配置的 \texttt{reference\_tcp\_rotation} 是默认的拈布朝向；Mock 图像不能当作真实观测来判断抓布是否成功；缺少必要输入时应该主动放弃任务而不是编造数据。
 
-\begin{enumerate}
-  \item 先观测再规划：必须先调用 \texttt{cloth\_observe} 获取状态。
-  \item 先规划再提交：每个 stage 需完成几何计算和 nominal joint plan 后才提交程序。
-  \item 程序自主性：生成的程序自行组织主流程、监督循环和恢复分支，不要求固定模板。
-  \item 坐标约束：只使用已配置的机械臂，显式指定 arm；使用 reference\_tcp\_rotation 作为默认拈布朝向。
-  \item 完整性：所有程序完成后才能 finish\_task；如实报告失败和未验证的物理效果。
-\end{enumerate}
+提示词选择中英夹杂不是为了显得高端，而是因为 Codex 对英文技术术语的理解更准确（比如 \texttt{plan\_id}、\texttt{cartesian}、\texttt{action="continue"} 这些值翻译成中文反而容易出错），而中文说明对于我们团队的日常阅读更友好。
 
 \subsubsection{运行记录}
 
-Codex 客户端将整个交互过程记录到 \texttt{codex.md} 文件，包括：
-\begin{itemize}
-  \item 开发者提示词和工具定义；
-  \item 每一轮发送的消息和附带的图像；
-  \item Agent 的文本回复（流式追加）；
-  \item 每次工具调用的参数和结果；
-  \item 提交的程序源码（Python 代码块）；
-  \item 运行错误和最终任务摘要。
-\end{itemize}
+Codex 客户端把整个交互过程实时写入一个 Markdown 文件（\texttt{codex.md}），包括：发给 LLM 的提示词和工具定义、每一轮的输入消息、LLM 的回复（流式追加）、每次工具调用的参数和返回值、提交的程序源码。这个文件主要是给人看的——在调试 LLM 的行为时，直接打开这个 Markdown 文件比翻 JSON-RPC 日志方便得多。
 
-\subsection{子任务工具库（tools.py）}
 
-\texttt{tools.py} 是生成的 Python 程序的运行时 SDK，提供以下高层 API：
+% =============================================================
+\subsection{子任务程序的 SDK}
+\label{subsec:agent-tools-sdk}
+% =============================================================
 
-\begin{lstlisting}[caption={tools.py 提供的主要接口},label={lst:tools_api}]
-# 参数与观测
-parameters() -> dict
-observe(include_images=True) -> dict
+\texttt{tools.py} 是 LLM 生成的 Python 程序在运行时可以 import 的模块。它把 HTTP Bridge 的调用封装成简洁的函数接口：
 
-# 运动控制
-plan_from_current(waypoints, arm, mode, target_joints) -> plan_id
-execute_trajectory(plan_id, wait=True) -> MotionHandle
-move_J(arm, target_joints, wait=True) -> MotionHandle
-move_L(arm, target_tcp, wait=True) -> MotionHandle
-
-# 手型控制
-set_hand_pose(pose_or_preset, arm='left')
-
-# 监督与恢复
-wait_next_observation(period_s=0.05)
-request_agent(reason, observation=None) -> reply dict
-report_result(status='completed', **result)
-
-# 几何计算
-geometry(operation, **values) -> result
+\begin{lstlisting}[caption={tools.py 提供的主要接口（简化）}]
+parameters() -> dict            # 读取初始参数
+observe(include_images=True)    # 获取观测快照
+plan_from_current(waypoints, arm, mode, target_joints)  # 规划
+execute_trajectory(plan_id, wait=True)  # 执行，返回 MotionHandle
+move_J(arm, target_joints)      # 关节空间点到点
+move_L(arm, target_tcp)         # 笛卡尔直线
+set_hand_pose(pose, arm)        # 发送手型
+request_agent(reason, obs)      # 暂停并请求 LLM 回复
+report_result(status, **kw)     # 报告子任务结果
+geometry(operation, **values)   # 几何计算
 \end{lstlisting}
 
-所有调用通过 HTTP POST 请求发送到 Runtime 的 Bridge，自动处理错误类型映射（\texttt{MotionInterrupted}、\texttt{MotionFailed}、\texttt{ValueError} 等）。
+\texttt{MotionHandle} 是运动句柄，提供 \texttt{status()}、\texttt{done()}、\texttt{wait()} 和 \texttt{pause\_and\_hold(reason)} 方法。程序可以把 \texttt{wait} 参数设为 \texttt{False} 来异步启动运动，然后在一个循环里读取观测、检查条件、决定是否暂停：
 
-\texttt{MotionHandle} 提供异步运动控制能力，程序可以在运动执行过程中持续监督：
-
-\begin{lstlisting}[caption={运动句柄的异步监督模式},label={lst:handle}]
+\begin{lstlisting}[caption={异步运动监督模式示例}]
 motion = execute_trajectory(plan_id, wait=False)
 while not motion.done():
     state = observe()
-    if detect_anomaly(state):
-        motion.pause_and_hold("异常原因")
+    if something_wrong(state):
+        motion.pause_and_hold("发现异常")
         reply = request_agent("异常原因", state)
-        # 根据 reply 决定恢复或放弃
+        if reply["action"] == "abort":
+            report_result("aborted", reason="agent 放弃")
+            break
+        new_plan = plan_from_current(
+            reply["waypoints"], arm="right")
+        motion = execute_trajectory(new_plan, wait=False)
     wait_next_observation()
 motion.wait()  # 确认最终结果
 \end{lstlisting}
 
+所有 HTTP 错误会被自动映射为 Python 异常：\texttt{MotionInterrupted}（运动被暂停）、\texttt{MotionFailed}（运动失败或执行器故障）、\texttt{ValueError}（参数错误）等。程序可以 catch 这些异常做自己的处理。
+
+
 % =============================================================
-\section{Demo 演示}
-\label{sec:demo}
+\subsection{Demo 演示}
+\label{subsec:agent-demo}
 % =============================================================
 
-\texttt{demo.py} 实现了一个确定性的软件联调 smoke test，不连接真实设备，不操作物理布料。其验证内容包括：
+\texttt{demo.py} 实现了一个不需要硬件的 smoke test，用来验证从规划到执行到 recovery 的完整软件路径。
 
-\subsection{演示流程}
+演示分两个阶段。第一阶段使用左臂：先规划 joint1 增加 0.06\,rad 的关节运动，然后提交一段 Python 程序。这段程序异步执行轨迹，在监督循环中判断 elapsed $\geq$ 0.15\,s 时故意触发一次``异常''——暂停运动，调用 \texttt{request\_agent}。驱动脚本收到 recovery 请求后回复 \texttt{action: "continue"} 和原始的 \texttt{target\_joints}，程序拿到回复后从当前位置重新规划并继续执行到完成。
 
-\begin{enumerate}
-  \item \textbf{第一阶段}（左臂 + 异常注入）：
-    \begin{itemize}
-      \item 规划左臂 joint1 增加 0.06\,rad 的关节运动；
-      \item 提交包含监督循环的 Python 程序，异步执行轨迹；
-      \item 程序在 $\text{elapsed} \geq 0.15$\,s 后注入一次监督异常；
-      \item 暂停保持后调用 \texttt{request\_agent}，等待恢复回复；
-      \item 收到 \texttt{continue} 和新的 \texttt{target\_joints} 后，从当前反馈重新规划并继续执行。
-    \end{itemize}
-  \item \textbf{第二阶段}（右臂，正常执行）：
-    \begin{itemize}
-      \item 规划右臂 joint1 增加 0.03\,rad 的关节运动；
-      \item 提交无异常注入的简单程序，等待正常完成。
-    \end{itemize}
-  \item \textbf{任务结束}：调用 \texttt{finish\_task}，报告两个 stage 完成、一次 recovery 成功、\texttt{physical\_fold\_verified=false}。
-\end{enumerate}
+第二阶段使用右臂，规划 joint1 增加 0.03\,rad，提交一段不做异常注入的简单程序，正常执行完毕。
 
-\subsection{验证要点}
+两阶段都完成后调用 \texttt{finish\_task}，报告 \texttt{physical\_fold\_verified: false}——这次演示没有操作过任何真实布料。
 
-Demo 覆盖了以下软件闭环要点：
+用 \texttt{demo --with-codex} 可以进一步测试：不再由驱动脚本确定性地生成程序和回复 recovery，而是让真实的 Codex LLM 在同一个 thread 中完成这些工作。这种模式下，LLM 需要自己理解任务（``用 mock 设备跑一次软件联调''），自己写出带监督循环和异常注入的程序，自己处理 recovery 请求。在我们的测试中，Codex 能正确完成这个流程。
+
+
+% =============================================================
+\subsection{安全措施}
+\label{subsec:agent-safety}
+% =============================================================
+
+系统在多个层面做了防护。这里列几个比较关键的：
+
+工作区边界检查在规划阶段和 TOPPRA 后的 dense 采样阶段各做一次。TCP 不能超出配置的笛卡尔立方体（默认 0.9\,m 边长，中心在起始姿态的 TCP 位置）。
+
+实机启动需要双重确认：命令行必须带 \texttt{--execute} 标志，运行后还要在终端手动输入 \texttt{EXECUTE}。这是为了防止有人在整理代码时不小心运行了实机命令——两步确认中任何一步缺失都会拒绝继续。
+
+子任务进程通过 Bearer Token 认证。虽然 HTTP Bridge 只监听 localhost，不存在来自网络的攻击面，但 Token 确保了只有当前活跃的子任务进程可以调用设备接口——如果某个旧进程因为 bug 没有退出干净，它用旧的子任务 ID 发出的请求会被拒绝。
+
+执行器故障后的处理是保守的：先尝试对所有臂发送当前反馈作为保持目标（如果连这一步都失败了，说明通信彻底断了，只能靠现场的急停按钮），然后设置全局故障标记让所有后续操作都拒绝。系统不会尝试自动恢复——在机器人安全领域，``自动恢复''往往意味着``在不确定的状态下继续发指令''，这比停下来等人处理更危险。
+
+
+% =============================================================
+\subsection{测试与当前验证状态}
+\label{subsec:agent-tests}
+% =============================================================
+
+\texttt{tests/} 目录中与 Agent Harness 相关的测试文件包括：
 
 \begin{itemize}
-  \item 从规划到执行到完成的全流程；
-  \item 两条臂的依次运动（单臂约束）；
-  \item 异步运动的监督循环模式；
-  \item 暂停保持机制的正确性；
-  \item recovery 请求-回复-恢复的完整通信路径；
-  \item 子任务进程生命周期管理；
-  \item 事件驱动的 agent 通知机制。
+  \item \texttt{test\_cloth\_planning.py}：覆盖两种规划模式、IK 连续性、TOPPRA 约束满足、工作区越界拒绝、规划失败后的诊断信息。
+  \item \texttt{test\_cloth\_runtime.py}：覆盖子任务提交/完成/失败、进程退出时的暂停收尾、recovery 请求和回复、任务放弃、运行中不能替换程序。
+  \item \texttt{test\_cloth\_observations.py}：覆盖 Mock 图像生成、关键点读取和过期处理、录制回放模式。
+  \item \texttt{test\_cloth\_codex.py}：覆盖 Codex 工具的 JSON Schema 定义、工具分发逻辑。
 \end{itemize}
 
-通过 \texttt{demo --with-codex} 可进一步验证与真实 Codex LLM 的端到端联调。
+所有这些测试都在没有硬件的环境下运行，使用 Mock 后端。它们验证的是软件逻辑的正确性，不涉及实际的定位精度或物理操作效果。
+
+截至目前已验证的能力包括：几何计算和坐标转换的正确性、两种规划模式的 IK 连续性和约束满足、Mock 后端下的完整执行闭环（启动-运动-到位-暂停-恢复-完成）、真实 Codex thread 驱动的假设备联调。
+
+尚未在实机上验证的内容包括：运动的实际定位精度和到位延迟、暂停保持的响应时延和位置偏差、L20 灵巧手的抓取效果、连续两次折叠的成功率、关键点模块接入后的视觉闭环监督、另一条臂的标定和双臂交替操作。这些是后续实机测试的重点。
+
 
 % =============================================================
-\section{CLI 命令行入口}
-\label{sec:cli}
+% 参考文献（仅限本节使用的引用）
+% 合并到主文件时，将这些条目移入主文件的 thebibliography 或 .bib 中
 % =============================================================
-
-\texttt{cli.py} 提供三个子命令：
-
-\begin{description}
-  \item[\texttt{demo}] 运行 Mock 后端的 smoke test，可选 \texttt{--with-codex} 使用真实 LLM。
-  \item[\texttt{run}] 正式任务模式，由 Codex 生成并监督程序执行。支持 \texttt{--task} 自定义任务描述、\texttt{--folds} 指定折叠次数。
-  \item[\texttt{script}] 直接运行已有的 Python 子任务脚本，recovery 回复从终端输入 JSON。
-\end{description}
-
-实机模式（\texttt{backend: hardware}）下，CLI 执行严格的安全门控：
-\begin{enumerate}
-  \item 启动前检查所有硬件参数已填写；
-  \item 要求 \texttt{--execute} 命令行标志；
-  \item 要求用户在终端输入 \texttt{EXECUTE} 确认。
-\end{enumerate}
-
-% =============================================================
-\section{安全性设计}
-\label{sec:safety}
-% =============================================================
-
-系统在多个层面实施安全保障：
-
-\begin{enumerate}
-  \item \textbf{工作区边界}：规划阶段和执行后校验均检查 TCP 不超出配置的笛卡尔立方体工作区。
-  \item \textbf{关节限位}：规划路径的每个采样点均校验关节限位；IK 求解失败时返回诊断信息。
-  \item \textbf{速度/加速度约束}：TOPPRA 根据配置的软件上限（0.2\,rad/s 速度、0.4\,rad/s$^2$ 加速度）生成时间最优但安全的轨迹。
-  \item \textbf{暂停保持}：异常时立即停止轨迹推进，改为发送当前反馈作为固定目标；手部保持当前抓持。
-  \item \textbf{启动确认}：实机模式需要双重确认（\texttt{--execute} + 终端输入 \texttt{EXECUTE}）。
-  \item \textbf{预飞检查}：Hardware 后端启动时校验 FK/SDK 一致性，确保模型与实际机器人状态匹配。
-  \item \textbf{认证隔离}：子任务进程通过 Bearer Token 认证，只有当前活跃子任务可以调用设备。
-  \item \textbf{源码不可变}：提交后的程序源码设置为只读，运行期间不允许替换；未处理异常导致进程退出时，自动暂停运动并结束任务。
-\end{enumerate}
-
-% =============================================================
-\section{测试与验证}
-\label{sec:test}
-% =============================================================
-
-项目包含覆盖 Agent Harness 各层面的自动化测试，主要测试文件及内容如下：
-
-\begin{table}[H]
-\centering
-\caption{Agent Harness 相关测试文件}
-\label{tab:tests}
-\small
-\begin{tabular}{lp{7cm}}
-  \toprule
-  \textbf{测试文件} & \textbf{覆盖内容} \\
-  \midrule
-  \texttt{test\_cloth\_planning.py}      & 关节/笛卡尔规划、IK 连续性、TOPPRA 约束、工作区限制、规划失败诊断 \\
-  \texttt{test\_cloth\_runtime.py}       & 子任务提交/完成/失败、进程生命周期、暂停保持、recovery 通信、任务放弃 \\
-  \texttt{test\_cloth\_observations.py}  & RGB-D 快照、关键点输入/过期、Mock 图像生成、录制回放 \\
-  \texttt{test\_cloth\_codex.py}         & Codex 工具协议、JSON-RPC 交互、工具分发 \\
-  \bottomrule
-\end{tabular}
-\end{table}
-
-当前验证进度：
-
-\begin{itemize}
-  \item[\checkmark] 几何计算与坐标转换
-  \item[\checkmark] 两种规划模式（joint / cartesian）的正确性
-  \item[\checkmark] TOPPRA 时间参数化满足速度/加速度约束
-  \item[\checkmark] Mock 后端下的完整执行闭环
-  \item[\checkmark] 异常注入、暂停保持、参数恢复
-  \item[\checkmark] 真实 Codex thread 驱动的假设备联调
-  \item[$\circ$] 实机定位精度与暂停保持时延
-  \item[$\circ$] 实际抓布/折布效果
-  \item[$\circ$] 关键点模块接入
-  \item[$\circ$] 双臂标定与交替操作
-\end{itemize}
-
-% =============================================================
-\section{总结与展望}
-\label{sec:conclusion}
-% =============================================================
-
-Agent Harness 模块实现了一套完整的``Code-as-Policy''自主布料操作框架，将 LLM 的推理规划能力与机器人低层运动控制系统贯通。系统通过分层架构、严格的安全约束和灵活的参数恢复机制，在保证可靠性的同时赋予 agent 充分的自主性。
-
-当前已完成的核心能力包括：
-\begin{itemize}
-  \item 从自然语言任务描述到可执行 Python 程序的端到端闭环；
-  \item 两种运动规划模式和 TOPPRA 时间最优参数化；
-  \item 异步运动监督和同进程参数恢复机制；
-  \item Mock 和 Hardware 的统一抽象，支持离线验证和实机部署。
-\end{itemize}
-
-后续工作方向：
-\begin{itemize}
-  \item 接入关键点识别与跟踪模块，实现基于视觉反馈的闭环监督；
-  \item 完成另一条臂的标定，实现真正的双臂协作折叠；
-  \item 在实机上验证定位精度、暂停保持时延和抓布/折布效果；
-  \item 探索更丰富的 agent 策略，如多步折叠序列的自适应规划。
-\end{itemize}
-
-% =============================================================
-% 参考文献
-% =============================================================
-\begin{thebibliography}{9}
-  \bibitem{liang2023code}
-    J.~Liang, W.~Huang, F.~Xia, et~al.,
-    ``Code as Policies: Language Model Programs for Embodied Control,''
-    in \textit{Proc. IEEE Int. Conf. Robotics and Automation (ICRA)}, 2023.
-  \bibitem{huang2024rekep}
-    W.~Huang, C.~Wang, R.~Zhang, et~al.,
-    ``ReKep: Spatio-Temporal Reasoning of Relational Keypoint Constraints for Robotic Manipulation,''
-    in \textit{Proc. Conf. Robot Learning (CoRL)}, 2024.
-  \bibitem{zhou2024code}
-    E.~Zhou, H.~Song, Y.~Gao, et~al.,
-    ``Code as Monitor: Constraint-Aware Visual Programming for Reactive and Proactive Robotic Failure Detection,''
-    \textit{arXiv:2412.04455}, 2024.
-  \bibitem{pham2018toppra}
-    H.~Pham, Q.-C.~Pham,
-    ``A New Approach to Time-Optimal Path Parameterization Based on Reachability Analysis,''
-    \textit{IEEE Trans. Robotics}, vol.~34, no.~3, pp.~645--659, 2018.
-\end{thebibliography}
-
-\end{document}
-
+% \bibitem{liang2023code}
+%   J.~Liang, W.~Huang, F.~Xia, et~al.,
+%   ``Code as Policies: Language Model Programs for Embodied Control,''
+%   ICRA, 2023.
+% \bibitem{huang2024rekep}
+%   W.~Huang, C.~Wang, R.~Zhang, et~al.,
+%   ``ReKep: Spatio-Temporal Reasoning of Relational Keypoint Constraints
+%     for Robotic Manipulation,'' CoRL, 2024.
+% \bibitem{zhou2024code}
+%   E.~Zhou, H.~Song, Y.~Gao, et~al.,
+%   ``Code as Monitor: Constraint-Aware Visual Programming for Reactive
+%     and Proactive Robotic Failure Detection,'' arXiv:2412.04455, 2024.
+% \bibitem{pham2018toppra}
+%   H.~Pham, Q.-C.~Pham,
+%   ``A New Approach to Time-Optimal Path Parameterization Based on
+%     Reachability Analysis,'' IEEE Trans. Robotics, 34(3), 2018.
