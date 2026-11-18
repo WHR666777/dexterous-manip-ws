@@ -8,3 +8,4 @@ linkerhand-python-sdk/
 data/
 outputs/
 docs/report/build/
+tmp/

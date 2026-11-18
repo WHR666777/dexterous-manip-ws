@@ -1,0 +1,243 @@
+% !TEX program = xelatex
+% 编译：xelatex --interaction=nonstopmode --halt-on-error process_report.tex
+\documentclass[UTF8,a4paper,zihao=-4]{ctexart}
+\usepackage[top=2.54cm,bottom=2.54cm,left=3.175cm,right=3.175cm,headheight=15pt]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,array,tabularx,float}
+\usepackage{setspace,fancyhdr,lastpage}
+\usepackage[hidelinks]{hyperref}
+\setCJKfamilyfont{reportkai}[AutoFakeBold=true]{KaiTi}
+\setstretch{1.35}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+\setlength{\emergencystretch}{2em}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\small 《智能机器人系统综合设计》过程报告}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\ctexset{
+  section={number=\chinese{section},name={,、},aftername={},format=\large\bfseries,
+    beforeskip=1.3em,afterskip=0.65em},
+  subsection={number=\arabic{subsection},name={,．},aftername={},format=\normalsize\bfseries,
+    beforeskip=0.9em,afterskip=0.35em},
+  subsubsection={format=\normalsize\bfseries,beforeskip=0.7em,afterskip=0.25em}
+}
+\newcommand{\SO}{\mathrm{SO}(3)}
+\DeclareMathOperator{\wrap}{wrap}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\begin{document}
+
+\begin{titlepage}
+\thispagestyle{fancy}
+\centering
+\setstretch{1.05}
+\vspace*{0.5cm}
+{\zihao{2}\bfseries 东南大学\par}
+\vspace{0.5cm}
+{\zihao{1}\CJKfamily{reportkai}\bfseries 《智能机器人系统综合设计》\par}
+\vspace{0.45cm}
+{\zihao{1}\CJKfamily{reportkai}\bfseries 过程报告\par}
+\vspace{0.35cm}
+{\zihao{3}（实现与评估阶段）\par}
+\vspace{1.2cm}
+{\zihao{3}\bfseries 基于 Retargeting 与机器人技能学习的\par
+布料关键点检测与灵巧操作\par}
+\vspace{1.1cm}
+\renewcommand{\arraystretch}{1.45}
+\begin{tabular}{p{3cm}p{3cm}p{3cm}}
+\textbf{组员姓名} & \textbf{学号} & \textbf{评定成绩}\\
+周艺舵 & 08123112 & \\
+张博轩 & 08123113 & \\
+樊一鸣 & 08123124 & \\
+赵普为 & 08123127 & \\
+王昊然 & 08123217 & \\
+\end{tabular}
+\vfill
+\begin{tabular}{llll}
+专\quad 业：& 自动化 & 方\quad 向：& 智能机器人\\[0.7em]
+报告时间：& 2026 年 11 月 16 日 & 审阅教师：& 钱堃\\
+\end{tabular}
+\vspace{0.7cm}
+\end{titlepage}
+
+\setcounter{page}{2}
+\section{简介（Introduction）}
+
+本报告由双臂灵巧操作项目组共同整理，记录《智能机器人系统综合设计》课程项目在实现、联调与评估阶段的工作。团队成员为周艺舵、张博轩、樊一鸣、赵普为和王昊然，报告提交时间为 2026 年 11 月 16 日。项目以随机平铺毛巾的连续两次对折为目标，围绕双臂多指平台完成标定、遥操作示教、模仿学习和自主执行的系统集成。
+
+本阶段的重点是将各模块接入同一任务流程，并通过数值检查和实机实验检验其可用性。其中，七轴逆运动学（IK）从有限差分雅可比转向 Pinocchio 运动学与解析残差雅可比，是解决遥操作计算耗时问题的一项关键工作。本报告在汇总阶段成果的基础上，重点说明这一问题的发现、原因分析、实现步骤与验证结果。
+
+\section{项目描述（Project Description）}
+
+系统由两台 AgileX Nero 七自由度机械臂、两套 LinkerHand L20 灵巧手及一台 Intel RealSense L515 相机组成，双臂与双手共使用 46 个控制自由度。操作者通过 Pico 4 手部骨骼追踪示教；腕部增量运动经局部 IK 转为机械臂关节目标，人手骨骼经重定向转为灵巧手控制指令。同步采集的图像、关节状态与动作构成 ACT 策略的训练数据。
+
+自主折布采用两个阶段：代码生成智能体根据视觉观测完成一次对折和居中摆正，随后通过机械臂回位与示范首帧手型复现对齐起始状态，再由双臂 ACT 策略完成二次对折。标定文件、坐标约定与运动学接口在遥操作和自主执行模块之间复用，使数据采集、策略训练与部署使用一致的几何关系。
+
+本阶段安排的任务包括：完成相机外参与虚拟工具中心点（TCP）联合标定；建立双臂遥操作、同步下发和多模态录制链路；改进七轴 IK 的计算效率并保持原有验收条件；完成一次对折与二次对折数据采集及策略训练；实现智能体与 ACT 的交接，并开展模块基准测试和连续实机折布评估。阶段交付物包括运动学与控制代码、标定配置、示教数据、训练策略、集成流程及测试记录。
+
+\newpage
+\section{过程总结（Progress Summary）}
+
+\subsection{按接口组织分工与联调}
+
+团队按照标定与硬件、遥操作与运动学、策略训练、智能体和系统集成划分任务。联调以统一的坐标转换、动作维度和数据格式为基础：机械臂 IK 输入为基座系法兰目标位姿与七轴反馈角，输出为局部连续关节解；灵巧手使用 16 个有效控制槽位；双臂策略使用 14 维臂关节与 32 维手部槽位组成的 46 维动作。具体承担工作如下。
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\textwidth}{@{}p{1.3cm}Y@{}}
+\toprule
+成员 & 本阶段主要工作\\
+\midrule
+樊一鸣 & 七轴解析雅可比逆运动学、灵巧手重定向集成。\\
+赵普为 & 双臂折布智能体、MCP 服务与持久工作进程、运动原语、轨迹时间参数化及异常恢复。\\
+周艺舵 & LeRobot 数据管线、ResNet18 基线与冻结 DINOv3 改进 ACT 策略训练、调参与动作块评估。\\
+张博轩 & 四通道 SocketCAN、RGB-D 相机与虚拟 TCP 标定采样、实机联调与实验统计。\\
+王昊然 & 双臂遥操作架构、示教采集导出、ACT 实机集成、连续折布联调与项目总报告整理。\\
+\bottomrule
+\end{tabularx}
+\caption{项目组实现与评估阶段分工}
+\end{table}
+
+\subsection{完成基础平台与数据采集链路}
+
+在平台准备阶段，我们完成四通道 SocketCAN 映射与双臂设备接入，并通过联合优化估计相机外参及法兰下虚拟 TCP 偏移。右臂闭合捏合点和左臂首帧食指尖分别使用 11 个和 12 个样本，拟合 RMS 残差为 9.81 mm 和 4.86 mm。由两侧相机外参建立公共任务坐标系后，遥操作和智能体可以共享同一套几何配置。
+
+遥操作采用腕部相对增量锚定，重锚时同时记录人手参考位姿和机械臂法兰位姿。左右两侧在独立计算子进程中求解臂部 IK 与手部重定向，主控通过准备与提交两个阶段协调目标验收、双侧下发及数据录制。若一侧目标未通过检查，则取消另一侧待发目标并保持双臂状态，避免单侧继续运动造成录制状态不一致。
+
+在此基础上，团队完成一次对折与二次对折各 60 条示教轨迹，导出为 LeRobot v3.0 数据集。录制时保留图像、下发前反馈状态和目标动作的时序对应关系，供后续 46 维 ACT 策略训练与部署使用。
+
+\subsection{完成算法实现与系统评估}
+
+运动学模块首先保留原有 IK 目标函数与接口，随后将纯 Python 逐关节正运动学替换为 Pinocchio，并为 SciPy 最小二乘求解器提供解析雅可比。实现后依次进行正运动学一致性检查、解析导数与中心差分对照、局部求解和异常路径测试，最后在录制轨迹上与旧版本进行同机比较。具体问题处理过程见第四节。
+
+策略模块完成 ResNet18 基线 ACT 与冻结 DINOv3 ViT-S/16 改进模型训练，并引入训练期本体状态高斯噪声。系统集成阶段，我们将智能体一次对折、居中摆正、双臂回位、首帧手型复现和 ACT 二次对折串成连续流程。完整系统在随机初始平铺条件下连续进行 20 次实机试验，成功完成 17 次，端到端成功率为 85\%。这一结果对应完整系统实验，与单独 IK 离线验收采用不同评价口径。
+
+\section{遇到的问题（Problems Encountered）}
+
+\subsection{问题表现与任务影响}
+
+初版七轴 IK 使用 SciPy 的 \texttt{least\_squares} 进行带边界非线性最小二乘求解，未提供解析雅可比，由求解器通过有限差分近似残差导数。对七个关节逐一施加小扰动时，每次雅可比估计都需要额外调用残差函数；残差内部又使用 Python 按关节链重复计算正运动学。七轴冗余机构的局部优化因此累积了较多重复计算。
+
+双臂遥操作的目标周期为 20 Hz，即每拍 50 ms，除 IK 外还要完成手部重定向、总线发送、反馈读取和数据记录。旧实现的完整离线对比中，单次 IK 平均耗时为 46.760 ms，P95 为 75.516 ms；2,298 个目标中有 233 个触及 75 ms 软预算后返回中间解。中间解虽然仍能通过验收，但计算时延已挤占其他模块的执行时间，成为双臂同步调度需要解决的瓶颈。
+
+\subsection{保持目标函数并分析导数结构}
+
+为使新旧结果具有可比性，改造沿用原有任务定义与验收阈值，仅替换运动学计算与导数实现。记当前法兰位置与姿态为 $\bm p(\bm q)$、$\bm R(\bm q)$，目标为 $\bm p_d$、$\bm R_d$，当前反馈为 $\bm q_s$，原有十三维残差为
+\begin{equation}
+\bm e(\bm q)=
+\begin{bmatrix}
+(\bm p(\bm q)-\bm p_d)/\sigma_p\\[2pt]
+\log(\bm R_d\bm R(\bm q)^\top)^\vee/\sigma_R\\[2pt]
+\lambda_q\wrap(\bm q-\bm q_s)
+\end{bmatrix},
+\quad
+\begin{gathered}
+\sigma_p=0.002\ \mathrm m,\\
+\sigma_R=2\pi/180\ \mathrm{rad},\\
+\lambda_q=0.05.
+\end{gathered}
+\end{equation}
+优化仍在内缩后的关节上下限之间进行。位置和姿态残差按原有容差尺度归一化；正则项使冗余关节解尽量靠近反馈状态，维持遥操作的局部连续性。有限差分列向量的形式为
+\begin{equation}
+\bm J_{e,:,i}\approx
+\frac{\bm e(\bm q+h\bm u_i)-\bm e(\bm q)}{h},
+\end{equation}
+其中 $\bm u_i$ 为第 $i$ 个关节方向的单位向量。该方法便于建立初版，但需要重复求值，且差分步长需要在截断误差与浮点误差之间取舍。
+
+\subsection{替换正运动学并统一雅可比坐标系}
+
+实现的第一步是按项目 URDF 构建 Pinocchio 固定基座模型，检查七个关节名称、关节数组顺序和自由度均与原接口一致，末端仍采用 \texttt{link7}。调用模型正运动学替代 Python 逐关节矩阵累乘，避免在每次残差计算中重复进行解释器层面的运动链运算。
+
+第二步通过 Pinocchio 的法兰雅可比接口获取速度导数，参考系选用 \texttt{LOCAL\_WORLD\_ALIGNED}。这种表示以法兰原点为参考点、以 world 轴表达速度。若 URDF 在 world 与 \texttt{base\_link} 之间还存在固定变换，需将位姿转换为基座到法兰的变换，并将线速度块和角速度块同时旋转至 base 轴。最终得到与残差坐标一致的 $\bm J_v$ 和 $\bm J_\omega$。不能混用局部轴表达、world 轴表达或不同参考点的雅可比。
+
+\subsection{推导旋转残差的解析雅可比}
+
+转换过程中最关键的细节是：几何角速度雅可比并不直接等于旋转对数残差的导数。令
+\begin{equation}
+\bm E=\bm R_d\bm R(\bm q)^\top,\qquad
+\bm\phi=\log(\bm E)^\vee.
+\end{equation}
+关节发生微小变化 $\delta\bm q$ 时，基座轴表达的角位移为 $\bm J_\omega\delta\bm q$，末端旋转满足一阶关系
+\begin{align}
+\bm R(\bm q+\delta\bm q)
+&\simeq\exp([\bm J_\omega\delta\bm q]_\times)\bm R(\bm q),\\
+\bm E(\bm q+\delta\bm q)
+&\simeq\bm E\exp(-[\bm J_\omega\delta\bm q]_\times).
+\end{align}
+因此，对数映射右扰动导数记为 $\bm J_{\log_3}(\bm E)$ 时，旋转残差导数为 $-\bm J_{\log_3}(\bm E)\bm J_\omega/\sigma_R$。实现中使用 Pinocchio 的 \texttt{Jlog3}，完整残差雅可比为
+\begin{equation}
+\boxed{\quad
+\bm J_e(\bm q)=
+\begin{bmatrix}
+\bm J_v/\sigma_p\\[3pt]
+-\bm J_{\log_3}(\bm E)\bm J_\omega/\sigma_R\\[3pt]
+\lambda_q\bm I_7
+\end{bmatrix}
+\in\mathbb R^{13\times7}.
+\quad}
+\end{equation}
+位置块采用当前位置减目标位置，因此对应正号；旋转块采用目标旋转乘当前旋转转置，因此导数包含负号和对数映射修正。正则项的导数 $\lambda_q\bm I_7$ 适用于角差包裹函数当前连续分支内部，在 $\pm\pi$ 的分支跳变处不能视为全局光滑。本系统采用反馈附近的局部连续求解，仍需依靠最终步长检查约束输出。
+
+最终将解析函数通过 \texttt{jac=jacobian} 传入原有最小二乘求解器。此处“解析雅可比”指残差导数由运动学及李群公式直接计算，IK 本身仍是迭代优化，并非七轴逆运动学闭式解。残差也没有改写为整体的 $\mathrm{SE}(3)$ 对数误差，从而避免同时改变优化问题。
+
+\subsection{分层验证与旧版本对照}
+
+替换完成后，我们先比较新旧正运动学。测试覆盖关节限位范围内的 50 组随机关节姿态，以及非零固定 world 到 base 变换，检查位置、姿态与参考系处理的一致性。随后用中心差分逐列对照十三维残差的解析导数，覆盖小角度、一般角度及接近 $180^\circ$ 的旋转误差，重点检查旋转块的负号、乘法顺序和归一化尺度。接近 $180^\circ$ 的测试用于检查邻域内数值一致性，不意味着旋转对数在分支切换点处具有唯一光滑导数。
+
+功能检查继续覆盖真实小步目标、非法输入、关节限位、反馈小幅越界恢复和超时回退。原有单 seed、80 次函数求值上限、75 ms 软预算，以及位置误差严格小于 2 mm、姿态误差严格小于 $2^\circ$ 的验收条件均被保留；解析雅可比回调也检查同一时间预算。超时仅在最佳中间解通过限位、位姿和连续性验收时才允许返回。项目回归验证记录中，完整测试共 208 项通过。
+
+最终离线比较使用 20 段录制轨迹：共 2,318 行，跳过每段缺少上一帧反馈的第一行后得到 2,298 个目标。每个目标取当前帧的基座系法兰目标，seed 取上一帧记录的关节反馈；新旧实现使用同一 URDF、目标和 seed，并交替运行以减小执行顺序的影响。测试在 Intel Core i7-9700K、Python 3.10.20、SciPy 1.15.3 和 Pinocchio 4.1.0 环境完成，计时包含完整 \texttt{solve()} 调用。主要结果如下。
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.35}
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\textwidth}{@{}Yrr@{}}
+\toprule
+指标 & 旧实现 & Pinocchio + 解析雅可比\\
+\midrule
+验收成功目标数 & 2,298/2,298 & 2,298/2,298\\
+平均耗时（ms） & 46.760 & 9.567\\
+耗时中位数（ms） & 45.152 & 8.769\\
+耗时 P95（ms） & 75.516 & 17.888\\
+最大耗时（ms） & 76.194 & 33.866\\
+软预算回退次数 & 233 & 0\\
+平均残差调用次数 & 134.65 & 20.13\\
+\bottomrule
+\end{tabularx}
+\caption{相同目标与 seed 下的七轴 IK 完整调用离线对比}
+\end{table}
+
+求解器记录的函数求值上限与实际残差回调次数口径不同；表中残差调用次数包含有限差分产生的附加调用，用于反映完整计算开销。
+
+平均耗时缩短为原来的约五分之一，加速倍数为 4.89。该结果同时包含 Pinocchio 正运动学替换与解析雅可比的贡献，不能将全部提速单独归因于雅可比解析化。全部返回解再使用旧版正运动学独立计算位姿误差，并检查关节限位及配置中的约 $19.167^\circ$ 单关节连续性阈值；该阈值来自实验配置，与类中默认的 $10^\circ$ 有区别。
+
+对旧版未超时的 2,065 个目标，新旧解的最大单轴差值小于 $6.74\times10^{-7}$ 度；旧版超时目标的解则可能存在明显差别，全部样本中的最大单轴差为 $13.584^\circ$。因此，合理结论是两版保持同一优化目标与验收条件，新版减少了提前终止；不能声称所有关节命令逐点完全一致。
+
+本次对照使用固定的录制反馈 seed，没有将新解发送给机器人形成新的反馈轨迹，也不能精确重建录制当时发送前读取的全部状态。模型内通过率不等于实机定位精度，离线 IK 提速也不能单独证明完整控制循环达到 20 Hz。它说明运动学计算已释放较多时间余量，整拍周期仍需结合重定向、总线与反馈读取的分阶段统计评价。
+
+\section{需求改变（Changes in Requirements）}
+
+本阶段的最终任务仍是完成毛巾连续两次对折，硬件平台和 46 维动作接口保持一致。根据联调与评估结果，团队对实现路线和验收重点进行了以下调整。
+
+第一，IK 的要求从“能返回满足误差阈值的连续解”进一步明确为“在双臂控制时间窗口内高效求解，并保留失败诊断与安全回退”。为此采用 Pinocchio 与解析雅可比，但仍沿用原有目标函数、边界、软预算与输出验收；性能评价同时记录均值、P95、最大耗时及超时回退次数，避免只用单次成功或平均耗时判断可用性。
+
+第二，任务规划从纯 ACT 两阶段串联调整为智能体一次对折与居中摆正，再衔接 ACT 二次对折。随机初始平铺范围较大时，有限示范覆盖不足，纯策略第一阶段容易抓空；引入实时视觉定位与补抓后，第一阶段能根据当前布角状态调整动作。
+
+第三，将模块交接时的手型对齐纳入集成要求。机械臂回位后还需复现示范首帧五指槽位，使二次对折策略接收到接近训练起始分布的视觉、本体状态和手型。完整系统中，二次对折条件成功率为 17/18；仅回位而不做手型对齐的方案为 12/18，说明交接状态本身是系统需求的一部分。
+
+\section{总体评价（Overall Assessment）}
+
+本阶段完成了从硬件与标定、遥操作示教、策略学习到自主折布的系统贯通。各模块通过明确的位姿约定、数据维度和调用接口协作，阶段结果既包括可以执行的完整流程，也包括可复查的运动学对照与实机评估记录。连续 20 次随机平铺实机试验成功 17 次，表明当前方案已具备完成课程目标的能力，同时仍存在夹持失败和织物滑脱等实际限制。
+
+IK 改进过程使我们认识到，工程性能问题需要先定位重复计算，再核对数学导数与接口语义。直接取得几何雅可比并不足以完成替换，还必须处理旋转误差的对数映射、坐标表达、残差尺度和输出连续性。通过先保持目标函数，再分层核对正运动学、导数和轨迹结果，我们在维持原有验收条件的情况下，将平均 IK 耗时由 46.760 ms 降至 9.567 ms，并消除了此次离线样本中的超时回退。
+
+系统仍受单相机遮挡、缺少指尖触觉以及 ACT 动作队列内部视觉更新间隔的限制。后续应结合整拍耗时统计评价双臂实时性，并通过更直接的夹持状态感知和更及时的视觉反馈改善失败恢复。本阶段形成的接口、数据和验证方法，可作为后续扩展工作的基础。
+
+\end{document}
